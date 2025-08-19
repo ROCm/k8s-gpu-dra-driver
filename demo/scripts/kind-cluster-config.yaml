@@ -1,0 +1,43 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+featureGates:
+  DynamicResourceAllocation: true
+containerdConfigPatches:
+# Enable CDI as described in
+# https://tags.cncf.io/container-device-interface#containerd-configuration
+- |-
+  [plugins."io.containerd.grpc.v1.cri"]
+    enable_cdi = true
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+        extraArgs:
+          runtime-config: "resource.k8s.io/v1beta1=true"
+    scheduler:
+        extraArgs:
+          v: "1"
+    controllerManager:
+        extraArgs:
+          v: "1"
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        v: "1"
+- role: worker
+  extraMounts:
+    - hostPath: /dev/dri
+      containerPath: /dev/dri
+    - hostPath: /dev/kfd
+      containerPath: /dev/kfd
+    - hostPath: /sys
+      containerPath: /sys
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        v: "1"

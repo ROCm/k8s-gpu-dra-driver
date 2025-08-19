@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test
+
+---
+# 1. Define a single ResourceClaim for the shared GPU
+# This ResourceClaim will be *created once* and then referenced by multiple pods.
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaim
+metadata:
+  namespace: gpu-test
+  name: shared-gpu-claim # A distinct name for the shared claim
+spec:
+  devices:
+    requests:
+    - name: gpu
+      deviceClassName: gpu.amd.com
+      count: 2
+      # As discussed, the ability to *truly* share one physical GPU among
+      # multiple pods depends entirely on your specific 'gpu.amd.com' DRA driver's
+      # implementation of sharing mechanisms (e.g., time-slicing).
+      # If your driver doesn't support sharing, one pod might succeed and the other fail,
+      # or they might contend for the device.
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test
+  name: pod1 # First pod to use the shared GPU
+  labels:
+    app: pod-shared-gpu
+spec:
+  containers:
+  - name: ctr0
+    image: docker.io/rocm/pytorch:latest # Or a specific ROCm version, e.g., rocm/pytorch:rocm-6.4.2-ubuntu-22.04
+    command: ["bash", "-c"]
+    # Simplified args: run rocm-smi, then sleep
+    args: ["echo '--- Pod 1 ---'; /opt/rocm/bin/rocm-smi --showid --showuse --csv; echo 'Pod 1 complete. Sleeping...'; sleep infinity"]
+    resources:
+      claims:
+      - name: gpu # This name must match the the name in the `resourceClaims` list below
+  resourceClaims:
+  - name: gpu
+    # 2. Reference the *explicitly created* ResourceClaim, not a template
+    resourceClaimName: shared-gpu-claim
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test
+  name: pod2 # Second pod to use the SAME shared GPU
+  labels:
+    app: pod-shared-gpu
+spec:
+  containers:
+  - name: ctr0
+    image: docker.io/rocm/pytorch:latest # Or a specific ROCm version
+    command: ["bash", "-c"]
+    # Simplified args: run rocm-smi, then sleep
+    args: ["echo '--- Pod 2 ---'; /opt/rocm/bin/rocm-smi --showid --showuse --csv; echo 'Pod 2 complete. Sleeping...'; sleep infinity"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    # 2. Reference the *same explicit* ResourceClaim
+    resourceClaimName: shared-gpu-claim
