@@ -59,12 +59,12 @@ func FamilyIDtoString(familyId uint32) (string, error) {
 		return "RV", nil
 	case C.AMDGPU_FAMILY_NV:
 		return "NV", nil
-	case C.AMDGPU_FAMILY_VGH:
-		return "VGH", nil
+	//case C.AMDGPU_FAMILY_VGH:
+	//	return "VGH", nil
 	//case C.AMDGPU_FAMILY_GC_11_0_0:
 	//	return "GC_11_0_0", nil
-	case C.AMDGPU_FAMILY_YC:
-		return "YC", nil
+	//case C.AMDGPU_FAMILY_YC:
+	//	return "YC", nil
 	//case C.AMDGPU_FAMILY_GC_11_0_1:
 	//	return "GC_11_0_1", nil
 	//case C.AMDGPU_FAMILY_GC_10_3_6:
