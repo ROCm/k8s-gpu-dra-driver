@@ -18,15 +18,17 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"sync"
+	"syscall"
 
+	"golang.org/x/sys/unix"
 	resourceapi "k8s.io/api/resource/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
-
 	configapi "sigs.k8s.io/dra-example-driver/api/example.com/resource/gpu/v1alpha1"
 	"sigs.k8s.io/dra-example-driver/pkg/consts"
 
@@ -273,6 +275,37 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 	return nil
 }
 
+// getDeviceAttrs gets the major, minor, type, and permissions for a given device path.
+func (s *DeviceState) getDeviceAttrs(path string) (major, minor int64, devType, permissions string, err error) {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, "", "", fmt.Errorf("failed to stat device %s: %w", path, err)
+	}
+
+	stat, ok := fileInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, "", "", fmt.Errorf("failed to get syscall.Stat_t for %s", path)
+	}
+
+	// Use unix helpers to extract major and minor device numbers
+	major = int64(unix.Major(uint64(stat.Rdev)))
+	minor = int64(unix.Minor(uint64(stat.Rdev)))
+
+	// Determine device type
+	if (fileInfo.Mode() & os.ModeCharDevice) != 0 {
+		devType = "c"
+	} else if (fileInfo.Mode() & os.ModeDevice) != 0 {
+		devType = "b"
+	} else {
+		return 0, 0, "", "", fmt.Errorf("unsupported file type for device %s: %v", path, fileInfo.Mode())
+	}
+
+	// Simplified permissions
+	permissions = "rwm"
+
+	return major, minor, devType, permissions, nil
+}
+
 // applyConfig applies a configuration to a set of device allocation results.
 func (s *DeviceState) applyConfig(config *configapi.GpuConfig, results []*resourceapi.DeviceRequestAllocationResult) (PerDeviceCDIContainerEdits, error) {
 	perDeviceEdits := make(PerDeviceCDIContainerEdits)
@@ -291,31 +324,48 @@ func (s *DeviceState) applyConfig(config *configapi.GpuConfig, results []*resour
 		//	// TODO implement space partitioning config when it is available
 		//}
 
+		cardPath := fmt.Sprintf("/dev/dri/card%d", card)
+		renderDPath := fmt.Sprintf("/dev/dri/renderD%d", renderD)
+		kfdPath := "/dev/kfd"
+
+		cardMajor, cardMinor, cardDevType, cardPermission, err := s.getDeviceAttrs(cardPath)
+		if err != nil {
+			return nil, fmt.Errorf("error getting device attrs for %s: %w", cardPath, err)
+		}
+		renderDMajor, renderDMinor, renderDDevType, renderDPermission, err := s.getDeviceAttrs(renderDPath)
+		if err != nil {
+			return nil, fmt.Errorf("error getting device attrs for %s: %w", renderDPath, err)
+		}
+		kfdMajor, kfdMinor, kfdDevType, kfdPermission, err := s.getDeviceAttrs(kfdPath)
+		if err != nil {
+			return nil, fmt.Errorf("error getting device attrs for %s: %w", kfdPath, err)
+		}
+
 		edits := &cdispec.ContainerEdits{
 			DeviceNodes: []*cdispec.DeviceNode{
 				{
 					Path:        "/dev/kfd",
 					HostPath:    "/dev/kfd",
-					Type:        "c",
-					Major:       235,
-					Minor:       0,
-					Permissions: "rw",
+					Type:        kfdDevType,
+					Major:       kfdMajor,
+					Minor:       kfdMinor,
+					Permissions: kfdPermission,
 				},
 				{
 					Path:        fmt.Sprintf("/dev/dri/card%d", card),
 					HostPath:    fmt.Sprintf("/dev/dri/card%d", card),
-					Type:        "c",
-					Major:       226,
-					Minor:       int64(card),
-					Permissions: "rw",
+					Type:        cardDevType,
+					Major:       cardMajor,
+					Minor:       cardMinor,
+					Permissions: cardPermission,
 				},
 				{
 					Path:        fmt.Sprintf("/dev/dri/renderD%d", renderD),
 					HostPath:    fmt.Sprintf("/dev/dri/renderD%d", renderD),
-					Major:       226,
-					Minor:       int64(renderD),
-					Type:        "c",
-					Permissions: "rw",
+					Type:        renderDDevType,
+					Major:       renderDMajor,
+					Minor:       renderDMinor,
+					Permissions: renderDPermission,
 				},
 			},
 		}

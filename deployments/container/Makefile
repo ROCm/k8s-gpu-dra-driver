@@ -20,8 +20,8 @@ DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
 
 include $(CURDIR)/common.mk
 
-IMAGE_TAG := $(VERSION)
-IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
+IMAGE_TAG ?= $(VERSION)
+IMAGE ?= $(IMAGE_NAME):$(IMAGE_TAG)
 
 ##### Public rules #####
 .PHONY: $(DISTRIBUTIONS)

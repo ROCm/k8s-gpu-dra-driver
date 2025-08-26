@@ -35,4 +35,4 @@ helm upgrade -i \
   --namespace dra-example-driver \
   --set webhook.enabled=true \
   dra-example-driver \
-  deployments/helm/dra-example-driver
+  deployments/helm/rocm-k8s-gpu-dra-driver
