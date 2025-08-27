@@ -16,7 +16,7 @@ spec:
     requests:
     - name: gpu
       deviceClassName: gpu.amd.com
-      count: 2
+      count: 1
       # As discussed, the ability to *truly* share one physical GPU among
       # multiple pods depends entirely on your specific 'gpu.amd.com' DRA driver's
       # implementation of sharing mechanisms (e.g., time-slicing).
