@@ -19,7 +19,7 @@ package main
 import (
 	"fmt"
 
-	resourceapi "k8s.io/api/resource/v1beta1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -45,33 +45,31 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	for pciAddr, gpuInfoMap := range allAMDGPUs {
 		device := resourceapi.Device{
 			Name: getDeviceName(gpuInfoMap["card"].(int), gpuInfoMap["renderD"].(int)),
-			Basic: &resourceapi.BasicDevice{
-				Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"card": {
-						IntValue: ptr.To(int64(gpuInfoMap["card"].(int))),
-					},
-					"renderD": {
-						IntValue: ptr.To(int64(gpuInfoMap["renderD"].(int))),
-					},
-					"devID": {
-						StringValue: ptr.To(fmt.Sprintf("%s", gpuInfoMap["devID"].(string))),
-					},
-					"pciAddr": {
-						StringValue: ptr.To(pciAddr),
-					},
-					// TODO fill in more attributes as needed
-					//"model": {
-					//	StringValue: ptr.To("LATEST-GPU-MODEL"),
-					//},
-					//"driverVersion": {
-					//	VersionValue: ptr.To("1.0.0"),
-					//},
+			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				"card": {
+					IntValue: ptr.To(int64(gpuInfoMap["card"].(int))),
 				},
-				// TODO: fill in more attributes as needed
-				Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
-					"memory": {
-						Value: resource.MustParse("80Gi"),
-					},
+				"renderD": {
+					IntValue: ptr.To(int64(gpuInfoMap["renderD"].(int))),
+				},
+				"devID": {
+					StringValue: ptr.To(fmt.Sprintf("%s", gpuInfoMap["devID"].(string))),
+				},
+				"pciAddr": {
+					StringValue: ptr.To(pciAddr),
+				},
+				// TODO fill in more attributes as needed
+				//"model": {
+				//	StringValue: ptr.To("LATEST-GPU-MODEL"),
+				//},
+				//"driverVersion": {
+				//	VersionValue: ptr.To("1.0.0"),
+				//},
+			},
+			// TODO: fill in more attributes as needed
+			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+				"memory": {
+					Value: resource.MustParse("80Gi"),
 				},
 			},
 		}

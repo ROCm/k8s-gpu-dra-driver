@@ -24,10 +24,10 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-	resourceapi "k8s.io/api/resource/v1beta1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
+	drapv1 "k8s.io/kubelet/pkg/apis/dra/v1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	configapi "sigs.k8s.io/dra-example-driver/api/example.com/resource/gpu/v1alpha1"
 	"sigs.k8s.io/dra-example-driver/pkg/consts"
@@ -47,12 +47,12 @@ type OpaqueDeviceConfig struct {
 }
 
 type PreparedDevice struct {
-	drapbv1.Device
+	drapv1.Device
 	ContainerEdits *cdiapi.ContainerEdits
 }
 
-func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
-	var devices []*drapbv1.Device
+func (pds PreparedDevices) GetDevices() []*drapv1.Device {
+	var devices []*drapv1.Device
 	for _, pd := range pds {
 		devices = append(devices, &pd.Device)
 	}
@@ -112,7 +112,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
-func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
+func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapv1.Device, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -256,7 +256,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	for _, results := range configResultsMap {
 		for _, result := range results {
 			device := &PreparedDevice{
-				Device: drapbv1.Device{
+				Device: drapv1.Device{
 					RequestNames: []string{result.Request},
 					PoolName:     result.Pool,
 					DeviceName:   result.Device,
