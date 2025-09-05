@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
-	drap "k8s.io/kubelet/pkg/apis/dra/v1"
+	drapb "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 
 	"sigs.k8s.io/dra-example-driver/pkg/consts"
@@ -44,7 +44,7 @@ type healthcheck struct {
 	wg     sync.WaitGroup
 
 	regClient registerapi.RegistrationClient
-	draClient drap.DRAPluginClient
+	draClient drapb.DRAPluginClient
 }
 
 func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error) {
@@ -93,7 +93,7 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 	healthcheck := &healthcheck{
 		server:    server,
 		regClient: registerapi.NewRegistrationClient(regConn),
-		draClient: drap.NewDRAPluginClient(draConn),
+		draClient: drapb.NewDRAPluginClient(draConn),
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
@@ -137,7 +137,7 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 	}
 	log.V(5).Info("Successfully invoked GetInfo", "info", info)
 
-	_, err = h.draClient.NodePrepareResources(ctx, &drap.NodePrepareResourcesRequest{})
+	_, err = h.draClient.NodePrepareResources(ctx, &drapb.NodePrepareResourcesRequest{})
 	if err != nil {
 		log.Error(err, "failed to call NodePrepareResources")
 		return status, nil
