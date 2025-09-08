@@ -1,18 +1,18 @@
-/**
- * Copyright 2018 Advanced Micro Devices, Inc.  All rights reserved.
- *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
-**/
+/*
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the \"License\");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an \"AS IS\" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 // Package amdgpu is a collection of utility functions to access various properties
 // of AMD GPU via Linux kernel interfaces like sysfs and ioctl (using libdrm.)
@@ -59,20 +59,6 @@ func FamilyIDtoString(familyId uint32) (string, error) {
 		return "RV", nil
 	case C.AMDGPU_FAMILY_NV:
 		return "NV", nil
-	//case C.AMDGPU_FAMILY_VGH:
-	//	return "VGH", nil
-	//case C.AMDGPU_FAMILY_GC_11_0_0:
-	//	return "GC_11_0_0", nil
-	//case C.AMDGPU_FAMILY_YC:
-	//	return "YC", nil
-	//case C.AMDGPU_FAMILY_GC_11_0_1:
-	//	return "GC_11_0_1", nil
-	//case C.AMDGPU_FAMILY_GC_10_3_6:
-	//	return "GC_10_3_6", nil
-	//case C.AMDGPU_FAMILY_GC_10_3_7:
-	//	return "GC_10_3_7", nil
-	//case C.AMDGPU_FAMILY_GC_11_5_0:
-	//	return "GC_11_5_0", nil
 	default:
 		ret := ""
 		err := fmt.Errorf("Unknown Family ID: %d", familyId)
@@ -98,45 +84,37 @@ func GetCardFamilyName(cardName string) (string, error) {
 	return FamilyIDtoString(uint32(info.family_id))
 }
 
-func GetDevIdsFromTopology(topoRootParam ...string) map[int]string {
-	topoRoot := "/sys/class/kfd/kfd"
-	if len(topoRootParam) == 1 {
-		topoRoot = topoRootParam[0]
+// GetDriverVersion reads the AMDGPU driver version and source version
+func GetDriverVersion() (string, string) {
+	// Find all available cards to read driver version from
+	matches, _ := filepath.Glob("/sys/class/drm/card*/device/driver/module/version")
+	if len(matches) == 0 {
+		glog.Warningf("No AMD GPU cards found for driver version reading")
+		return "", ""
 	}
 
-	renderDevIds := make(map[int]string)
-	var nodeFiles []string
-	var err error
+	for _, versionPath := range matches {
+		b, err := ioutil.ReadFile(versionPath)
+		if err != nil {
+			continue
+		}
+		driverVersion := strings.TrimSpace(string(b))
 
-	if nodeFiles, err = filepath.Glob(topoRoot + "/topology/nodes/*/properties"); err != nil {
-		glog.Fatalf("glob error: %s", err)
-		return renderDevIds
+		srcVersionPath := strings.Replace(versionPath, "/version", "/srcversion", 1)
+		b, err = ioutil.ReadFile(srcVersionPath)
+		if err != nil {
+			continue
+		}
+		driverSrcVersion := strings.TrimSpace(string(b))
+
+		// Return as soon as we find a valid driver version and src version
+		if driverVersion != "" && driverSrcVersion != "" {
+			return driverVersion, driverSrcVersion
+		}
 	}
 
-	for _, nodeFile := range nodeFiles {
-		glog.Info("Parsing " + nodeFile)
-		v, e := ParseTopologyProperties(nodeFile, topoDrmRenderMinorRe)
-		if e != nil {
-			glog.Error(e)
-			continue
-		}
-
-		if v <= 0 {
-			continue
-		}
-
-		// Fetch unique_id value from properties file.
-		// This unique_id is the same for the real gpu as well as its partitions so it will be used to associate the partitions to the real gpu
-		devID, e := ParseTopologyPropertiesString(nodeFile, topoUniqueIdRe)
-		if e != nil {
-			glog.Error(e)
-			continue
-		}
-
-		renderDevIds[int(v)] = devID
-	}
-
-	return renderDevIds
+	glog.Warningf("Failed to read AMDGPU driver version or src version from any card")
+	return "", ""
 }
 
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
@@ -152,8 +130,12 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 	devID := ""
 	devices := make(map[string]map[string]interface{})
 	card, renderD, nodeId := 0, 128, 0
-	renderDevIds := GetDevIdsFromTopology()
-	renderNodeIds := GetNodeIdsFromTopology()
+
+	// Get comprehensive topology information once instead of multiple calls
+	topologyInfo := GetTopologyInfo()
+
+	// Get driver version once for all devices
+	globalDriverVersion, globalDriverSrcVersion := GetDriverVersion()
 
 	for _, path := range matches {
 		computePartitionFile := filepath.Join(path, "current_compute_partition")
@@ -198,17 +180,59 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 				card, _ = strconv.Atoi(name[4:])
 			case name[0:7] == "renderD":
 				renderD, _ = strconv.Atoi(name[7:])
-				if val, exists := renderDevIds[renderD]; exists {
-					devID = val
-				}
-				if id, exists := renderNodeIds[renderD]; exists {
-					nodeId = id
+				if info, exists := topologyInfo[renderD]; exists {
+					devID = info.UniqueID
+					nodeId = info.NodeID
 				}
 			}
 
 		}
-		// add devID so that we can identify later which gpu should get reported under which resource type
-		devices[filepath.Base(path)] = map[string]interface{}{"card": card, "renderD": renderD, "devID": devID, "computePartitionType": computePartitionType, "memoryPartitionType": memoryPartitionType, "numaNode": numaNode, "nodeId": nodeId}
+		// Extract PCI address from path (e.g., "0000:19:00.0" from "/sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0")
+		pciAddr := filepath.Base(path)
+
+		// Get card family name
+		familyName := ""
+		if cardFamily, err := GetCardFamilyName(fmt.Sprintf("card%d", card)); err != nil {
+			glog.Warningf("Failed to get card family name for card%d: %s", card, err)
+		} else {
+			familyName = cardFamily
+		}
+
+		// Get product name
+		productName := ""
+		productNamePath := fmt.Sprintf("/sys/class/drm/card%d/device/product_name", card)
+		if b, err := ioutil.ReadFile(productNamePath); err != nil {
+			glog.Warningf("Failed to read product name from %s: %s", productNamePath, err)
+		} else {
+			replacer := strings.NewReplacer(" ", "_", "(", "", ")", "")
+			productName = replacer.Replace(strings.TrimSpace(string(b)))
+		}
+
+		// add devID and topology info so that we can identify later which gpu should get reported under which resource type
+		deviceInfo := map[string]interface{}{
+			"card":                 card,
+			"renderD":              renderD,
+			"devID":                devID,
+			"pciAddr":              pciAddr,
+			"driverVersion":        globalDriverVersion,
+			"driverSrcVersion":     globalDriverSrcVersion,
+			"computePartitionType": computePartitionType,
+			"memoryPartitionType":  memoryPartitionType,
+			"numaNode":             numaNode,
+			"nodeId":               nodeId,
+			"family":               familyName,
+			"productName":          productName,
+		}
+
+		// Add SIMD and CU information from topology if available
+		if info, exists := topologyInfo[renderD]; exists {
+			deviceInfo["simdCount"] = info.SimdCount
+			deviceInfo["simdPerCU"] = info.SimdPerCU
+			deviceInfo["cuCount"] = info.CUCount
+			deviceInfo["vramBytes"] = info.VramBytes
+		}
+
+		devices[filepath.Base(path)] = deviceInfo
 	}
 
 	// certain products have additional devices (such as MI300's partitions)
@@ -221,6 +245,9 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 
 		computePartitionType, memoryPartitionType := "", ""
 		numaNode := -1
+		parentPciAddr := ""
+		familyName := ""
+		productName := ""
 
 		for _, devPath := range devPaths {
 			switch name := filepath.Base(devPath); {
@@ -228,98 +255,63 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 				card, _ = strconv.Atoi(name[4:])
 			case name[0:7] == "renderD":
 				renderD, _ = strconv.Atoi(name[7:])
-				if val, exists := renderDevIds[renderD]; exists {
-					devID = val
+				if info, exists := topologyInfo[renderD]; exists {
+					devID = info.UniqueID
+					nodeId = info.NodeID
 				}
-				// Set the computePartitionType and memoryPartitionType from the real GPU or from other partitions using the common devID
+				// Set the computePartitionType, memoryPartitionType, numaNode, PCI address from the real GPU using the common devID
 				for _, device := range devices {
 					if device["devID"] == devID {
+						parentPciAddr = device["pciAddr"].(string)
+						numaNode = device["numaNode"].(int)
+						familyName = device["family"].(string)
+						productName = device["productName"].(string)
 						if device["computePartitionType"].(string) != "" && device["memoryPartitionType"].(string) != "" {
 							computePartitionType = device["computePartitionType"].(string)
 							memoryPartitionType = device["memoryPartitionType"].(string)
-							numaNode = device["numaNode"].(int)
 							break
 						}
 					}
-				}
-				if id, exists := renderNodeIds[renderD]; exists {
-					nodeId = id
 				}
 			}
 		}
 		// This is needed because some of the visible renderD are actually not valid
 		// Their validity depends on topology information from KFD
 
-		if _, exists := renderDevIds[renderD]; !exists {
+		if _, exists := topologyInfo[renderD]; !exists {
 			continue
 		}
-		if numaNode == -1 {
+		if numaNode == -1 || parentPciAddr == "" {
 			continue
 		}
-		devices[filepath.Base(path)] = map[string]interface{}{"card": card, "renderD": renderD, "devID": devID, "computePartitionType": computePartitionType, "memoryPartitionType": memoryPartitionType, "numaNode": numaNode, "nodeId": nodeId}
+
+		deviceInfo := map[string]interface{}{
+			"card":                 card,
+			"renderD":              renderD,
+			"devID":                devID,
+			"pciAddr":              parentPciAddr,
+			"driverVersion":        globalDriverVersion,
+			"driverSrcVersion":     globalDriverSrcVersion,
+			"computePartitionType": computePartitionType,
+			"memoryPartitionType":  memoryPartitionType,
+			"numaNode":             numaNode,
+			"nodeId":               nodeId,
+			"family":               familyName,
+			"productName":          productName,
+		}
+
+		// Add SIMD and CU information from topology if available
+		if info, exists := topologyInfo[renderD]; exists {
+			deviceInfo["simdCount"] = info.SimdCount
+			deviceInfo["simdPerCU"] = info.SimdPerCU
+			deviceInfo["cuCount"] = info.CUCount
+			deviceInfo["vramBytes"] = info.VramBytes
+		}
+
+		devices[filepath.Base(path)] = deviceInfo
 	}
 	glog.Infof("Devices map: %v", devices)
 	return devices
-}
-
-func UniquePartitionConfigCount(devices map[string]map[string]interface{}) map[string]int {
-	partitionCountMap := make(map[string]int)
-
-	for _, device := range devices {
-		computePartitionType := device["computePartitionType"].(string)
-		memoryPartitionType := device["memoryPartitionType"].(string)
-
-		if computePartitionType != "" && memoryPartitionType != "" {
-			overallPartition := computePartitionType + "_" + memoryPartitionType
-			partitionCountMap[overallPartition]++
-		}
-	}
-
-	glog.Infof("Partition counts: %v", partitionCountMap)
-	return partitionCountMap
-}
-
-func IsHomogeneous() bool {
-	gpus := GetAMDGPUs()
-	partitionCountMap := UniquePartitionConfigCount(gpus)
-
-	// Homogeneous if the map is empty or contains exactly one partition type
-	return len(partitionCountMap) <= 1
-}
-
-func IsComputePartitionSupported() bool {
-	// Finding GPU paths using the same way its done in other functions like GetAMDGPUs()
-	matches, _ := filepath.Glob("/sys/module/amdgpu/drivers/pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*")
-	if len(matches) == 0 {
-		return false
-	}
-	// Check any one GPU to see if it supports partition (All GPU's are of same model on the node)
-	path := matches[0]
-	computePartitionFile := filepath.Join(path, "available_compute_partition")
-
-	if _, err := os.Stat(computePartitionFile); err != nil {
-		return false
-	}
-
-	// If file exists, then compute partition is supported
-	return true
-}
-
-func IsMemoryPartitionSupported() bool {
-	// Finding GPU paths using the same way its done in other functions like GetAMDGPUs()
-	matches, _ := filepath.Glob("/sys/module/amdgpu/drivers/pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*")
-	if len(matches) == 0 {
-		return false
-	}
-	// Check any one GPU to see if it supports partition (All GPU's are of same model on the node)
-	path := matches[0]
-	memoryPartitionFile := filepath.Join(path, "available_memory_partition")
-
-	if _, err := os.Stat(memoryPartitionFile); err != nil {
-		return false
-	}
-	// If file exists, then memory partition is supported
-	return true
 }
 
 // AMDGPU check if a particular card is an AMD GPU by checking the device's vendor ID
@@ -367,68 +359,6 @@ func openAMDGPU(cardName string) (C.amdgpu_device_handle, error) {
 
 	return devHandle, nil
 
-}
-
-// DevFunctional does a simple check on whether a particular GPU is working
-// by attempting to open the device
-func DevFunctional(cardName string) bool {
-	devHandle, err := openAMDGPU(cardName)
-	if err != nil {
-		glog.Errorf("%s", err)
-		return false
-	}
-	defer C.amdgpu_device_deinitialize(devHandle)
-
-	return true
-}
-
-// GetFirmwareVersions obtain a subset of firmware and feature version via libdrm
-// amdgpu_query_firmware_version
-func GetFirmwareVersions(cardName string) (map[string]uint32, map[string]uint32, error) {
-	devHandle, err := openAMDGPU(cardName)
-	if err != nil {
-		return map[string]uint32{}, map[string]uint32{}, err
-	}
-	defer C.amdgpu_device_deinitialize(devHandle)
-
-	var ver C.uint32_t
-	var feat C.uint32_t
-
-	featVersions := map[string]uint32{}
-	fwVersions := map[string]uint32{}
-
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_VCE, 0, 0, &ver, &feat)
-	featVersions["VCE"] = uint32(feat)
-	fwVersions["VCE"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_UVD, 0, 0, &ver, &feat)
-	featVersions["UVD"] = uint32(feat)
-	fwVersions["UVD"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GMC, 0, 0, &ver, &feat)
-	featVersions["MC"] = uint32(feat)
-	fwVersions["MC"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GFX_ME, 0, 0, &ver, &feat)
-	featVersions["ME"] = uint32(feat)
-	fwVersions["ME"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GFX_PFP, 0, 0, &ver, &feat)
-	featVersions["PFP"] = uint32(feat)
-	fwVersions["PFP"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GFX_CE, 0, 0, &ver, &feat)
-	featVersions["CE"] = uint32(feat)
-	fwVersions["CE"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GFX_RLC, 0, 0, &ver, &feat)
-	featVersions["RLC"] = uint32(feat)
-	fwVersions["RLC"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_GFX_MEC, 0, 0, &ver, &feat)
-	featVersions["MEC"] = uint32(feat)
-	fwVersions["MEC"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_SMC, 0, 0, &ver, &feat)
-	featVersions["SMC"] = uint32(feat)
-	fwVersions["SMC"] = uint32(ver)
-	C.amdgpu_query_firmware_version(devHandle, C.AMDGPU_INFO_FW_SDMA, 0, 0, &ver, &feat)
-	featVersions["SDMA0"] = uint32(feat)
-	fwVersions["SDMA0"] = uint32(ver)
-
-	return featVersions, fwVersions, nil
 }
 
 // ParseTopologyProperties parse for a property value in kfd topology file
@@ -484,76 +414,112 @@ func ParseTopologyPropertiesString(path string, re *regexp.Regexp) (string, erro
 	return v, e
 }
 
-var fwVersionRe = regexp.MustCompile(`(\w+) feature version: (\d+), firmware version: (0x[0-9a-fA-F]+)`)
-
-func parseDebugFSFirmwareInfo(path string) (map[string]uint32, map[string]uint32) {
-	feat := make(map[string]uint32)
-	fw := make(map[string]uint32)
-
-	glog.Info("Parsing " + path)
-	f, e := os.Open(path)
-	if e == nil {
-		scanner := bufio.NewScanner(f)
-		var v int64
-		for scanner.Scan() {
-			m := fwVersionRe.FindStringSubmatch(scanner.Text())
-			if m != nil {
-				v, _ = strconv.ParseInt(m[2], 0, 32)
-				feat[m[1]] = uint32(v)
-				v, _ = strconv.ParseInt(m[3], 0, 32)
-				fw[m[1]] = uint32(v)
-			}
-		}
-	} else {
-		glog.Error("Fail to open " + path)
-	}
-
-	return feat, fw
+// TopologyInfo holds topology information for a render device
+type TopologyInfo struct {
+	RenderDeviceID int    // The render device ID (e.g., 134 for renderD134)
+	UniqueID       string // Unique ID from topology
+	NodeID         int    // KFD node ID
+	SimdCount      int    // Number of SIMD units
+	SimdPerCU      int    // SIMD units per compute unit
+	CUCount        int    // Computed: SimdCount / SimdPerCU
+	VramBytes      uint64 // VRAM size in bytes
 }
 
 var topoDrmRenderMinorRe = regexp.MustCompile(`drm_render_minor\s(\d+)`)
 var topoUniqueIdRe = regexp.MustCompile(`unique_id\s(\d+)`)
+var topoSimdCountRe = regexp.MustCompile(`simd_count\s(\d+)`)
+var topoSimdPerCuRe = regexp.MustCompile(`simd_per_cu\s(\d+)`)
+var topoSizeInBytesRe = regexp.MustCompile(`size_in_bytes\s(\d+)`)
 
-func GetNodeIdsFromTopology(topoRootParam ...string) map[int]int {
+// GetTopologyInfo returns comprehensive topology information for all render devices
+// This combines the functionality of GetDevIdsFromTopology and GetNodeIdsFromTopology
+func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
 	topoRoot := "/sys/class/kfd/kfd"
 	if len(topoRootParam) == 1 {
 		topoRoot = topoRootParam[0]
 	}
 
-	renderNodeIds := make(map[int]int)
+	topologyInfoMap := make(map[int]*TopologyInfo)
 	var nodeFiles []string
 	var err error
 
 	if nodeFiles, err = filepath.Glob(topoRoot + "/topology/nodes/*/properties"); err != nil {
 		glog.Fatalf("glob error: %s", err)
-		return renderNodeIds
+		return topologyInfoMap
 	}
 
 	for _, nodeFile := range nodeFiles {
 		glog.Info("Parsing " + nodeFile)
-		v, e := ParseTopologyProperties(nodeFile, topoDrmRenderMinorRe)
+
+		// Parse render device minor number
+		renderMinor, e := ParseTopologyProperties(nodeFile, topoDrmRenderMinorRe)
 		if e != nil {
 			glog.Error(e)
 			continue
 		}
 
-		if v <= 0 {
+		if renderMinor <= 0 {
 			continue
 		}
-		// For a certain drm_render_minor value in the properties file, we are assigning the nodeID as the <int> value from topology/nodes/<int>/properties/
-		// Later we use the renderD of a certain GPU as the key to fetch its nodeID from here
-		// Extract the node index (the folder name) from the file path
-		nodeIndex := filepath.Base(filepath.Dir(nodeFile))
 
-		// Convert the node index to an integer
+		// Parse unique ID
+		uniqueID, e := ParseTopologyPropertiesString(nodeFile, topoUniqueIdRe)
+		if e != nil {
+			glog.Error(e)
+			continue
+		}
+
+		// Extract node ID from file path
+		nodeIndex := filepath.Base(filepath.Dir(nodeFile))
 		nodeId, err := strconv.Atoi(nodeIndex)
 		if err != nil {
 			glog.Errorf("Failed to convert node index %s to int: %v", nodeIndex, err)
 			continue
 		}
 
-		renderNodeIds[int(v)] = nodeId
+		// Parse SIMD count
+		simdCount, e := ParseTopologyProperties(nodeFile, topoSimdCountRe)
+		if e != nil {
+			glog.Warningf("Failed to parse simd_count from %s: %v", nodeFile, e)
+			simdCount = 0 // Default to 0 if not available
+		}
+
+		// Parse SIMD per CU
+		simdPerCU, e := ParseTopologyProperties(nodeFile, topoSimdPerCuRe)
+		if e != nil {
+			glog.Warningf("Failed to parse simd_per_cu from %s: %v", nodeFile, e)
+			simdPerCU = 1 // Default to 1 to avoid division by zero
+		}
+
+		// Calculate CU count
+		cuCount := 0
+		if simdPerCU > 0 {
+			cuCount = int(simdCount / simdPerCU)
+		}
+
+		// Parse VRAM information from mem_banks
+		var vramBytes uint64 = 0
+		vramPropertiesPath := fmt.Sprintf("%s/topology/nodes/%d/mem_banks/0/properties", topoRoot, nodeId)
+		vramSize, e := ParseTopologyProperties(vramPropertiesPath, topoSizeInBytesRe)
+		if e != nil {
+			glog.Warningf("Failed to parse VRAM size from %s: %v", vramPropertiesPath, e)
+			// VRAM parsing failed, continue with 0
+		} else {
+			vramBytes = uint64(vramSize)
+			glog.Infof("Found VRAM size: %d bytes for renderD%d", vramBytes, renderMinor)
+		}
+
+		// Create topology info structure
+		topologyInfoMap[int(renderMinor)] = &TopologyInfo{
+			RenderDeviceID: int(renderMinor),
+			UniqueID:       uniqueID,
+			NodeID:         nodeId,
+			SimdCount:      int(simdCount),
+			SimdPerCU:      int(simdPerCU),
+			CUCount:        cuCount,
+			VramBytes:      vramBytes,
+		}
 	}
 
-	return renderNodeIds
+	return topologyInfoMap
 }

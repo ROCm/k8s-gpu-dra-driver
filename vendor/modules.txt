@@ -615,6 +615,7 @@ k8s.io/component-base/version
 k8s.io/dynamic-resource-allocation/api/v1beta1
 k8s.io/dynamic-resource-allocation/api/v1beta2
 k8s.io/dynamic-resource-allocation/client
+k8s.io/dynamic-resource-allocation/deviceattribute
 k8s.io/dynamic-resource-allocation/kubeletplugin
 k8s.io/dynamic-resource-allocation/resourceclaim
 k8s.io/dynamic-resource-allocation/resourceslice
