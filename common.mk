@@ -14,19 +14,16 @@
 
 GOLANG_VERSION ?= 1.24.2
 
-DRIVER_NAME := dra-example-driver
-MODULE := sigs.k8s.io/$(DRIVER_NAME)
+DRIVER_NAME := k8s-gpu-dra-driver
+MODULE := github.com/ROCm/$(DRIVER_NAME)
 
 VERSION  ?= v0.1.0
 vVERSION := v$(VERSION:v%=%)
 
-VENDOR := example.com
+VENDOR := amd.com
 APIS := gpu/v1alpha1
 
-PLURAL_EXCEPTIONS  = DeviceClassParameters:DeviceClassParameters
-PLURAL_EXCEPTIONS += GpuClaimParameters:GpuClaimParameters
-
 ifeq ($(IMAGE_NAME),)
-REGISTRY ?= registry.example.com
+REGISTRY ?= docker.io/rocm
 IMAGE_NAME = $(REGISTRY)/$(DRIVER_NAME)
 endif

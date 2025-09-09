@@ -27,7 +27,7 @@ set -o pipefail
 
 source "${CURRENT_DIR}/scripts/common.sh"
 
-# Build the example driver image
+# Build the amd dra driver image
 ${SCRIPTS_DIR}/build-driver-image.sh
 
 # If a cluster is already running, load the image onto its nodes

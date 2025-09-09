@@ -1,4 +1,4 @@
-module sigs.k8s.io/dra-example-driver
+module github.com/ROCm/k8s-gpu-dra-driver
 
 go 1.24.0
 

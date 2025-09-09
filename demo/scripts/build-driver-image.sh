@@ -39,7 +39,6 @@ cd ${CURRENT_DIR}/../..
 
 # Set build variables
 export REGISTRY="${DRIVER_IMAGE_REGISTRY}"
-export IMAGE="${DRIVER_IMAGE_NAME}"
 export VERSION="${DRIVER_IMAGE_TAG}"
 export CONTAINER_TOOL="${CONTAINER_TOOL}"
 

@@ -1,0 +1,27 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "k8s-gpu-dra-driver.fullname" . }}-webhook-config
+  labels:
+    {{- include "k8s-gpu-dra-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ include "k8s-gpu-dra-driver.namespace" . }}/{{ include "k8s-gpu-dra-driver.fullname" . }}-webhook-cert"
+webhooks:
+- name: "dra.gpu.amd.com"
+  rules:
+  - apiGroups:   ["resource.k8s.io"]
+    apiVersions: ["v1beta1"]
+    operations:  ["CREATE", "UPDATE"]
+    resources:   ["resourceclaims", "resourceclaimtemplates"]
+    scope:       "Namespaced"
+  clientConfig:
+    service:
+      namespace: {{ include "k8s-gpu-dra-driver.namespace" . }}
+      name: {{ include "k8s-gpu-dra-driver.fullname" . }}-webhook
+      port: {{ .Values.webhook.servicePort }}
+      path: /validate-resource-claim-parameters
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+{{- end }}
