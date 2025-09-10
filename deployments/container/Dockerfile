@@ -27,19 +27,19 @@ RUN apt-get update && \
 
 FROM ${BASE_IMAGE}
 
-LABEL io.k8s.display-name="Example Resource Driver for Dynamic Resource Allocation (DRA)"
-LABEL name="Example Resource Driver for Dynamic Resource Allocation (DRA)"
-LABEL vendor="example.com"
+LABEL io.k8s.display-name="AMD GPU Driver for Dynamic Resource Allocation (DRA)"
+LABEL name="AMD GPU Driver for Dynamic Resource Allocation (DRA)"
+LABEL vendor="amd.com"
 ARG VERSION="N/A"
 LABEL version=${VERSION}
 ARG RELEASE="N/A"
 LABEL release="N/A"
-LABEL summary="Example DRA resource driver for Kubernetes"
+LABEL summary="AMD DRA GPU driver for Kubernetes"
 LABEL description="See summary"
 
 RUN apt-get update && \
     apt-get install build-essential pkg-config libdrm-dev libdrm-amdgpu1 -y && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /artifacts/dra-example-kubeletplugin /usr/bin/dra-example-kubeletplugin
-COPY --from=build /artifacts/dra-example-webhook       /usr/bin/dra-example-webhook
+COPY --from=build /artifacts/gpu-kubeletplugin /usr/bin/gpu-kubeletplugin
+COPY --from=build /artifacts/webhook           /usr/bin/webhook

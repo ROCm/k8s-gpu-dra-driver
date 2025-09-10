@@ -30,6 +30,7 @@ ubuntu22.04: BASE_IMAGE = docker.io/ubuntu:22.04
 
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
+	@echo "Nitish: This is image name: $(IMAGE_NAME) $(IMAGE_TAG) $(IMAGE)"
 	DOCKER_BUILDKIT=1 \
 		$(CONTAINER_TOOL) build --pull \
 		--tag $(IMAGE) \

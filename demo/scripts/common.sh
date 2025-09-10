@@ -22,11 +22,11 @@
 # A reference to the current directory where this script is located
 SCRIPTS_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
 
-# The name of the example driver
-: ${DRIVER_NAME:=dra-example-driver}
+# The name of the dra driver
+: ${DRIVER_NAME:=k8s-gpu-dra-driver}
 
-# The registry, image and tag for the example driver
-: ${DRIVER_IMAGE_REGISTRY:="registry.k8s.io/dra-example-driver"}
+# The registry, image and tag for the dra driver
+: ${DRIVER_IMAGE_REGISTRY:="docker.io/rocm"}
 : ${DRIVER_IMAGE_NAME:="${DRIVER_NAME}"}
 : ${DRIVER_IMAGE_TAG:="$(helm show chart $(git rev-parse --show-toplevel)/deployments/helm/${DRIVER_NAME} | sed -n 's/^appVersion: //p')"}
 : ${DRIVER_IMAGE_PLATFORM:="ubuntu22.04"}
@@ -36,7 +36,7 @@ SCRIPTS_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
 
 # The kubernetes tag to build the kind cluster from
 # From ${KIND_K8S_REPO}/tags
-: ${KIND_K8S_TAG:="v1.33.0"}
+: ${KIND_K8S_TAG:="v1.34.0"}
 
 # At present, kind has a new enough node image that we don't need to build our
 # own. This won't always be true and we may need to set the variable below to

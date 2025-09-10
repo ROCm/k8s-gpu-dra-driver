@@ -1,4 +1,4 @@
-module sigs.k8s.io/dra-example-driver/hack/tools
+module github.com/ROCm/k8s-gpu-dra-driver/hack/tools
 
 go 1.21.0
 

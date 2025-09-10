@@ -1,0 +1,19 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "k8s-gpu-dra-driver.fullname" . }}-webhook-cert
+  namespace: {{ include "k8s-gpu-dra-driver.namespace" . }}
+  labels:
+    {{- include "k8s-gpu-dra-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  dnsNames:
+    {{- $svcName := printf "%s-webhook" (include "k8s-gpu-dra-driver.fullname" .) }}
+    {{- $svcNamespace := (include "k8s-gpu-dra-driver.namespace" .) }}
+    - {{ $svcName }}.{{ $svcNamespace }}.svc
+  issuerRef:
+    kind: Issuer
+    name: {{ include "k8s-gpu-dra-driver.fullname" . }}-webhook-issuer
+  secretName: {{ include "k8s-gpu-dra-driver.fullname" . }}-webhook-cert
+{{- end }}
