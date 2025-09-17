@@ -29,7 +29,7 @@ SCRIPTS_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
 : ${DRIVER_IMAGE_REGISTRY:="docker.io/rocm"}
 : ${DRIVER_IMAGE_NAME:="${DRIVER_NAME}"}
 : ${DRIVER_IMAGE_TAG:="$(helm show chart $(git rev-parse --show-toplevel)/deployments/helm/${DRIVER_NAME} | sed -n 's/^appVersion: //p')"}
-: ${DRIVER_IMAGE_PLATFORM:="ubuntu22.04"}
+: ${DRIVER_IMAGE_PLATFORM:="ubi-minimal-9.6"}
 
 # The kubernetes repo to build the kind cluster from
 : ${KIND_K8S_REPO:="https://github.com/kubernetes/kubernetes.git"}

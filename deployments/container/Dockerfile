@@ -13,14 +13,14 @@
 # limitations under the License.
 
 ARG GOLANG_VERSION=undefined
-ARG BASE_IMAGE=undefined
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:9.6
 FROM golang:${GOLANG_VERSION} as build
 
 WORKDIR /build
 COPY . .
 
 RUN apt-get update && \
-    apt-get install build-essential pkg-config libdrm-dev libdrm-amdgpu1 -y && \
+    apt-get install build-essential pkg-config libdrm-dev -y && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir /artifacts && \
     make PREFIX=/artifacts cmds
@@ -29,17 +29,19 @@ FROM ${BASE_IMAGE}
 
 LABEL io.k8s.display-name="AMD GPU Driver for Dynamic Resource Allocation (DRA)"
 LABEL name="AMD GPU Driver for Dynamic Resource Allocation (DRA)"
-LABEL vendor="amd.com"
-ARG VERSION="N/A"
+LABEL vendor="Advanced Micro Devices, Inc."
+LABEL maintainer="Nitish Bhat <Nitish.Bhat@amd.com>"
+ARG VERSION="latest"
 LABEL version=${VERSION}
-ARG RELEASE="N/A"
-LABEL release="N/A"
+ARG RELEASE="latest"
+LABEL release=${RELEASE}
 LABEL summary="AMD DRA GPU driver for Kubernetes"
 LABEL description="See summary"
 
-RUN apt-get update && \
-    apt-get install build-essential pkg-config libdrm-dev libdrm-amdgpu1 -y && \
-    rm -rf /var/lib/apt/lists/*
+RUN microdnf clean all && \
+    microdnf update -y && \
+    microdnf install -y gcc gcc-c++ make pkgconfig libdrm && \
+    microdnf clean all
 
 COPY --from=build /artifacts/gpu-kubeletplugin /usr/bin/gpu-kubeletplugin
 COPY --from=build /artifacts/webhook           /usr/bin/webhook
