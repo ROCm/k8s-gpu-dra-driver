@@ -15,7 +15,7 @@
 ##### Global variables #####
 CONTAINER_TOOL ?= docker
 MKDIR ?= mkdir
-DISTRIBUTIONS := ubuntu22.04
+DISTRIBUTIONS := ubi-minimal-9.6
 DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
 
 include $(CURDIR)/common.mk
@@ -26,7 +26,7 @@ IMAGE ?= $(IMAGE_NAME):$(IMAGE_TAG)
 ##### Public rules #####
 .PHONY: $(DISTRIBUTIONS)
 
-ubuntu22.04: BASE_IMAGE = docker.io/ubuntu:22.04
+ubi-minimal-9.6: BASE_IMAGE = registry.access.redhat.com/ubi9/ubi-minimal:9.6
 
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
