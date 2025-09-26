@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This scripts invokes `kind build image` so that the resulting
-# image has a containerd with CDI support.
-#
-# Usage: kind-build-image.sh <tag of generated image>
+# create-kind-cluster.sh
+# Creates a local kind cluster (with Dynamic Resource Allocation feature gate enabled)
+# using the configured KIND_IMAGE and cluster config. Warns if expected AMD GPU
+# device nodes are not present on the host.
 
 # A reference to the current directory where this script is located
 CURRENT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
@@ -26,6 +26,9 @@ set -ex
 set -o pipefail
 
 source "${CURRENT_DIR}/common.sh"
+
+# Best-effort warning if host does not expose expected GPU device nodes
+check_gpu_device_nodes
 
 ${KIND} create cluster \
 	--name "${KIND_CLUSTER_NAME}" \

@@ -14,10 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This scripts invokes `kind build image` so that the resulting
-# image has a containerd with CDI support.
-#
-# Usage: kind-build-image.sh <tag of generated image>
+# build-driver.sh
+# Convenience wrapper: builds the driver image (and if a kind cluster with
+# matching name exists, loads the image into it).
 
 # A reference to the current directory where this script is located
 CURRENT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
@@ -28,12 +27,12 @@ set -o pipefail
 source "${CURRENT_DIR}/scripts/common.sh"
 
 # Build the amd dra driver image
-${SCRIPTS_DIR}/build-driver-image.sh
+"${PROJECT_DIR}/scripts/build-driver-image.sh"
 
 # If a cluster is already running, load the image onto its nodes
 EXISTING_CLUSTER="$(${KIND} get clusters | grep -w "${KIND_CLUSTER_NAME}" || true)"
 if [ "${EXISTING_CLUSTER}" != "" ]; then
-	${SCRIPTS_DIR}/load-driver-image-into-kind.sh
+	${DEMO_SCRIPT_DIR}/load-driver-image-into-kind.sh
 fi
 
 set +x

@@ -14,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This scripts invokes `kind build image` so that the resulting
-# image has a containerd with CDI support.
-#
-# Usage: kind-build-image.sh <tag of generated image>
+# build-kind-image.sh
+# Builds (only if absent) a kind node image matching KIND_K8S_TAG. Requires Docker.
 
 # A reference to the current directory where this script is located
 CURRENT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
@@ -28,14 +26,9 @@ set -o pipefail
 source "${CURRENT_DIR}/common.sh"
 
 # If an image ID already exists for the image we plan to build, we are done.
-EXISTING_IMAGE_ID="$(${CONTAINER_TOOL} images --filter "reference=${KIND_IMAGE}" -q)"
+EXISTING_IMAGE_ID="$(docker images --filter "reference=${KIND_IMAGE}" -q)"
 if [ "${EXISTING_IMAGE_ID}" != "" ]; then
 	exit 0
-fi
-
-if [[ "${CONTAINER_TOOL}" != "docker" ]]; then
-    echo "Building kind images requires Docker. Cannot use '${CONTAINER_TOOL}'"
-    exit 1
 fi
 
 # Create a temorary directory to hold all the artifacts we need for building the image

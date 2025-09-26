@@ -13,15 +13,14 @@
 # limitations under the License.
 
 ##### Global variables #####
-CONTAINER_TOOL ?= docker
 MKDIR ?= mkdir
 DISTRIBUTIONS := ubi-minimal-9.6
 DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
 
-include $(CURDIR)/common.mk
+include $(CURDIR)/env.mk
 
 IMAGE_TAG ?= $(VERSION)
-IMAGE ?= $(IMAGE_NAME):$(IMAGE_TAG)
+IMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME):$(IMAGE_TAG)
 
 ##### Public rules #####
 .PHONY: $(DISTRIBUTIONS)
@@ -30,9 +29,9 @@ ubi-minimal-9.6: BASE_IMAGE = registry.access.redhat.com/ubi9/ubi-minimal:9.6
 
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
-	@echo "Nitish: This is image name: $(IMAGE_NAME) $(IMAGE_TAG) $(IMAGE)"
+	@echo "Building image: $(IMAGE) using base image: $(BASE_IMAGE)"
 	DOCKER_BUILDKIT=1 \
-		$(CONTAINER_TOOL) build --pull \
+		docker build --pull \
 		--tag $(IMAGE) \
 		--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
@@ -41,4 +40,5 @@ $(DISTRIBUTIONS):
 		$(CURDIR)
 
 push:
-	$(CONTAINER_TOOL) push $(IMAGE)
+	@echo "Pushing image: $(IMAGE)"
+	docker push $(IMAGE)

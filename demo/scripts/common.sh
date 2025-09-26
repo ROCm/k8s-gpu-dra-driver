@@ -14,24 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This scripts invokes `kind build image` so that the resulting
-# image has a containerd with CDI support.
-#
-# Usage: kind-build-image.sh <tag of generated image>
+# Demo wrapper common: sources generic scripts/common.sh and adds KIND/GPU helpers.
 
-# A reference to the current directory where this script is located
-SCRIPTS_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
+DEMO_SCRIPT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
+PROJECT_DIR="$(cd -- "${DEMO_SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd || true)"
+source "${PROJECT_DIR}/scripts/common.sh"
 
-# The name of the dra driver
-: ${DRIVER_NAME:=k8s-gpu-dra-driver}
-
-# The registry, image and tag for the dra driver
-: ${DRIVER_IMAGE_REGISTRY:="docker.io/rocm"}
-: ${DRIVER_IMAGE_NAME:="${DRIVER_NAME}"}
-: ${DRIVER_IMAGE_TAG:="$(helm show chart $(git rev-parse --show-toplevel)/deployments/helm/${DRIVER_NAME} | sed -n 's/^appVersion: //p')"}
-: ${DRIVER_IMAGE_PLATFORM:="ubi-minimal-9.6"}
-
-# The kubernetes repo to build the kind cluster from
+# Demo / KIND specific defaults
 : ${KIND_K8S_REPO:="https://github.com/kubernetes/kubernetes.git"}
 
 # The kubernetes tag to build the kind cluster from
@@ -45,28 +34,20 @@ SCRIPTS_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
 
 # The name of the kind cluster to create
 : ${KIND_CLUSTER_NAME:="${DRIVER_NAME}-cluster"}
+: ${KIND_CLUSTER_CONFIG_PATH:="${DEMO_SCRIPT_DIR}/kind-cluster-config.yaml"}
+: ${KIND:="env KIND_EXPERIMENTAL_PROVIDER=docker kind"}
 
-# The path to kind's cluster configuration file
-: ${KIND_CLUSTER_CONFIG_PATH:="${SCRIPTS_DIR}/kind-cluster-config.yaml"}
-
-# The derived name of the driver image to build
-: ${DRIVER_IMAGE:="${DRIVER_IMAGE_REGISTRY}/${DRIVER_IMAGE_NAME}:${DRIVER_IMAGE_TAG}"}
-
-# The name of the kind image to build / run
+# Derived kind node image reference (namespace local to developer)
 : ${KIND_IMAGE:="kindest/node:${KIND_K8S_TAG}"}
 
-# Container tool, e.g. docker/podman
-if [[ -z "${CONTAINER_TOOL}" ]]; then
-    if [[ -n "$(which docker)" ]]; then
-        echo "Docker found in PATH."
-        CONTAINER_TOOL=docker
-    elif [[ -n "$(which podman)" ]]; then
-        echo "Podman found in PATH."
-        CONTAINER_TOOL=podman
-    else
-        echo "No container tool detected. Please install Docker or Podman."
-        return 1
+check_gpu_device_nodes() {
+  local missing=()
+  for p in /dev/dri /dev/kfd; do
+    if [[ ! -e "$p" ]]; then
+      missing+=("$p")
     fi
-fi
-
-: ${KIND:="env KIND_EXPERIMENTAL_PROVIDER=${CONTAINER_TOOL} kind"}
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "[demo/scripts/common.sh] WARN: Missing GPU device paths: ${missing[*]} (demo cluster may not expose GPUs)." >&2
+  fi
+}
