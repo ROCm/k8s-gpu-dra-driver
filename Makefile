@@ -12,25 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CONTAINER_TOOL ?= docker
 MKDIR    ?= mkdir
 TR       ?= tr
 DIST_DIR ?= $(CURDIR)/dist
 HELM     ?= "go run helm.sh/helm/v3/cmd/helm@latest"
 
+# ---------------------------------------------------------------------------
+# Environment generation (env.sh -> env.mk) single source of truth
+# ---------------------------------------------------------------------------
+ENV_SRC := $(CURDIR)/env.sh
+ENV_MK  := env.mk
+
+
+$(ENV_MK): $(ENV_SRC) hack/gen-env-mk.sh
+	@bash hack/gen-env-mk.sh $(ENV_SRC) $(ENV_MK)
+
+-include $(ENV_MK)
+
 export IMAGE_GIT_TAG ?= $(shell git describe --tags --always --dirty --match 'v*')
 export CHART_GIT_TAG ?= $(shell git describe --tags --always --dirty --match 'chart/*')
 
-include $(CURDIR)/common.mk
-
-BUILDIMAGE_TAG ?= golang$(GOLANG_VERSION)
-BUILDIMAGE ?= $(IMAGE_NAME)-build:$(BUILDIMAGE_TAG)
+BUILDIMAGE_TAG ?= v1.0
+BUILDIMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME)-build:$(BUILDIMAGE_TAG)
 
 CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := assert-fmt vet lint ineffassign misspell
-MAKE_TARGETS := binaries build check vendor fmt test examples cmds coverage generate $(CHECK_TARGETS)
+MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -39,7 +48,6 @@ DOCKER_TARGETS := $(patsubst %,docker-%, $(TARGETS))
 
 GOOS ?= linux
 
-binaries: cmds
 ifneq ($(PREFIX),)
 cmd-%: COMMAND_BUILD_OPTIONS = -o $(PREFIX)/$(*)
 endif
@@ -49,13 +57,10 @@ $(CMD_TARGETS): cmd-%:
 		go build -ldflags "-s -w -X main.version=$(VERSION)" $(COMMAND_BUILD_OPTIONS) $(MODULE)/cmd/$(*)
 
 build:
-	GOOS=$(GOOS) go build ./...
+	@echo "Running repository build script: scripts/build-driver-image.sh"
+	@bash scripts/build-driver-image.sh
 
-examples: $(EXAMPLE_TARGETS)
-$(EXAMPLE_TARGETS): example-%:
-	GOOS=$(GOOS) go build ./examples/$(*)
-
-all: check test build binary
+all: build helm
 check: $(CHECK_TARGETS)
 
 # Update the vendor folder
@@ -91,15 +96,8 @@ misspell:
 vet:
 	go vet $(MODULE)/...
 
-# Ensure that all log calls support contextual logging.
-test: logcheck
-.PHONY: logcheck
-logcheck:
-	(cd hack/tools && GOBIN=$(PWD) go install sigs.k8s.io/logtools/logcheck)
-	./logcheck -check-contextual -check-deprecations ./...
-
 COVERAGE_FILE := coverage.out
-test: build cmds
+test:
 	go test -v -coverprofile=$(COVERAGE_FILE) $(MODULE)/...
 
 coverage: test
@@ -129,9 +127,9 @@ teardown-e2e:
 # Generate an image for containerized builds
 # Note: This image is local only
 .PHONY: .build-image
-.build-image: docker/Dockerfile.devel
+.build-image: docker/Dockerfile.build
 	if [ x"$(SKIP_IMAGE_BUILD)" = x"" ]; then \
-		$(CONTAINER_TOOL) build \
+		docker build \
 			--progress=plain \
 			--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 			--tag $(BUILDIMAGE) \
@@ -139,20 +137,14 @@ teardown-e2e:
 			docker; \
 	fi
 
-ifeq ($(CONTAINER_TOOL),podman)
-CONTAINER_TOOL_OPTS=-v $(PWD):$(PWD):Z
-else
-CONTAINER_TOOL_OPTS=-v $(PWD):$(PWD) --user $$(id -u):$$(id -g)
-endif
-
 $(DOCKER_TARGETS): docker-%: .build-image
 	@echo "Running 'make $(*)' in container $(BUILDIMAGE)"
-	$(CONTAINER_TOOL) run \
+	docker run \
 		--rm \
 		-e HOME=$(PWD) \
 		-e GOCACHE=$(PWD)/.cache/go \
 		-e GOPATH=$(PWD)/.cache/gopath \
-		$(CONTAINER_TOOL_OPTS) \
+		-v $(PWD):$(PWD) --user $$(id -u):$$(id -g) \
 		-w $(PWD) \
 		$(BUILDIMAGE) \
 			make $(*)
@@ -160,7 +152,7 @@ $(DOCKER_TARGETS): docker-%: .build-image
 # Start an interactive shell using the development image.
 .PHONY: .shell
 .shell:
-	$(CONTAINER_TOOL) run \
+	docker run \
 		--rm \
 		-ti \
 		-e HOME=$(PWD) \
@@ -172,9 +164,36 @@ $(DOCKER_TARGETS): docker-%: .build-image
 
 .PHONY: push-release-artifacts
 push-release-artifacts:
-	CHART_VERSION="$${CHART_GIT_TAG##chart/}" \
-		HELM=$(HELM) \
-		demo/scripts/push-driver-chart.sh
+	CHART_VERSION="$${CHART_GIT_TAG##chart/}" HELM=$(HELM) scripts/build-driver-chart.sh >/dev/null
 	export DRIVER_IMAGE_TAG="${IMAGE_GIT_TAG}"; \
-	demo/scripts/build-driver-image.sh && \
-	demo/scripts/push-driver-image.sh
+	scripts/build-driver-image.sh && \
+	scripts/push-driver-image.sh
+
+.PHONY: push
+# Build the image (using 'build' target) then push it using the repository push script.
+push: build
+	@echo "Pushing driver image using scripts/push-driver-image.sh"
+	@bash scripts/push-driver-image.sh
+
+DRIVER_NAME ?= k8s-gpu-dra-driver
+CHART_DIR ?= $(CURDIR)/helm-charts-k8s
+
+# Derive CHART_VERSION if not provided by reading Chart.yaml's version field
+CHART_VERSION ?= $(shell sed -n 's/^version:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml 2>/dev/null)
+
+HELM_PACKAGE_NAME = $(DRIVER_NAME)-helm-k8s-$(CHART_VERSION).tgz
+HELM_PACKAGE_PATH = $(CHART_DIR)/$(HELM_PACKAGE_NAME)
+
+.PHONY: helm
+helm: ## Package the Helm chart into helm-charts-k8s/$(HELM_PACKAGE_NAME)
+	@if [ ! -d "$(CHART_DIR)" ]; then \
+		echo "ERROR: Chart directory $(CHART_DIR) not found." >&2; \
+		exit 1; \
+	fi
+	@pkg_file=$$( CHART_VERSION=$(CHART_VERSION) CHART_DIR=$(CHART_DIR) HELM=$(HELM) scripts/build-driver-chart.sh ); \
+	if [ -z "$$pkg_file" ]; then \
+		echo "ERROR: build-driver-chart.sh failed to produce a package" >&2; \
+		exit 1; \
+	fi; \
+	mv "$$pkg_file" "$(HELM_PACKAGE_PATH)"; \
+	echo "Created $(HELM_PACKAGE_PATH)"

@@ -30,9 +30,9 @@ sudo systemctl restart containerd
 ``` 
  
 ### Compile, Package and Deploy the DRA driver
-* Build container image: 
+* Build container image:
   ```
-  DRIVER_IMAGE_REGISTRY=docker.io DRIVER_IMAGE_NAME=yan1996/k8s-gpu-dra-driver DRIVER_IMAGE_TAG=latest ./demo/scripts/build-driver-image.sh
+  DRIVER_IMAGE_REGISTRY=docker.io DRIVER_IMAGE_NAME=yan1996/k8s-gpu-dra-driver DRIVER_IMAGE_TAG=latest ./scripts/build-driver-image.sh
   ```
 * Deploy the DRA driver with helm chart: Go to `deployments/helm/rocm-k8s-gpu-dra-driver` to check the helm chart, then you can package the chart and deploy it to your cluster. Make sure the DRA image is pointing to the image registry where you host your image
 

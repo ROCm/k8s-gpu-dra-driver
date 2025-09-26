@@ -95,7 +95,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		pcieRootAttr, pciAddrFromMap, err := getPcieInfo(gpuInfoMap)
 		if err != nil {
 			// Continue without PCIe root attribute rather than failing completely
-			klog.Warningf(err.Error())
+			klog.Warning(err.Error())
 		}
 
 		// Check compute partition type to determine device type

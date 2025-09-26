@@ -14,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This scripts invokes `kind build image` so that the resulting
-# image has a containerd with CDI support.
-#
-# Usage: kind-build-image.sh <tag of generated image>
+# delete-cluster.sh
+# Deletes the previously created kind demo cluster.
 
 # A reference to the current directory where this script is located
 CURRENT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
@@ -28,7 +26,7 @@ set -o pipefail
 source "${CURRENT_DIR}/scripts/common.sh"
 
 # Delete the test cluster
-${SCRIPTS_DIR}/delete-kind-cluster.sh
+${DEMO_SCRIPT_DIR}/delete-kind-cluster.sh
 
 set +x
 printf '\033[0;32m'
