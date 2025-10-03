@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
 /*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
@@ -41,7 +40,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v2"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	resourceapi "k8s.io/api/resource/v1beta1"
@@ -49,7 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 
 	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"

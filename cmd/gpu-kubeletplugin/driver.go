@@ -44,7 +44,7 @@ import (
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 )

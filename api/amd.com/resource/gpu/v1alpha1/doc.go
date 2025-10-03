@@ -17,7 +17,6 @@
 // +k8s:deepcopy-gen=package
 // +groupName=gpu.resource.amd.com
 
-
 /*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 

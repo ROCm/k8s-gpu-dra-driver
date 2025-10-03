@@ -29,7 +29,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -94,14 +93,14 @@ func GetDriverVersion() (string, string) {
 	}
 
 	for _, versionPath := range matches {
-		b, err := ioutil.ReadFile(versionPath)
+		b, err := os.ReadFile(versionPath)
 		if err != nil {
 			continue
 		}
 		driverVersion := strings.TrimSpace(string(b))
 
 		srcVersionPath := strings.Replace(versionPath, "/version", "/srcversion", 1)
-		b, err = ioutil.ReadFile(srcVersionPath)
+		b, err = os.ReadFile(srcVersionPath)
 		if err != nil {
 			continue
 		}
@@ -143,23 +142,23 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		numaNodeFile := filepath.Join(path, "numa_node")
 
 		computePartitionType, memoryPartitionType := "", ""
-		numaNode := -1
+		var numaNode int
 
 		// Read the compute partition
-		if data, err := ioutil.ReadFile(computePartitionFile); err == nil {
+		if data, err := os.ReadFile(computePartitionFile); err == nil {
 			computePartitionType = strings.ToLower(strings.TrimSpace(string(data)))
 		} else {
 			glog.Warningf("Failed to read 'current_compute_partition' file at %s: %s", computePartitionFile, err)
 		}
 
 		// Read the memory partition
-		if data, err := ioutil.ReadFile(memoryPartitionFile); err == nil {
+		if data, err := os.ReadFile(memoryPartitionFile); err == nil {
 			memoryPartitionType = strings.ToLower(strings.TrimSpace(string(data)))
 		} else {
 			glog.Warningf("Failed to read 'current_memory_partition' file at %s: %s", memoryPartitionFile, err)
 		}
 
-		if data, err := ioutil.ReadFile(numaNodeFile); err == nil {
+		if data, err := os.ReadFile(numaNodeFile); err == nil {
 			numaNodeStr := strings.TrimSpace(string(data))
 			numaNode, err = strconv.Atoi(numaNodeStr)
 			if err != nil {
@@ -201,7 +200,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		// Get product name
 		productName := ""
 		productNamePath := fmt.Sprintf("/sys/class/drm/card%d/device/product_name", card)
-		if b, err := ioutil.ReadFile(productNamePath); err != nil {
+		if b, err := os.ReadFile(productNamePath); err != nil {
 			glog.Warningf("Failed to read product name from %s: %s", productNamePath, err)
 		} else {
 			replacer := strings.NewReplacer(" ", "_", "(", "", ")", "")
@@ -317,7 +316,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 // AMDGPU check if a particular card is an AMD GPU by checking the device's vendor ID
 func AMDGPU(cardName string) bool {
 	sysfsVendorPath := "/sys/class/drm/" + cardName + "/device/vendor"
-	b, err := ioutil.ReadFile(sysfsVendorPath)
+	b, err := os.ReadFile(sysfsVendorPath)
 	if err == nil {
 		vid := strings.TrimSpace(string(b))
 

@@ -28,7 +28,7 @@ ENV CGO_ENABLED=1
 
 # Pin tool versions
 ARG CT_VERSION=v0.17.0
-ARG GOLANGCI_LINT_VERSION=v1.61.0
+ARG GOLANGCI_LINT_VERSION=v1.64.8
 
 # Install Go-based tools directly into /go/bin
 RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CT_VERSION} && \
