@@ -37,12 +37,8 @@ import (
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 )
-
-func getDeviceName(card, renderD int) string {
-	return fmt.Sprintf("gpu-%v-%v", card, renderD)
-}
 
 func parseDeviceName(name string) (int, int, error) {
 	var card, renderD int

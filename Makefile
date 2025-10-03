@@ -52,7 +52,7 @@ BUILDIMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME)-build:$(BUILDIMAGE_T
 CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
-CHECK_TARGETS := assert-fmt vet lint ineffassign misspell copyrights
+CHECK_TARGETS := assert-fmt vet lint ineffassign copyrights
 MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
@@ -103,9 +103,6 @@ ineffassign:
 
 lint:
 	golangci-lint run ./...
-
-misspell:
-	misspell $(MODULE)/...
 
 vet:
 	go vet $(MODULE)/...

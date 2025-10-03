@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-
 /*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 

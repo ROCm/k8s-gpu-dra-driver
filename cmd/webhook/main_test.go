@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
 /*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
@@ -45,13 +44,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	admissionv1 "k8s.io/api/admission/v1"
-	resourceapi "k8s.io/api/resource/v1beta1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
-	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 )
 
 func TestReadyEndpoint(t *testing.T) {
@@ -118,58 +110,4 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			}
 		})
 	}
-}
-
-func admissionReviewWithObject(obj runtime.Object, resource metav1.GroupVersionResource) *admissionv1.AdmissionReview {
-	requestedAdmissionReview := &admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			Resource: resource,
-			Object: runtime.RawExtension{
-				Object: obj,
-			},
-		},
-	}
-	requestedAdmissionReview.SetGroupVersionKind(admissionv1.SchemeGroupVersion.WithKind("AdmissionReview"))
-	return requestedAdmissionReview
-}
-
-func resourceClaimWithGpuConfigs(gpuConfigs ...*configapi.GpuConfig) *resourceapi.ResourceClaim {
-	resourceClaim := &resourceapi.ResourceClaim{
-		Spec: resourceClaimSpecWithGpuConfigs(gpuConfigs...),
-	}
-	resourceClaim.SetGroupVersionKind(resourceapi.SchemeGroupVersion.WithKind("ResourceClaim"))
-	return resourceClaim
-}
-
-func resourceClaimTemplateWithGpuConfigs(gpuConfigs ...*configapi.GpuConfig) *resourceapi.ResourceClaimTemplate {
-	resourceClaimTemplate := &resourceapi.ResourceClaimTemplate{
-		Spec: resourceapi.ResourceClaimTemplateSpec{
-			Spec: resourceClaimSpecWithGpuConfigs(gpuConfigs...),
-		},
-	}
-	resourceClaimTemplate.SetGroupVersionKind(resourceapi.SchemeGroupVersion.WithKind("ResourceClaimTemplate"))
-	return resourceClaimTemplate
-}
-
-func resourceClaimSpecWithGpuConfigs(gpuConfigs ...*configapi.GpuConfig) resourceapi.ResourceClaimSpec {
-	resourceClaimSpec := resourceapi.ResourceClaimSpec{}
-	for _, gpuConfig := range gpuConfigs {
-		gpuConfig.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   configapi.GroupName,
-			Version: configapi.Version,
-			Kind:    "GpuConfig",
-		})
-		deviceConfig := resourceapi.DeviceClaimConfiguration{
-			DeviceConfiguration: resourceapi.DeviceConfiguration{
-				Opaque: &resourceapi.OpaqueDeviceConfiguration{
-					Driver: consts.DriverName,
-					Parameters: runtime.RawExtension{
-						Object: gpuConfig,
-					},
-				},
-			},
-		}
-		resourceClaimSpec.Devices.Config = append(resourceClaimSpec.Devices.Config, deviceConfig)
-	}
-	return resourceClaimSpec
 }

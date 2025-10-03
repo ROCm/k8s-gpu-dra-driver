@@ -37,7 +37,7 @@ import (
 	"os"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"

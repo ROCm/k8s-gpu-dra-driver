@@ -41,11 +41,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v2"
 
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/flags"
@@ -61,7 +61,6 @@ type Flags struct {
 
 	nodeName                      string
 	cdiRoot                       string
-	numDevices                    int
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
 	healthcheckPort               int
