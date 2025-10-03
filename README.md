@@ -4,6 +4,8 @@ This repository implements an AMD GPU resource driver for Kubernetes' Dynamic
 Resource Allocation (DRA) feature. The driver exposes device classes and
 implements allocation and lifecycle behavior for GPU resources on nodes.
 
+> Status: Experimental (alpha). Not recommended for production environments yet.
+
 ## DRA Concepts
 
 - Device class: a logical grouping of devices exposed by the driver (for
@@ -20,20 +22,29 @@ DRA lets device drivers provide more advanced placement and sharing modes than
 traditional device plugins. For expanded background see the upstream docs:
 https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
 
+## Requirements
+
+- Kubernetes 1.32 or newer. Dynamic Resource Allocation (DRA) entered beta in
+  Kubernetes 1.32.
+- Ensure the DRA APIs are enabled in your cluster version. The examples in this
+  repo currently use `resource.k8s.io/v1` which was introduced in Kubernetes 1.34.
+  If your cluster only provides `v1beta1`/`v1beta2` (introduced in Kubernetes 1.32/1.33
+  respectively), adjust the `apiVersion` accordingly or use a newer Kubernetes release.
+
 ## Project layout
 
 - `cmd/` — command binaries (kubelet plugin, webhook, etc.)
 - `pkg/` — driver implementation and platform helpers (AMDGPU interactions)
 - `deployments/` — manifests and container build Makefile
 - `helm-chart-k8s/` — Helm chart source used for packaging
-- `demo/` — demo and helper scripts for local testing with `kind`
+- `demo/` — demo and helper scripts for local testing with `kind` (browse: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/demo)
 - `scripts/` — project-level build and release helpers
-- `docs/` — documentation (installation, developer guides)
+- `docs/` — documentation (installation, developer guides) (browse: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/docs)
 
 ## Getting started
 
-Read `docs/installation.md` for full, step-by-step installation and developer
-workflows. Key quick actions:
+Read the Installation & Developer Guide for full, step-by-step installation and developer
+workflows (https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/installation.md). Key quick actions:
 
 - Build the driver image (containerized build):
 
@@ -58,13 +69,15 @@ make helm
 
 ## Where to find more
 
-- Detailed installation & developer guide: `docs/installation.md`
-- Demo scripts: `demo/`
-- Build logic: `Makefile` and `deployments/container/Makefile`
+- Installation & Developer Guide: https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/installation.md
+- Demo scripts: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/demo
+- Build logic: https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/Makefile and https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/deployments/container/Makefile
+- Examples: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/example
 
 ## Contributing
 
-See `CONTRIBUTING.md` for how to contribute, coding standards, and the code of
-conduct.
+See the Contributing section at the end of the Installation & Developer Guide:
+
+- https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/installation.md#contributing
 
 ---
