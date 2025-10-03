@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test
+
+---
+## Request two GPU partitions from DIFFERENT physical GPUs using constraints.distinctAttribute.
+## This creates a ResourceClaim that allocates p0 and p1 such that their parentDeviceID differs.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: gpu-test
+  name: two-partitions-distinct-parents
+spec:
+  devices:
+    requests:
+    - name: p0
+      exactly:
+        deviceClassName: gpu.amd.com
+        allocationMode: ExactCount
+        count: 1
+        selectors:
+        - cel: 'attributes["type"].string == "amdgpu-partition"'
+    - name: p1
+      exactly:
+        deviceClassName: gpu.amd.com
+        allocationMode: ExactCount
+        count: 1
+        selectors:
+        - cel: 'attributes["type"].string == "amdgpu-partition"'
+    constraints:
+    - distinctAttribute: parentDeviceID
+      requests: ["p0", "p1"]
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test
+  name: pod-two-partitions-distinct-parents
+  labels:
+    app: pod
+spec:
+  containers:
+  - name: ctr0
+    image: docker.io/rocm/pytorch:latest
+    command: ["bash", "-c"]
+    args: ["echo 'Using two partitions from distinct parents'; export; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: two
+  resourceClaims:
+  - name: two
+    resourceClaimName: two-partitions-distinct-parents

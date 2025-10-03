@@ -1,209 +1,70 @@
 # AMD GPU Kubernetes Driver for Dynamic Resource Allocation (DRA)
 
-This repository contains AMD GPU resource driver for use with the [Dynamic
-Resource Allocation
-(DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)
-feature of Kubernetes.
+This repository implements an AMD GPU resource driver for Kubernetes' Dynamic
+Resource Allocation (DRA) feature. The driver exposes device classes and
+implements allocation and lifecycle behavior for GPU resources on nodes.
 
-## Quickstart and Demo
+## DRA Concepts
 
-### Prerequisites
+- Device class: a logical grouping of devices exposed by the driver (for
+  example `gpu.amd.com`). Device classes are the API surface workloads request
+  from Kubernetes via ResourceClaims.
+- ResourceClaim / ResourceClass: the Kubernetes API objects workloads use to
+  request DRA-managed resources. The driver receives allocation requests and
+  returns device identifiers or access information.
+- Allocation lifecycle: the driver can perform setup and teardown when a
+  resource is assigned or released. This includes device programming, security
+  setup, and publishing device information to the consumer pod's environment.
 
-* [GNU Make 3.81+](https://www.gnu.org/software/make/)
-* [GNU Tar 1.34+](https://www.gnu.org/software/tar/)
-* [docker v20.10+ (including buildx)](https://docs.docker.com/engine/install/) or [Podman v4.9+](https://podman.io/docs/installation)
-* [kind v0.17.0+](https://kind.sigs.k8s.io/docs/user/quick-start/)
-* [helm v3.7.0+](https://helm.sh/docs/intro/install/)
-* [kubectl v1.18+](https://kubernetes.io/docs/reference/kubectl/)
-* Enable Container Device Interface (CDI) on your container runtime:
-  * `CRI-O`: CDI is enabled by default in CRI-O.
-  * `containerd`: Modify the config file to enable the CDI, then restart the `containerd`. By default the config file path is `/etc/containerd/config.toml`.
+DRA lets device drivers provide more advanced placement and sharing modes than
+traditional device plugins. For expanded background see the upstream docs:
+https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
 
-```toml
-[plugins]
-  [plugins."io.containerd.grpc.v1.cri"]
-    enable_cdi = true
-    cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
-```
+## Project layout
+
+- `cmd/` — command binaries (kubelet plugin, webhook, etc.)
+- `pkg/` — driver implementation and platform helpers (AMDGPU interactions)
+- `deployments/` — manifests and container build Makefile
+- `helm-chart-k8s/` — Helm chart source used for packaging
+- `demo/` — demo and helper scripts for local testing with `kind`
+- `scripts/` — project-level build and release helpers
+- `docs/` — documentation (installation, developer guides)
+
+## Getting started
+
+Read `docs/installation.md` for full, step-by-step installation and developer
+workflows. Key quick actions:
+
+- Build the driver image (containerized build):
+
 ```bash
-sudo systemctl restart containerd
-``` 
- 
-### Compile, Package and Deploy the DRA driver
-* Build container image:
-  ```
-  DRIVER_IMAGE_REGISTRY=docker.io DRIVER_IMAGE_NAME=yan1996/k8s-gpu-dra-driver DRIVER_IMAGE_TAG=latest ./scripts/build-driver-image.sh
-  ```
-* Deploy the DRA driver with helm chart: Go to `deployments/helm/rocm-k8s-gpu-dra-driver` to check the helm chart, then you can package the chart and deploy it to your cluster. Make sure the DRA image is pointing to the image registry where you host your image
+make build
+```
 
-![Demo Apps Figure](demo/demo-apps.png?raw=true "Semantics of the applications requesting resources from the example DRA resource driver.")
+- Package the Helm chart (chart tarball placed in `helm-charts-k8s/`):
 
-## Demo example and Verification
+```bash
+make helm
+```
 
-## 1. Basic GPU resource claiming with DRA driver
-   
-  * `kubectl apply -f example/example.yaml`
-  *  there is one pod running, the resource claim should show that the resource is getting allocated
+- Create a local `kind` cluster and load the driver image (demo helpers):
 
-  ```
-  $ k get pods -A
-  gpu-test       pod1                                         1/1     Running   0              111s
-  $ kubectl get resourceclaims -A -oyaml
-    spec:
-    devices:
-      requests:
-      - exactly:
-          allocationMode: ExactCount
-          count: 1
-          deviceClassName: gpu.amd.com
-        name: gpu
-  status:
-    allocation:
-      devices:
-        results:
-        - adminAccess: null
-          device: gpu-0-128
-          driver: gpu.amd.com
-          pool: leto
-          request: gpu
-      nodeSelector:
-        nodeSelectorTerms:
-        - matchFields:
-          - key: metadata.name
-            operator: In
-            values:
-            - leto
-    reservedFor:
-    - name: pod1
-      resource: pods
-      uid: 5b828ae2-a4fd-4223-b29b-ce0d28135aa7
-  ```
-  * Within the pod's container the GPU device should be detected by the SMI library
-  ```
-  $ kubectl exec -it -n gpu-test       pod1 -- amd-smi list
-  GPU: 0
-      BDF: 0000:cc:00.0
-      UUID: 14ff740f-0000-1000-808e-a028b658a5e5
-      KFD_ID: 35824
-      NODE_ID: 2
-      PARTITION_ID: 0
-  ```
+```bash
+./demo/create-cluster.sh
 
-## 2. GPU shared by containers within the same pod
+# When finished
+./demo/delete-cluster.sh
+```
 
-  * `kubectl apply -f example/example-same-pod-multiple-containers-share.yaml`
-  * there are 2 containers running within the same pod
+## Where to find more
 
-  ```
-  gpu-test       pod1                                         2/2     Running   0              4s
-  ```
-  * verify that those 2 containers are sharing the same GPU by checking GUID
-  
-  ```bash
-  $ k get resourceclaim -A -oyaml
-    reservedFor:
-    - name: pod1
-      resource: pods
-      uid: 2e5dd9c1-f9f2-406a-a444-147141df95bd
-  $ k exec -it -n gpu-test pod1 -c ctr0 -- rocm-smi
+- Detailed installation & developer guide: `docs/installation.md`
+- Demo scripts: `demo/`
+- Build logic: `Makefile` and `deployments/container/Makefile`
 
+## Contributing
 
-  ========================================= ROCm System Management Interface =========================================
-  =================================================== Concise Info ===================================================
-  Device  Node  IDs              Temp    Power  Partitions          SCLK    MCLK     Fan  Perf  PwrCap  VRAM%  GPU%
-                (DID,     GUID)  (Edge)  (Avg)  (Mem, Compute, ID)
-  ====================================================================================================================
-  0       2     0x740f,   35824  41.0°C  44.0W  N/A, N/A, 0         800Mhz  1600Mhz  0%   auto  300.0W  0%     0%
-  ====================================================================================================================
-  =============================================== End of ROCm SMI Log ================================================
-  $ k exec -it -n gpu-test pod1 -c ctr1 -- rocm-smi
+See `CONTRIBUTING.md` for how to contribute, coding standards, and the code of
+conduct.
 
-
-  ========================================= ROCm System Management Interface =========================================
-  =================================================== Concise Info ===================================================
-  Device  Node  IDs              Temp    Power  Partitions          SCLK    MCLK     Fan  Perf  PwrCap  VRAM%  GPU%
-                (DID,     GUID)  (Edge)  (Avg)  (Mem, Compute, ID)
-  ====================================================================================================================
-  0       2     0x740f,   35824  41.0°C  44.0W  N/A, N/A, 0         800Mhz  1600Mhz  0%   auto  300.0W  0%     0%
-  ====================================================================================================================
-  =============================================== End of ROCm SMI Log ================================================
-  ```
-
-## 3. GPU shared by multiple pods
-
-  * `kubectl apply -f example/example-multiple-pod-share.yaml`
-  * there are 2 pods running
-
-  ```bash
-  gpu-test       pod1                                         1/1     Running   0              6s
-  gpu-test       pod2                                         1/1     Running   0              6s
-  ```
-  * verify that they are sharing the same GPU by checking GUID
-  ```bash
-  $ k get resourceclaim -A -oyaml
-      reservedFor:
-    - name: pod1
-      resource: pods
-      uid: 87371552-53d6-4287-bc7d-8a70dd91b706
-    - name: pod2
-      resource: pods
-      uid: 4417805c-01a3-4443-94b1-dbf1a03f6d98
-  $ kubectl exec -it -n gpu-test pod1 -- rocm-smi
-
-
-  ========================================= ROCm System Management Interface =========================================
-  =================================================== Concise Info ===================================================
-  Device  Node  IDs              Temp    Power  Partitions          SCLK    MCLK     Fan  Perf  PwrCap  VRAM%  GPU%
-                (DID,     GUID)  (Edge)  (Avg)  (Mem, Compute, ID)
-  ====================================================================================================================
-  0       2     0x740f,   35824  41.0°C  44.0W  N/A, N/A, 0         800Mhz  1600Mhz  0%   auto  300.0W  0%     0%
-  ====================================================================================================================
-  =============================================== End of ROCm SMI Log ================================================
-  $ kubectl exec -it -n gpu-test pod2 -- rocm-smi
-
-
-  ========================================= ROCm System Management Interface =========================================
-  =================================================== Concise Info ===================================================
-  Device  Node  IDs              Temp    Power  Partitions          SCLK    MCLK     Fan  Perf  PwrCap  VRAM%  GPU%
-                (DID,     GUID)  (Edge)  (Avg)  (Mem, Compute, ID)
-  ====================================================================================================================
-  0       2     0x740f,   35824  41.0°C  44.0W  N/A, N/A, 0         800Mhz  1600Mhz  0%   auto  300.0W  0%     0%
-  ====================================================================================================================
-  =============================================== End of ROCm SMI Log ================================================
-  ```
-
-
-## Anatomy of a DRA resource driver
-
-TBD
-
-## Code Organization
-
-TBD
-
-## Best Practices
-
-TBD
-
-## References
-
-For more information on the DRA Kubernetes feature and developing custom resource drivers, see the following resources:
-
-* [Dynamic Resource Allocation in Kubernetes](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)
-* TBD
-
-## Community, discussion, contribution, and support
-
-Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
-
-You can reach the maintainers of this project at:
-
-- [Slack](https://slack.k8s.io/)
-- [Mailing List](https://groups.google.com/a/kubernetes.io/g/dev)
-
-### Code of conduct
-
-Participation in the Kubernetes community is governed by the [Kubernetes Code of Conduct](code-of-conduct.md).
-
-[owners]: https://git.k8s.io/community/contributors/guide/owners.md
-[Creative Commons 4.0]: https://git.k8s.io/website/LICENSE
+---

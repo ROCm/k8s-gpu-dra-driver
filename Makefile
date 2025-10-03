@@ -11,6 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the \"License\");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an \"AS IS\" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 
 MKDIR    ?= mkdir
 TR       ?= tr
@@ -23,9 +38,8 @@ HELM     ?= "go run helm.sh/helm/v3/cmd/helm@latest"
 ENV_SRC := $(CURDIR)/env.sh
 ENV_MK  := env.mk
 
-
-$(ENV_MK): $(ENV_SRC) hack/gen-env-mk.sh
-	@bash hack/gen-env-mk.sh $(ENV_SRC) $(ENV_MK)
+$(ENV_MK): $(ENV_SRC) scripts/gen-env-mk.sh
+	@bash scripts/gen-env-mk.sh $(ENV_SRC) $(ENV_MK)
 
 -include $(ENV_MK)
 
@@ -38,7 +52,7 @@ BUILDIMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME)-build:$(BUILDIMAGE_T
 CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
-CHECK_TARGETS := assert-fmt vet lint ineffassign misspell
+CHECK_TARGETS := assert-fmt vet lint ineffassign misspell copyrights
 MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
@@ -110,7 +124,7 @@ generate-deepcopy: vendor
 	for api in $(APIS); do \
 		rm -f $(CURDIR)/api/$(VENDOR)/resource/$${api}/zz_generated.deepcopy.go; \
 		controller-gen \
-			object:headerFile=$(CURDIR)/hack/boilerplate.generatego.txt \
+			object:headerFile=$(CURDIR)/tools/boilerplate.generatego.txt \
 			paths=$(CURDIR)/api/$(VENDOR)/resource/$${api}/ \
 			output:object:dir=$(CURDIR)/api/$(VENDOR)/resource/$${api}; \
 	done
@@ -197,3 +211,6 @@ helm: ## Package the Helm chart into helm-charts-k8s/$(HELM_PACKAGE_NAME)
 	fi; \
 	mv "$$pkg_file" "$(HELM_PACKAGE_PATH)"; \
 	echo "Created $(HELM_PACKAGE_PATH)"
+
+copyrights:
+	GOFLAGS=-mod=mod go run tools/build/copyright/main.go .

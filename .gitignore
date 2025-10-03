@@ -1,3 +1,7 @@
 .cache
 .config
 helm-charts-k8s/*.tgz
+
+# Binaries
+gpu-kubeletplugin
+webhook

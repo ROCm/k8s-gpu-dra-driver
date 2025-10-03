@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test
+
+---
+## Request two GPU partitions from the SAME physical GPU using constraints.matchAttribute.
+## This creates a single ResourceClaim that allocates two partition devices, p0 and p1,
+## constrained to share the same parentDeviceID. A Pod then consumes both via one claim.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: gpu-test
+  name: two-partitions-same-parent
+spec:
+  devices:
+    requests:
+    - name: p0
+      exactly:
+        deviceClassName: gpu.amd.com
+        allocationMode: ExactCount
+        count: 1
+        selectors:
+        - cel: 'attributes["type"].string == "amdgpu-partition"'
+    - name: p1
+      exactly:
+        deviceClassName: gpu.amd.com
+        allocationMode: ExactCount
+        count: 1
+        selectors:
+        - cel: 'attributes["type"].string == "amdgpu-partition"'
+    constraints:
+    - matchAttribute: parentDeviceID
+      requests: ["p0", "p1"]
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test
+  name: pod-two-partitions-same-parent
+  labels:
+    app: pod
+spec:
+  containers:
+  - name: ctr0
+    image: docker.io/rocm/pytorch:latest
+    command: ["bash", "-c"]
+    args: ["echo 'Using two partitions from same parent'; export; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: two
+  resourceClaims:
+  - name: two
+    resourceClaimName: two-partitions-same-parent

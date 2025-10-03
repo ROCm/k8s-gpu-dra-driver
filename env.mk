@@ -11,6 +11,7 @@ BUILDIMAGE_TAG ?= v1.0
 DRIVER_IMAGE_REGISTRY ?= docker.io/rocm
 DRIVER_IMAGE_NAME ?= "${DRIVER_NAME}"
 DRIVER_IMAGE_PLATFORM ?= ubi-minimal-9.6
+DRIVER_IMAGE_TAG ?= "${VERSION}"
 DRIVER_CHART_REGISTRY ?= docker.io/rocm
 KIND_K8S_REPO ?= https://github.com/kubernetes/kubernetes.git
 KIND_K8S_TAG ?= v1.34.0

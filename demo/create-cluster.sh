@@ -30,20 +30,19 @@ source "${CURRENT_DIR}/scripts/common.sh"
 ${DEMO_SCRIPT_DIR}/build-kind-image.sh
 
 # Build the driver image if it does not exist locally
-EXISTING_DRIVER_IMAGE_ID="$(docker images --filter "reference=${DRIVER_IMAGE}" -q)"
-if [ -z "${EXISTING_DRIVER_IMAGE_ID}" ]; then
+if docker image inspect "${DRIVER_IMAGE}" >/dev/null 2>&1; then
+	echo "Driver image ${DRIVER_IMAGE} already present locally"
+else
 	echo "Driver image ${DRIVER_IMAGE} not found locally - invoking 'make build'"
 	make build
-else
-	echo "Driver image ${DRIVER_IMAGE} already present (id=${EXISTING_DRIVER_IMAGE_ID})"
 fi
 
 # Create the kind cluster
 ${DEMO_SCRIPT_DIR}/create-kind-cluster.sh
 
 # If a driver image already exists load it into the cluster
-EXISTING_IMAGE_ID="$(docker images --filter "reference=${DRIVER_IMAGE}" -q)"
-if [ "${EXISTING_IMAGE_ID}" != "" ]; then
+if docker image inspect "${DRIVER_IMAGE}" >/dev/null 2>&1; then
+	echo "Loading driver image ${DRIVER_IMAGE} into kind cluster ${KIND_CLUSTER_NAME}"
 	${DEMO_SCRIPT_DIR}/load-driver-image-into-kind.sh
 fi
 
