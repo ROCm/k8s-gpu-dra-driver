@@ -38,6 +38,8 @@ LABEL release=${RELEASE}
 LABEL summary="AMD DRA GPU driver for Kubernetes"
 LABEL description="See summary"
 
+COPY LICENSE LICENSE
+
 RUN microdnf clean all && \
     microdnf update -y && \
     microdnf install -y gcc gcc-c++ make pkgconfig libdrm && \

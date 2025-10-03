@@ -4,7 +4,9 @@ metadata:
   name: gpu-test
 
 ---
-apiVersion: resource.k8s.io/v1beta1
+## Request a single AMD GPU via a ResourceClaimTemplate.
+## The Pod below will reference this template and get one GPU claim created for it.
+apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
   namespace: gpu-test
@@ -14,7 +16,8 @@ spec:
     devices:
       requests:
       - name: gpu
-        deviceClassName: gpu.amd.com
+        exactly:
+          deviceClassName: gpu.amd.com
 
 ---
 apiVersion: v1

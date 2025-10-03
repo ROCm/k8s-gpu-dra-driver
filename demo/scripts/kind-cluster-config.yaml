@@ -33,8 +33,6 @@ nodes:
       containerPath: /dev/dri
     - hostPath: /dev/kfd
       containerPath: /dev/kfd
-    - hostPath: /sys
-      containerPath: /sys
   kubeadmConfigPatches:
   - |
     kind: JoinConfiguration

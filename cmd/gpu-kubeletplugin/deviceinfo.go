@@ -19,15 +19,11 @@ package main
 import (
 	"fmt"
 
-	"github.com/google/uuid"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
 )
-
-// AMD GPU namespace for deterministic UUID generation
-var amdGpuNamespace = uuid.MustParse("12345678-1234-5678-9abc-123456789012")
 
 // AmdGpuInfo represents a full AMD GPU device
 type AmdGpuInfo struct {
@@ -65,20 +61,11 @@ func (d *AmdGpuInfo) CanonicalName() string {
 	return fmt.Sprintf("gpu-%v-%v", d.CardIndex, d.RenderIndex)
 }
 
-// GenerateUUID generates a deterministic UUID for this AMD GPU
-func (d *AmdGpuInfo) GenerateUUID() string {
-	uniqueID := fmt.Sprintf("%s-card%d-render%d", d.DeviceID, d.CardIndex, d.RenderIndex)
-	return uuid.NewSHA1(amdGpuNamespace, []byte(uniqueID)).String()
-}
-
 // GetDevice returns the DRA Device representation for a full AMD GPU
 func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		"type": {
 			StringValue: ptr.To(AmdGpuDeviceType),
-		},
-		"uuid": {
-			StringValue: ptr.To(d.GenerateUUID()),
 		},
 		"pciAddr": {
 			StringValue: ptr.To(d.PCIAddress),
@@ -136,20 +123,11 @@ func (d *AmdPartitionInfo) CanonicalName() string {
 	return fmt.Sprintf("gpu-%v-%v", d.CardIndex, d.RenderIndex)
 }
 
-// GenerateUUID generates a deterministic UUID for this AMD GPU partition
-func (d *AmdPartitionInfo) GenerateUUID() string {
-	uniqueID := fmt.Sprintf("%s-card%d-render%d", d.Parent.DeviceID, d.CardIndex, d.RenderIndex)
-	return uuid.NewSHA1(amdGpuNamespace, []byte(uniqueID)).String()
-}
-
 // GetDevice returns the DRA Device representation for an AMD GPU partition
 func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		"type": {
 			StringValue: ptr.To(AmdPartitionDeviceType),
-		},
-		"uuid": {
-			StringValue: ptr.To(d.GenerateUUID()),
 		},
 		"parentPciAddr": {
 			StringValue: ptr.To(d.Parent.PCIAddress),
