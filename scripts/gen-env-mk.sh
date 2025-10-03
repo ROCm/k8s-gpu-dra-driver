@@ -26,6 +26,20 @@ fi
 
 tmp="$out.tmp"
 {
+  echo '# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.'
+  echo '#'
+  echo '# Licensed under the Apache License, Version 2.0 (the \"License\");'
+  echo '# you may not use this file except in compliance with the License.'
+  echo '# You may obtain a copy of the License at'
+  echo '#'
+  echo '#     http://www.apache.org/licenses/LICENSE-2.0'
+  echo '#'
+  echo '# Unless required by applicable law or agreed to in writing, software'
+  echo '# distributed under the License is distributed on an \"AS IS\" BASIS,'
+  echo '# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.'
+  echo '# See the License for the specific language governing permissions and'
+  echo '# limitations under the License.'
+  echo '#'
   echo '# ====================================================================='
   echo '# AUTO-GENERATED from env.sh. DO NOT EDIT. Edit env.sh instead.'
   echo '# ====================================================================='
