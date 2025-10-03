@@ -47,8 +47,9 @@ func addCopyright(filePath string, yourCopyright string) error {
 	}
 
 	// Find the existing pattern
+	pkgLineRE := regexp.MustCompile(`(?m)^\s*package\s+[A-Za-z_]\w*`)
 	match := regexp.MustCompile(copyrightPattern).FindIndex(content)
-	packageMatch := regexp.MustCompile("package").FindIndex(content)
+	packageMatch := pkgLineRE.FindIndex(content)
 
 	if match == nil {
 		// If no existing copyright is found, add the new one at the beginning
@@ -78,7 +79,7 @@ func addCopyright(filePath string, yourCopyright string) error {
 	case foundExisting:
 		// // Add the new copyright after the existing one
 		existingCopyright := content[:packageMatch[0]]
-		newContent := append([]byte(string(existingCopyright)+"\n"), []byte(yourCopyright+"\n\n")...)
+		newContent := append([]byte(string(existingCopyright)+"\n"), []byte(yourCopyright+"\n")...)
 		newContent = append(newContent, content[packageMatch[0]:]...)
 		err = os.WriteFile(filePath, newContent, os.ModeAppend)
 		if err != nil {
@@ -133,7 +134,7 @@ limitations under the License.
 		}
 
 		// only .go source files from your repo (skip tests if you want)
-		if !strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), "_test.go") {
+		if !strings.HasSuffix(info.Name(), ".go") {
 			return nil
 		}
 
