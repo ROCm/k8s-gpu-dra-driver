@@ -210,4 +210,4 @@ helm: ## Package the Helm chart into helm-charts-k8s/$(HELM_PACKAGE_NAME)
 	echo "Created $(HELM_PACKAGE_PATH)"
 
 copyrights:
-	GOFLAGS=-mod=mod go run tools/build/copyright/main.go .
+	GOFLAGS=-mod=mod go run tools/build/copyright/main.go . && ${MAKE} fmt

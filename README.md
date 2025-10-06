@@ -73,6 +73,7 @@ make helm
 - Demo scripts: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/demo
 - Build logic: https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/Makefile and https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/deployments/container/Makefile
 - Examples: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/example
+ - Demo & Examples Guide: https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/demo.md
 
 ## Contributing
 

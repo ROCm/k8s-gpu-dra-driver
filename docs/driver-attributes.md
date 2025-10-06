@@ -54,11 +54,11 @@ Capacity values for full GPUs:
 
 The following attributes are attached to each GPU partition device:
 - `type` (string): `amdgpu-partition`
-- `parentPciAddr` (string): PCI address of the parent GPU
+- `pciAddr` (string): PCI address of the parent GPU
 - `cardIndex` (int): partition’s DRM card index
 - `renderIndex` (int): partition’s DRM render node index
-- `parentDeviceID` (string): parent GPU PCI device ID
-- Note: `parentDeviceID` is identical for all partitions that belong to the
+- `deviceID` (string): parent GPU PCI device ID
+- Note: `deviceID` is identical for all partitions that belong to the
   same physical GPU. You can leverage this to target multiple partitions from
   the same parent device when co-location is desirable for performance or
   topology reasons.
@@ -88,7 +88,8 @@ spec:
     - name: gpu
       deviceClassName: gpu.amd.com
       selectors:
-      - cel: 'attributes["type"].string == "amdgpu"'
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].type == "amdgpu"'
 ```
 
 Select only partitions:
@@ -99,7 +100,8 @@ spec:
     - name: gpu
       deviceClassName: gpu.amd.com
       selectors:
-      - cel: 'attributes["type"].string == "amdgpu-partition"'
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
 ```
 
 You may also combine with other attributes (e.g., `memory`, `family`,
@@ -108,9 +110,9 @@ You may also combine with other attributes (e.g., `memory`, `family`,
 ### Request multiple partitions from the same parent GPU
 
 To ensure two (or more) partitions come from the SAME physical GPU, use
-`constraints.matchAttribute: parentDeviceID` across multiple named requests.
+`constraints.matchAttribute: deviceID` across multiple named requests.
 Each request selects a single partition, and the constraint enforces that the
-`parentDeviceID` matches across those requests:
+`deviceID` matches across those requests:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -126,25 +128,27 @@ spec:
         allocationMode: ExactCount
         count: 1
         selectors:
-        - cel: 'attributes["type"].string == "amdgpu-partition"'
+          - cel:
+              expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
     - name: p1
       exactly:
         deviceClassName: gpu.amd.com
         allocationMode: ExactCount
         count: 1
         selectors:
-        - cel: 'attributes["type"].string == "amdgpu-partition"'
+          - cel:
+              expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
     constraints:
-    - matchAttribute: parentDeviceID
+    - matchAttribute: gpu.amd.com/deviceID
       requests: ["p0", "p1"]
 ```
 
 Notes:
-- This does not require hard-coding a specific `parentDeviceID`; the scheduler
+- This does not require hard-coding a specific `deviceID`; the scheduler
   will choose a parent that has enough partitions to satisfy all listed
   requests where possible.
 - If you instead want partitions from DIFFERENT parents, use
-  `constraints.distinctAttribute: parentDeviceID` across the requests.
+  `constraints.distinctAttribute: deviceID` across the requests.
 
 ## Current capabilities and notes
 
@@ -154,7 +158,7 @@ Notes:
   information (family, VRAM, SIMD/CU counts).
 - Pre-partitioned devices: supported and reported as distinct DRA Devices with
   their own identity and capacities, linked back to the parent GPU via
-  attributes such as `parentPciAddr` and `parentDeviceID`.
+  attributes such as `pciAddr` and `deviceID`.
 - Topology hinting: a PCIe root attribute is added when derivable, enabling
   topology-aware scheduling.
 - Defaults: when certain metrics (like VRAM) cannot be read reliably, the
