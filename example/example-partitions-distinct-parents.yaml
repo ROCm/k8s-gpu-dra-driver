@@ -5,7 +5,7 @@ metadata:
 
 ---
 ## Request two GPU partitions from DIFFERENT physical GPUs using constraints.distinctAttribute.
-## This creates a ResourceClaim that allocates p0 and p1 such that their parentDeviceID differs.
+## This creates a ResourceClaim that allocates p0 and p1 such that their deviceID differs.
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
 metadata:
@@ -20,16 +20,18 @@ spec:
         allocationMode: ExactCount
         count: 1
         selectors:
-        - cel: 'attributes["type"].string == "amdgpu-partition"'
+          - cel:
+              expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
     - name: p1
       exactly:
         deviceClassName: gpu.amd.com
         allocationMode: ExactCount
         count: 1
         selectors:
-        - cel: 'attributes["type"].string == "amdgpu-partition"'
+          - cel:
+              expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
     constraints:
-    - distinctAttribute: parentDeviceID
+    - distinctAttribute: gpu.amd.com/deviceID
       requests: ["p0", "p1"]
 
 ---

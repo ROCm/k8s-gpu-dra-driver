@@ -8,7 +8,6 @@ and demo script workflows so you can reproduce builds and demos locally.
 
 - GNU Make 3.81+
 - Docker with BuildKit support and image build/push capabilities
-- kind (v0.17.0+)
 - helm v3.7.0+
 - kubectl
 
@@ -69,64 +68,29 @@ make helm
 The packaging uses the chart under `helm-chart-k8s/` as the source directory.
 The packaging uses the chart under `helm-chart-k8s/` as the source directory.
 
-## Demo
+## Install the driver via Helm
 
-This section groups the demo workflow into three ordered steps you can follow
-when evaluating the driver locally.
-
-### Step 1 — Create / Delete a kind cluster
-
-Use the provided demo scripts to create a local kind cluster. The create
-script will build a kind node image (if needed), build the driver image
-(if missing), create the cluster, and then load the driver image into the
-cluster.
-
-```bash
-# Create cluster (builds kind image, builds driver image if needed, creates cluster, loads image)
-./demo/create-cluster.sh
-
-# Delete cluster
-./demo/delete-cluster.sh
-```
-
-The demo scripts use the layered `scripts/common.sh` (project-level) and
-`demo/scripts/common.sh` (demo-level) to derive variables like `KIND_IMAGE`,
-`KIND_CLUSTER_NAME` and `DRIVER_IMAGE`. You can override environment variables
-before running the scripts to tweak behavior.
-
-### Step 2 — (Optional) Load a locally built driver image into kind
-
-If you prefer to build the driver image separately (for example, with
-`make build`) and then load it into the cluster, use the load helper or run
-the steps manually:
-
-```bash
-# Save and load into kind (works with docker/podman)
-docker save -o driver_image.tar ${DRIVER_IMAGE}
-kind load image-archive --name ${KIND_CLUSTER_NAME} driver_image.tar
-rm driver_image.tar
-```
-
-The demo helper `demo/scripts/load-driver-image-into-kind.sh` runs this flow
-for you.
-
-### Step 3 — Install the driver via Helm
-
-After you have a running cluster (and the image available in the cluster
-nodes), install the driver using the packaged chart or directly from the
-chart directory:
+Install the driver using a packaged chart or directly from the chart directory:
 
 ```bash
 # Install from packaged chart (package created by `make helm`)
-helm install k8s-gpu-dra-driver helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
+helm upgrade -i --create-namespace k8s-gpu-dra-driver k8s-gpu-dra-driver \
+  helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
 
 # Or install directly from the chart directory during development
-helm install k8s-gpu-dra-driver helm-chart-k8s/ \
-	--set image.repository=${DRIVER_IMAGE_REGISTRY}/${DRIVER_IMAGE_NAME} \
-	--set image.tag=${DRIVER_IMAGE_TAG}
+helm install -i --create-namespace k8s-gpu-dra-driver \
+  k8s-gpu-dra-driver helm-chart-k8s/ \
+  --set image.repository=${DRIVER_IMAGE_REGISTRY}/${DRIVER_IMAGE_NAME} \
+  --set image.tag=${DRIVER_IMAGE_TAG}
 ```
 
 Adjust values via `--set` or by editing `helm-chart-k8s/values.yaml`.
+
+## Demos and examples
+
+For an end-to-end walkthrough of creating a kind cluster, loading the driver image, installing the chart, and running example workloads with verification steps, see:
+
+- https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/demo.md
 
 ## Contributing
 
