@@ -1,6 +1,6 @@
 .cache
 .config
-helm-charts-k8s/*.tgz
+helm/*.tgz
 
 # Binaries
 gpu-kubeletplugin

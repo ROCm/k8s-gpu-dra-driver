@@ -45,7 +45,7 @@ You can install using a packaged chart or directly from the chart directory.
 # From packaged chart (artifact created by `make helm`)
 make helm
 helm upgrade -i --create-namespace --namespace k8s-gpu-dra-driver \
-  helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
+  helm/k8s-gpu-dra-driver/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
 
 # Or from chart directory with explicit image settings
 helm install -i --create-namespace --namespace k8s-gpu-dra-driver \

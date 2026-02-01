@@ -187,7 +187,7 @@ push: build
 	@bash scripts/push-driver-image.sh
 
 DRIVER_NAME ?= k8s-gpu-dra-driver
-CHART_DIR ?= $(CURDIR)/helm-charts-k8s
+CHART_DIR ?= $(CURDIR)/helm/k8s-gpu-dra-driver
 
 # Derive CHART_VERSION if not provided by reading Chart.yaml's version field
 CHART_VERSION ?= $(shell sed -n 's/^version:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml 2>/dev/null)
@@ -196,7 +196,7 @@ HELM_PACKAGE_NAME = $(DRIVER_NAME)-helm-k8s-$(CHART_VERSION).tgz
 HELM_PACKAGE_PATH = $(CHART_DIR)/$(HELM_PACKAGE_NAME)
 
 .PHONY: helm
-helm: ## Package the Helm chart into helm-charts-k8s/$(HELM_PACKAGE_NAME)
+helm: ## Package the Helm chart for the driver
 	@if [ ! -d "$(CHART_DIR)" ]; then \
 		echo "ERROR: Chart directory $(CHART_DIR) not found." >&2; \
 		exit 1; \

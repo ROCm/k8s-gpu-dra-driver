@@ -65,7 +65,7 @@ fi
 
 # Derive image tag from chart appVersion (fallback to dev) unless provided.
 if [[ -z "${DRIVER_IMAGE_TAG:-}" ]]; then
-  local_chart_path="${PROJECT_DIR}/helm-charts-k8s"
+  local_chart_path="${PROJECT_DIR}/helm/k8s-gpu-dra-driver"
   tag_candidate=""
   if command -v helm >/dev/null 2>&1 && [[ -f "${local_chart_path}/Chart.yaml" ]]; then
     tag_candidate="$(helm show chart "${local_chart_path}" 2>/dev/null | sed -n 's/^appVersion: //p')"

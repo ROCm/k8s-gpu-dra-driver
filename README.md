@@ -52,7 +52,7 @@ workflows (https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/installatio
 make build
 ```
 
-- Package the Helm chart (chart tarball placed in `helm-charts-k8s/`):
+- Package the Helm chart (chart tarball placed in `helm/k8s-gpu-dra-driver`):
 
 ```bash
 make helm

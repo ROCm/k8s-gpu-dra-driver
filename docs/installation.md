@@ -58,10 +58,10 @@ registry. Helm charts are available in rocm to install without local builds.
 ## Package the Helm chart
 
 The repo provides a `helm` Make target that packages the chart under
-`helm-charts-k8s/`.
+`helm/k8s-gpu-dra-driver`.
 
 ```bash
-# Create the packaged chart (tarball in helm-charts-k8s/)
+# Create the packaged chart (tarball in helm/k8s-gpu-dra-driver)
 make helm
 ```
 
@@ -75,7 +75,7 @@ Install the driver using a packaged chart or directly from the chart directory:
 ```bash
 # Install from packaged chart (package created by `make helm`)
 helm upgrade -i --create-namespace k8s-gpu-dra-driver k8s-gpu-dra-driver \
-  helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
+  helm/k8s-gpu-dra-driver/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
 
 # Or install directly from the chart directory during development
 helm install -i --create-namespace k8s-gpu-dra-driver \

@@ -21,7 +21,7 @@ export REQUIRE_HELM=true
 SCRIPT_DIR="$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
-CHART_DIR="${PROJECT_DIR}/helm-charts-k8s"
+CHART_DIR="${PROJECT_DIR}/helm/k8s-gpu-dra-driver"
 CHART_NAME="${DRIVER_NAME}"
 
 if [[ -z "${VERSION:-}" ]]; then
