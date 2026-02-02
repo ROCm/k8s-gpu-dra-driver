@@ -74,11 +74,11 @@ Install the driver using a packaged chart or directly from the chart directory:
 
 ```bash
 # Install from packaged chart (package created by `make helm`)
-helm upgrade -i --create-namespace k8s-gpu-dra-driver k8s-gpu-dra-driver \
+helm install --create-namespace --namespace k8s-gpu-dra-driver k8s-gpu-dra-driver \
   helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-<version>.tgz
 
 # Or install directly from the chart directory during development
-helm install -i --create-namespace k8s-gpu-dra-driver \
+helm install --create-namespace --namespace k8s-gpu-dra-driver \
   k8s-gpu-dra-driver helm-chart-k8s/ \
   --set image.repository=${DRIVER_IMAGE_REGISTRY}/${DRIVER_IMAGE_NAME} \
   --set image.tag=${DRIVER_IMAGE_TAG}
