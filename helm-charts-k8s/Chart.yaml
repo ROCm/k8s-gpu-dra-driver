@@ -17,7 +17,7 @@ type: application
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
 # This should not be manually updated. It will be automatically set based on a
 # Git tag when a release is published.
-version: v0.1.0
+version: v0.2.0
 
 # This is the version number of the application being deployed. This version number should be
 # incremented each time you make changes to the application. Versions are not expected to

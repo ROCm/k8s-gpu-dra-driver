@@ -106,3 +106,21 @@ Create the name of the service account to use for the webhook
 {{- default "default-webhook" .Values.webhook.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Return the API version for DRA resources (DeviceClass, ResourceClaim, etc).
+
+Kubernetes 1.34+ serves these as resource.k8s.io/v1.
+Older clusters may still serve resource.k8s.io/v1beta1.
+*/}}
+{{- define "k8s-gpu-dra-driver.draApiVersion" -}}
+{{- if .Capabilities.APIVersions.Has "resource.k8s.io/v1" -}}
+resource.k8s.io/v1
+{{- else if .Capabilities.APIVersions.Has "resource.k8s.io/v1beta2" -}}
+resource.k8s.io/v1beta2
+{{- else if .Capabilities.APIVersions.Has "resource.k8s.io/v1beta1" -}}
+resource.k8s.io/v1beta1
+{{- else -}}
+{{- fail "No supported DRA API version found. The cluster must serve one of: resource.k8s.io/v1, resource.k8s.io/v1beta2, resource.k8s.io/v1beta1" -}}
+{{- end -}}
+{{- end }}

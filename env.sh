@@ -39,7 +39,7 @@
 
 # Kind defaults
 : ${KIND_K8S_REPO:=https://github.com/kubernetes/kubernetes.git}
-: ${KIND_K8S_TAG:=v1.34.0}
+: ${KIND_K8S_TAG:=v1.34.2}
 : ${BUILD_KIND_IMAGE:=false}
 : ${KIND_CLUSTER_NAME:=${DRIVER_NAME}-cluster}
 

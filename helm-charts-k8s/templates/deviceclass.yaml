@@ -1,5 +1,5 @@
 ---
-apiVersion: resource.k8s.io/v1beta1
+apiVersion: {{ include "k8s-gpu-dra-driver.draApiVersion" . }}
 kind: DeviceClass
 metadata:
   name: gpu.amd.com
