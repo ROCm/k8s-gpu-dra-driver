@@ -70,6 +70,14 @@ func getMemoryBytes(gpuInfoMap map[string]interface{}, defaultBytes uint64, devi
 	return defaultBytes
 }
 
+// Helper function to get a string value with a default fallback.
+func getStringDefault(gpuInfoMap map[string]interface{}, key, defaultVal string) string {
+	if v, ok := gpuInfoMap[key].(string); ok && v != "" {
+		return v
+	}
+	return defaultVal
+}
+
 func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttribute, string, error) {
 	pciAddr := gpuInfoMap["pciAddr"].(string)
 
@@ -108,8 +116,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				CardIndex:        gpuInfoMap["card"].(int),
 				RenderIndex:      gpuInfoMap["renderD"].(int),
 				DeviceID:         gpuInfoMap["devID"].(string),
-				DriverVersion:    gpuInfoMap["driverVersion"].(string),
-				DriverSrcVersion: gpuInfoMap["driverSrcVersion"].(string),
+				DriverVersion:    getStringDefault(gpuInfoMap, "driverVersion", "1.0.0"),
+				DriverSrcVersion: getStringDefault(gpuInfoMap, "driverSrcVersion", "1.0.0"),
 				PartitionProfile: fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType),
 				Family:           gpuInfoMap["family"].(string),
 				ProductName:      gpuInfoMap["productName"].(string),
@@ -134,8 +142,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			parentGpuInfo := &AmdGpuInfo{
 				PCIAddress:       pciAddrFromMap,
 				DeviceID:         gpuInfoMap["devID"].(string),
-				DriverVersion:    gpuInfoMap["driverVersion"].(string),
-				DriverSrcVersion: gpuInfoMap["driverSrcVersion"].(string),
+				DriverVersion:    getStringDefault(gpuInfoMap, "driverVersion", "1.0.0"),
+				DriverSrcVersion: getStringDefault(gpuInfoMap, "driverSrcVersion", "1.0.0"),
 				Family:           gpuInfoMap["family"].(string),
 				ProductName:      gpuInfoMap["productName"].(string),
 				pcieRootAttr:     pcieRootAttr,
@@ -161,7 +169,26 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
 		} else {
-			klog.Warningf("Unknown compute partition type '%s' for device %s, skipping", computePartitionType, pciAddr)
+			// If no partitioning info is available, treat it as a full GPU (fallback)
+			amdGpuInfo := &AmdGpuInfo{
+				PCIAddress:       pciAddr,
+				CardIndex:        gpuInfoMap["card"].(int),
+				RenderIndex:      gpuInfoMap["renderD"].(int),
+				DeviceID:         gpuInfoMap["devID"].(string),
+				DriverVersion:    getStringDefault(gpuInfoMap, "driverVersion", "1.0.0"),
+				DriverSrcVersion: getStringDefault(gpuInfoMap, "driverSrcVersion", "1.0.0"),
+				Family:           gpuInfoMap["family"].(string),
+				ProductName:      gpuInfoMap["productName"].(string),
+				pcieRootAttr:     pcieRootAttr,
+			}
+
+			// Create allocatable device for the full GPU
+			device := &AllocatableDevice{
+				AmdGpu: amdGpuInfo,
+			}
+			alldevices[device.CanonicalName()] = device
+
+			klog.Infof("Found AMD GPU: %s", device.CanonicalName())
 		}
 	}
 
