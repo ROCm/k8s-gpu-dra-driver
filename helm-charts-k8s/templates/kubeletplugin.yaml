@@ -97,7 +97,7 @@ spec:
           path: {{ .Values.kubeletPlugin.kubeletPluginsDirectoryPath | quote }}
       - name: cdi
         hostPath:
-          path: /var/run/cdi
+          path: {{ .Values.cdi.dynamicPath }}
       - name: dev
         hostPath:
           path: /dev
