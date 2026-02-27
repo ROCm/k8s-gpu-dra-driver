@@ -116,6 +116,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				pcieRootAttr:     pcieRootAttr,
 				SimdUnits:        simdUnits,
 				ComputeUnits:     computeUnits,
+				NumaNode:         gpuInfoMap["numaNode"].(int),
 				MemoryBytes:      getMemoryBytes(gpuInfoMap, 80*1024*1024*1024, "device", pciAddr),
 			}
 
@@ -149,6 +150,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				PartitionProfile: fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType),
 				SimdUnits:        simdUnits,
 				ComputeUnits:     computeUnits,
+				NumaNode:         gpuInfoMap["numaNode"].(int),
 				MemoryBytes:      getMemoryBytes(gpuInfoMap, 20*1024*1024*1024, "partition", pciAddr),
 			}
 

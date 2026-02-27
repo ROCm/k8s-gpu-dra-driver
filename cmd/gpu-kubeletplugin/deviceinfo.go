@@ -40,6 +40,7 @@ type AmdGpuInfo struct {
 	MemoryBytes      uint64
 	ComputeUnits     int
 	SimdUnits        int
+	NumaNode         int
 	// PCIe root attribute for topology awareness
 	pcieRootAttr deviceattribute.DeviceAttribute
 }
@@ -54,6 +55,7 @@ type AmdPartitionInfo struct {
 	MemoryBytes      uint64
 	ComputeUnits     int
 	SimdUnits        int
+	NumaNode         int
 }
 
 // CanonicalName returns the canonical name for this GPU
@@ -93,6 +95,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 		},
 		"partitionProfile": {
 			StringValue: ptr.To(d.PartitionProfile),
+		},
+		"numaNode": {
+			IntValue: ptr.To(int64(d.NumaNode)),
 		},
 	}
 
@@ -155,6 +160,9 @@ func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 		},
 		"partitionProfile": {
 			StringValue: ptr.To(d.PartitionProfile),
+		},
+		"numaNode": {
+			IntValue: ptr.To(int64(d.NumaNode)),
 		},
 	}
 

@@ -40,6 +40,7 @@ The following attributes are attached to each full GPU device:
 - `partitionProfile` (string): For platforms that support partitioning, the
   current compute+memory profile (e.g., `spx_<mem>`); may be empty on devices
   that do not use partitioning
+- `numaNode` (int): NUMA node the GPU is attached to (read from sysfs)
 - Topology attribute: a PCIe root attribute is included when
   derivable; its qualified name and value come from the Kubernetes
   `deviceattribute` library and can be used by schedulers/topology-aware logic
@@ -67,6 +68,7 @@ The following attributes are attached to each GPU partition device:
 - `driverVersion` (semver): inherited from parent
 - `driverSrcVersion` (string): inherited from parent
 - `partitionProfile` (string): compute+memory profile of the partition
+- `numaNode` (int): NUMA node inherited from the parent GPU
 - Optional topology attribute: the parent’s PCIe root attribute is propagated
 
 Capacity values for partitions:
@@ -150,6 +152,44 @@ Notes:
 - If you instead want partitions from DIFFERENT parents, use
   `constraints.distinctAttribute: deviceID` across the requests.
 
+## NUMA-aware GPU scheduling
+
+The `numaNode` attribute reports the NUMA node each GPU is attached to. Use it
+to co-locate GPUs on the same NUMA node and reduce memory-access latency for
+CPU–GPU workloads.
+
+The recommended pattern is `constraints.matchAttribute` — the scheduler picks
+any NUMA node but guarantees every matched request lands on the same one:
+
+```yaml
+spec:
+  devices:
+    requests:
+      - name: g0
+        deviceClassName: gpu.amd.com
+      - name: g1
+        deviceClassName: gpu.amd.com
+      - name: g2
+        deviceClassName: gpu.amd.com
+      - name: g3
+        deviceClassName: gpu.amd.com
+    constraints:
+      - matchAttribute: gpu.amd.com/numaNode
+        requests: ["g0", "g1", "g2", "g3"]
+```
+
+See `example/example-numa-aligned-gpus.yaml` for a complete working example
+that uses this pattern to run two tensor-parallel vLLM replicas, each pinned to
+a single NUMA node.
+
+If you need GPUs from a *specific* NUMA node, add a CEL selector instead:
+
+```yaml
+selectors:
+  - cel:
+      expression: 'device.attributes["gpu.amd.com"].numaNode == 0'
+```
+
 ## Current capabilities and notes
 
 - Discovery: the driver walks the relevant sysfs paths to find AMD GPUs and
@@ -161,6 +201,8 @@ Notes:
   attributes such as `pciAddr` and `deviceID`.
 - Topology hinting: a PCIe root attribute is added when derivable, enabling
   topology-aware scheduling.
+- NUMA node discovery: the driver reads the NUMA node for each GPU from sysfs
+  and exposes it as an integer attribute for NUMA-aware scheduling.
 - Defaults: when certain metrics (like VRAM) cannot be read reliably, the
   driver falls back to conservative defaults to remain usable. These values can
   differ from the exact hardware amounts and are best used as coarse selectors.

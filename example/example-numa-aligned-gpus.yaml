@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: gpu-test
+  name: vllm-4gpu-numa-aligned
+spec:
+  spec:
+    devices:
+      requests:
+        - name: g0
+          exactly:
+            deviceClassName: gpu.amd.com
+        - name: g1
+          exactly:
+            deviceClassName: gpu.amd.com
+        - name: g2
+          exactly:
+            deviceClassName: gpu.amd.com
+        - name: g3
+          exactly:
+            deviceClassName: gpu.amd.com
+      constraints:
+        - matchAttribute: gpu.amd.com/numaNode
+          requests: ["g0", "g1", "g2", "g3"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-dp2-tp4
+  namespace: gpu-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm-dp2-tp4
+  template:
+    metadata:
+      labels:
+        app: vllm-dp2-tp4
+    spec:
+      tolerations:
+        - key: amd.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE", "IPC_LOCK"]
+          env:
+            - name: HF_HOME
+              value: /hf-cache
+            - name: NCCL_DEBUG
+              value: WARN
+          command: ["vllm", "serve"]
+          args:
+            - "Qwen/Qwen2.5-7B-Instruct"
+            - "--tensor-parallel-size=4"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf-cache
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            claims:
+              - name: gpus
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      resourceClaims:
+        - name: gpus
+          resourceClaimTemplateName: vllm-4gpu-numa-aligned
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-dp2-tp4
+  namespace: gpu-test
+spec:
+  selector:
+    app: vllm-dp2-tp4
+  ports:
+    - port: 8000
+      targetPort: 8000
