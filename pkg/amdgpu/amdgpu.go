@@ -425,10 +425,11 @@ type TopologyInfo struct {
 }
 
 var topoDrmRenderMinorRe = regexp.MustCompile(`drm_render_minor\s(\d+)`)
-var topoUniqueIdRe = regexp.MustCompile(`unique_id\s(\d+)`)
 var topoSimdCountRe = regexp.MustCompile(`simd_count\s(\d+)`)
 var topoSimdPerCuRe = regexp.MustCompile(`simd_per_cu\s(\d+)`)
 var topoSizeInBytesRe = regexp.MustCompile(`size_in_bytes\s(\d+)`)
+var topoLocationIdRe = regexp.MustCompile(`location_id\s(\d+)`)
+var topoDomainRe = regexp.MustCompile(`domain\s(\d+)`)
 
 // GetTopologyInfo returns comprehensive topology information for all render devices
 // This combines the functionality of GetDevIdsFromTopology and GetNodeIdsFromTopology
@@ -462,11 +463,22 @@ func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
 		}
 
 		// Parse unique ID
-		uniqueID, e := ParseTopologyPropertiesString(nodeFile, topoUniqueIdRe)
+		locationId, e := ParseTopologyProperties(nodeFile, topoLocationIdRe)
 		if e != nil {
 			glog.Error(e)
 			continue
 		}
+
+		// Parse domain
+		domain, e := ParseTopologyProperties(nodeFile, topoDomainRe)
+		if e != nil {
+			glog.Error(e)
+			continue
+		}
+
+		dev := (locationId >> 3) & 0x1f
+		bus := (locationId >> 8) & 0xff
+		devID := fmt.Sprintf("%04x:%02x:%02x:0", domain, bus, dev)
 
 		// Extract node ID from file path
 		nodeIndex := filepath.Base(filepath.Dir(nodeFile))
@@ -511,7 +523,7 @@ func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
 		// Create topology info structure
 		topologyInfoMap[int(renderMinor)] = &TopologyInfo{
 			RenderDeviceID: int(renderMinor),
-			UniqueID:       uniqueID,
+			UniqueID:       devID,
 			NodeID:         nodeId,
 			SimdCount:      int(simdCount),
 			SimdPerCU:      int(simdPerCU),
