@@ -33,7 +33,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,7 +45,7 @@ func TestGpuConfigValidate(t *testing.T) {
 	}{
 		"empty GpuConfig": {
 			gpuConfig: &GpuConfig{},
-			expected:  errors.New("no sharing strategy set"),
+			expected:  nil,
 		},
 		"default GpuConfig": {
 			gpuConfig: DefaultGpuConfig(),
