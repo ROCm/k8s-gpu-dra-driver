@@ -92,6 +92,34 @@ For an end-to-end walkthrough of creating a kind cluster, loading the driver ima
 
 - https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/demo.md
 
+## Helm Configuration Reference
+
+### Driver prerequisite
+
+The DRA driver relies on the `amdgpu` kernel driver to enumerate GPU devices.
+The Helm chart enforces this by running a `driver-init` init container in the
+kubelet plugin DaemonSet pod. This container polls `/sys/class/kfd` and
+`/sys/module/amdgpu/drivers/` and blocks the plugin from starting until the
+kernel driver is loaded.
+
+### Key values
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `image.repository` | `docker.io/rocm/k8s-gpu-dra-driver` | Driver container image repository |
+| `image.tag` | Chart `appVersion` | Driver container image tag |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
+| `kubeletPlugin.containers.init.image` | `busybox:1.36` | Init container image used for the driver readiness check |
+| `kubeletPlugin.containers.init.securityContext` | `{privileged: true}` | Security context for the init container |
+| `kubeletPlugin.containers.init.resources` | `{}` | Resource requests/limits for the init container |
+| `kubeletPlugin.containers.plugin.securityContext` | `{privileged: true}` | Security context for the plugin container |
+| `kubeletPlugin.containers.plugin.resources` | `{}` | Resource requests/limits for the plugin container |
+| `kubeletPlugin.containers.plugin.healthcheckPort` | `51515` | gRPC health check port; set negative to disable |
+| `kubeletPlugin.nodeSelector` | `{}` | Node selector for the kubelet plugin DaemonSet |
+| `kubeletPlugin.tolerations` | `[]` | Tolerations for the kubelet plugin DaemonSet |
+| `kubeletPlugin.priorityClassName` | `system-node-critical` | Priority class for the kubelet plugin pods |
+| `cdi.dynamicPath` | `/var/run/cdi` | Host path for CDI spec files |
+
 ## Contributing
 
 We welcome issues, bug reports, and PRs of any size.

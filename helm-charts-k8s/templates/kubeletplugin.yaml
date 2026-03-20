@@ -36,6 +36,17 @@ spec:
       serviceAccountName: {{ include "k8s-gpu-dra-driver.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
+      initContainers:
+      - name: driver-init
+        image: {{ .Values.kubeletPlugin.containers.init.image | quote }}
+        command: ["sh", "-c", "while [ ! -d /sys/class/kfd ] || [ ! -d /sys/module/amdgpu/drivers/ ]; do echo 'amdgpu driver is not loaded'; sleep 2; done"]
+        securityContext:
+          {{- toYaml .Values.kubeletPlugin.containers.init.securityContext | nindent 10 }}
+        resources:
+          {{- toYaml .Values.kubeletPlugin.containers.init.resources | nindent 10 }}
+        volumeMounts:
+        - name: sys
+          mountPath: /sys
       containers:
       - name: plugin
         securityContext:
