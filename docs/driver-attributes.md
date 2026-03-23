@@ -55,11 +55,11 @@ Capacity values for full GPUs:
 
 The following attributes are attached to each GPU partition device:
 - `type` (string): `amdgpu-partition`
-- `pciAddr` (string): PCI address of the parent GPU
+- `parentPciAddr` (string): PCI address of the parent GPU
 - `cardIndex` (int): partition’s DRM card index
 - `renderIndex` (int): partition’s DRM render node index
-- `deviceID` (string): parent GPU PCI device ID
-- Note: `deviceID` is identical for all partitions that belong to the
+- `parentDeviceID` (string): parent GPU PCI device ID
+- Note: `parentDeviceID` is identical for all partitions that belong to the
   same physical GPU. You can leverage this to target multiple partitions from
   the same parent device when co-location is desirable for performance or
   topology reasons.
@@ -112,9 +112,9 @@ You may also combine with other attributes (e.g., `memory`, `family`,
 ### Request multiple partitions from the same parent GPU
 
 To ensure two (or more) partitions come from the SAME physical GPU, use
-`constraints.matchAttribute: deviceID` across multiple named requests.
+`constraints.matchAttribute: parentDeviceID` across multiple named requests.
 Each request selects a single partition, and the constraint enforces that the
-`deviceID` matches across those requests:
+`parentDeviceID` matches across those requests:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -141,16 +141,16 @@ spec:
           - cel:
               expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
     constraints:
-    - matchAttribute: gpu.amd.com/deviceID
+    - matchAttribute: gpu.amd.com/parentDeviceID
       requests: ["p0", "p1"]
 ```
 
 Notes:
-- This does not require hard-coding a specific `deviceID`; the scheduler
+- This does not require hard-coding a specific `parentDeviceID`; the scheduler
   will choose a parent that has enough partitions to satisfy all listed
   requests where possible.
 - If you instead want partitions from DIFFERENT parents, use
-  `constraints.distinctAttribute: deviceID` across the requests.
+  `constraints.distinctAttribute: parentDeviceID` across the requests.
 
 ## NUMA-aware GPU scheduling
 
@@ -198,7 +198,7 @@ selectors:
   information (family, VRAM, SIMD/CU counts).
 - Pre-partitioned devices: supported and reported as distinct DRA Devices with
   their own identity and capacities, linked back to the parent GPU via
-  attributes such as `pciAddr` and `deviceID`.
+  attributes such as `parentPciAddr` and `parentDeviceID`.
 - Topology hinting: a PCIe root attribute is added when derivable, enabling
   topology-aware scheduling.
 - NUMA node discovery: the driver reads the NUMA node for each GPU from sysfs
