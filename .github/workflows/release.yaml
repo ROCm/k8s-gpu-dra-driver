@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # Matches clean semver tags (v1.0.0) but NOT build tags (v1.0.0-3)
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  image:
+    name: Release Image
+    if: github.repository == 'ROCm/k8s-gpu-dra-driver'
+    uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
+    with:
+      image-registry: docker.io/rocm
+      image-name: k8s-gpu-dra-driver
+      image-tag: ${{ github.ref_name }}
+      push: true
+      env-registry: DRIVER_IMAGE_REGISTRY
+      env-name: DRIVER_IMAGE_NAME
+      env-tag: DRIVER_IMAGE_TAG
+    secrets:
+      registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  helm-publish:
+    name: Publish Helm Chart
+    if: github.repository == 'ROCm/k8s-gpu-dra-driver'
+    uses: ROCm/common-infra-operator/.github/workflows/helm-gh-pages.yaml@main
+    with:
+      chart-dir: helm-charts-k8s
+      helm-repo-url: https://rocm.github.io/k8s-gpu-dra-driver
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: write
+
+  release:
+    name: Draft Release
+    if: github.repository == 'ROCm/k8s-gpu-dra-driver'
+    needs: [image, helm-publish]
+    uses: ROCm/common-infra-operator/.github/workflows/draft-release.yaml@main
+    with:
+      version: ${{ github.ref_name }}
+      chart-dir: helm-charts-k8s
+    permissions:
+      contents: write

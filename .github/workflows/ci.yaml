@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - 'release-v*'
+
+jobs:
+  lint:
+    name: Lint
+    uses: ROCm/common-infra-operator/.github/workflows/go-lint.yaml@main
+    with:
+      go-version-file: go.mod
+      build-deps: "pkg-config libdrm-dev"
+      check-target: check
+
+  test:
+    name: Test
+    uses: ROCm/common-infra-operator/.github/workflows/go-test.yaml@main
+    with:
+      go-version-file: go.mod
+      build-deps: "pkg-config libdrm-dev"
+      test-target: test
