@@ -10,7 +10,7 @@ jobs:
   image:
     name: Release Image
     if: github.repository == 'ROCm/k8s-gpu-dra-driver'
-    uses: rocm/common-infra-operator/.github/workflows/image-build-push.yaml@main
+    uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
     with:
       image-registry: docker.io/rocm
       image-name: k8s-gpu-dra-driver
@@ -26,7 +26,7 @@ jobs:
   helm-publish:
     name: Publish Helm Chart
     if: github.repository == 'ROCm/k8s-gpu-dra-driver'
-    uses: rocm/common-infra-operator/.github/workflows/helm-gh-pages.yaml@main
+    uses: ROCm/common-infra-operator/.github/workflows/helm-gh-pages.yaml@main
     with:
       chart-dir: helm-charts-k8s
       helm-repo-url: https://rocm.github.io/k8s-gpu-dra-driver
@@ -38,7 +38,7 @@ jobs:
     name: Draft Release
     if: github.repository == 'ROCm/k8s-gpu-dra-driver'
     needs: [image, helm-publish]
-    uses: rocm/common-infra-operator/.github/workflows/draft-release.yaml@main
+    uses: ROCm/common-infra-operator/.github/workflows/draft-release.yaml@main
     with:
       version: ${{ github.ref_name }}
       chart-dir: helm-charts-k8s

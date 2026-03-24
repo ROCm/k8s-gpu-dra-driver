@@ -10,7 +10,7 @@ on:
 jobs:
   lint:
     name: Lint
-    uses: rocm/common-infra-operator/.github/workflows/go-lint.yaml@main
+    uses: ROCm/common-infra-operator/.github/workflows/go-lint.yaml@main
     with:
       go-version-file: go.mod
       build-deps: "pkg-config libdrm-dev"
@@ -18,7 +18,7 @@ jobs:
 
   test:
     name: Test
-    uses: rocm/common-infra-operator/.github/workflows/go-test.yaml@main
+    uses: ROCm/common-infra-operator/.github/workflows/go-test.yaml@main
     with:
       go-version-file: go.mod
       build-deps: "pkg-config libdrm-dev"
