@@ -23,7 +23,7 @@ jobs:
   auto-tag:
     name: Auto Tag
     if: github.event_name == 'push' && github.repository == 'ROCm/k8s-gpu-dra-driver'
-    uses: ROCm/common-infra-operator/.github/workflows/auto-tag.yaml@main
+    uses: rocm/common-infra-operator/.github/workflows/auto-tag.yaml@main
     with:
       branch-type: ${{ startsWith(github.ref, 'refs/heads/release-v') && 'release' || 'develop' }}
     permissions:
@@ -33,7 +33,7 @@ jobs:
     name: Build & Push
     needs: auto-tag
     if: github.event_name == 'push' && github.repository == 'ROCm/k8s-gpu-dra-driver'
-    uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
+    uses: rocm/common-infra-operator/.github/workflows/image-build-push.yaml@main
     with:
       image-registry: docker.io/amdpsdo
       image-name: k8s-gpu-dra-driver
@@ -53,7 +53,7 @@ jobs:
       github.event_name == 'pull_request' &&
       contains(github.event.pull_request.labels.*.name, 'ci-run') &&
       github.repository == 'ROCm/k8s-gpu-dra-driver'
-    uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
+    uses: rocm/common-infra-operator/.github/workflows/image-build-push.yaml@main
     with:
       image-registry: docker.io/amdpsdo
       image-name: k8s-gpu-dra-driver
