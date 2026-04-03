@@ -33,3 +33,14 @@ limitations under the License.
 package consts
 
 const DriverName = "gpu.amd.com"
+
+// Compute partition modes
+const (
+	ComputePartitionSPX = "spx"
+	ComputePartitionDPX = "dpx"
+	ComputePartitionQPX = "qpx"
+	ComputePartitionCPX = "cpx"
+)
+
+// Default partition profile for non-partitioned GPUs
+const DefaultPartitionProfile = "spx_nps1"

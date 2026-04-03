@@ -36,6 +36,7 @@ import (
 	"fmt"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	klog "k8s.io/klog/v2"
 )
@@ -101,9 +102,9 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		// Extract common topology information
 		simdUnits, computeUnits := extractTopologyInfo(gpuInfoMap)
 
-		if computePartitionType == "spx" || computePartitionType == "" {
+		if computePartitionType == consts.ComputePartitionSPX || computePartitionType == "" {
 			// This is a full AMD GPU (either explicitly "spx" or no partition support)
-			partitionProfile := "none"
+			partitionProfile := consts.DefaultPartitionProfile
 			if computePartitionType != "" && memoryPartitionType != "" {
 				partitionProfile = fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType)
 			}
