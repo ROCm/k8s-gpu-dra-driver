@@ -71,7 +71,7 @@ spec:
         {{- end }}
         env:
         - name: CDI_ROOT
-          value: /var/run/cdi
+          value: {{ .Values.cdi.dynamicPath | quote }}
         - name: KUBELET_REGISTRAR_DIRECTORY_PATH
           value: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
         - name: KUBELET_PLUGINS_DIRECTORY_PATH
@@ -94,7 +94,7 @@ spec:
         - name: plugins
           mountPath: {{ .Values.kubeletPlugin.kubeletPluginsDirectoryPath | quote }}
         - name: cdi
-          mountPath: /var/run/cdi
+          mountPath: {{ .Values.cdi.dynamicPath | quote }}
         - name: dev
           mountPath: /dev
         - name: sys
@@ -108,7 +108,7 @@ spec:
           path: {{ .Values.kubeletPlugin.kubeletPluginsDirectoryPath | quote }}
       - name: cdi
         hostPath:
-          path: {{ .Values.cdi.dynamicPath }}
+          path: {{ .Values.cdi.dynamicPath | quote }}
       - name: dev
         hostPath:
           path: /dev

@@ -1,0 +1,34 @@
+{{- if .Capabilities.APIVersions.Has "security.openshift.io/v1" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "k8s-gpu-dra-driver.fullname" . }}-scc
+  labels:
+    {{- include "k8s-gpu-dra-driver.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - privileged
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "k8s-gpu-dra-driver.fullname" . }}-scc
+  namespace: {{ include "k8s-gpu-dra-driver.namespace" . }}
+  labels:
+    {{- include "k8s-gpu-dra-driver.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "k8s-gpu-dra-driver.fullname" . }}-scc
+subjects:
+- kind: ServiceAccount
+  name: {{ include "k8s-gpu-dra-driver.serviceAccountName" . }}
+  namespace: {{ include "k8s-gpu-dra-driver.namespace" . }}
+{{- end }}
