@@ -12,8 +12,8 @@ Runs two jobs in parallel:
 
 | Job | What it does |
 |-----|-------------|
-| **Lint** | Installs `pkg-config` and `libdrm-dev`, then runs `make check` which executes `golangci-lint`, `ineffassign`, and format checks. |
-| **Test** | Installs the same build dependencies, then runs `make test` to execute the Go test suite. |
+| **Lint** | Runs `make check` which executes `golangci-lint`, `ineffassign`, and format checks. |
+| **Test** | Runs `make test` to execute the Go test suite. |
 
 ### Image (`image.yaml`)
 

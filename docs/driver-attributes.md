@@ -12,6 +12,10 @@ Devices. It supports:
 Device selection can then use DRA attributes to target either full GPUs or
 partitions.
 
+## Device identity and naming
+
+- Canonical device name: `gpu-<card>-<renderD>` (e.g., `gpu-0-128`)
+
 ## Device types (full GPU vs partition)
 
 The driver distinguishes full GPUs from partitions via the `type` attribute:
@@ -25,9 +29,8 @@ full GPUs or only partitions.
 
 The following attributes are attached to each full GPU device:
 - `type` (string): `amdgpu`
-- `deviceID` (string): PCI device ID from sysfs (e.g., `0x740f`), matching
-  the DEVICE_ID field in `amd-smi static` output. All GPUs of the same model
-  share the same `deviceID`.
+- `deviceID` (string): PCI device ID from sysfs (e.g., `0x740f`). All GPUs
+  of the same model share the same `deviceID`.
 - `productName` (string): Product name (normalized)
 - `driverVersion` (semver): Kernel driver version
 - `partitionProfile` (string): For platforms that support partitioning, the
@@ -186,9 +189,9 @@ selectors:
   partition nodes). It correlates DRM indices and KFD topology to enrich device
   information (VRAM, SIMD/CU counts).
 - Pre-partitioned devices: supported and reported as distinct DRA Devices with
-  their own identity and capacities. Partitions share the same `pciBusID` and
-  `deviceID` as their parent GPU, enabling same-parent and different-parent
-  constraint patterns.
+  their own identity and capacities. Partitions share the same `pciBusID`
+  as their parent GPU, enabling same-parent and different-parent constraint
+  patterns.
 - Topology hinting: `resource.kubernetes.io/pcieRoot` and
   `resource.kubernetes.io/pciBusID` standard attributes enable topology-aware
   scheduling.
