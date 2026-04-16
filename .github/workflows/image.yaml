@@ -62,3 +62,47 @@ jobs:
       env-registry: DRIVER_IMAGE_REGISTRY
       env-name: DRIVER_IMAGE_NAME
       env-tag: DRIVER_IMAGE_TAG
+
+  # Derive a valid SemVer chart version from the auto-tag output
+  derive-chart-version:
+    name: Derive Chart Version
+    if: github.event_name == 'push' && github.repository == 'ROCm/k8s-gpu-dra-driver'
+    needs: [auto-tag]
+    runs-on: ubuntu-latest
+    outputs:
+      chart-version: ${{ steps.derive.outputs.chart-version }}
+    steps:
+      - name: Derive chart version from auto-tag
+        id: derive
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.auto-tag.outputs.tag }}"
+          BRANCH="${GITHUB_REF#refs/heads/}"
+
+          if [ "$BRANCH" = "develop" ]; then
+            # develop-4 -> 0.0.0-develop.4
+            BUILD_NUM="${TAG#develop-}"
+            CHART_VERSION="0.0.0-develop.${BUILD_NUM}"
+          else
+            # v1.0.0-3 -> 1.0.0-3
+            CHART_VERSION="${TAG#v}"
+          fi
+
+          echo "Derived chart version: ${CHART_VERSION} from tag: ${TAG}"
+          echo "chart-version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+
+  # Package and push Helm chart to OCI registry after image is pushed
+  helm-publish:
+    name: Publish Helm Chart
+    if: github.event_name == 'push' && github.repository == 'ROCm/k8s-gpu-dra-driver'
+    needs: [auto-tag, derive-chart-version, build-push]
+    uses: ROCm/common-infra-operator/.github/workflows/helm-oci-push.yaml@main
+    with:
+      chart-dir: 'helm-charts-k8s'
+      chart-version: ${{ needs.derive-chart-version.outputs.chart-version }}
+      app-version: ${{ needs.auto-tag.outputs.tag }}
+      registry: 'docker.io/amdpsdo'
+      image-repository: 'docker.io/amdpsdo/k8s-gpu-dra-driver'
+    secrets:
+      registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
