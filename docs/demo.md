@@ -269,8 +269,4 @@ Check the allocation results: both devices are partitions with different `resour
 
 ---
 
-Troubleshooting tips:
-
-- Ensure your cluster is Kubernetes 1.34 and DRA APIs are not disabled. The examples use `resource.k8s.io/v1`.
-- If the example pods fail to pull images, pre-pull or change the image to one accessible in your environment.
-- If using kind and a locally built image, ensure it is loaded into the cluster nodes (see step 1).
+For troubleshooting tips, known limitations, and how to report issues, see the [Troubleshooting Guide](troubleshooting.md).

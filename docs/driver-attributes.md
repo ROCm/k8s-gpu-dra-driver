@@ -202,3 +202,6 @@ selectors:
 
 If you need additional attributes or different representations, please open an
 issue discussing your use case.
+
+For troubleshooting missing attributes or unexpected values, see the
+[Troubleshooting Guide](troubleshooting.md#expected-attributes-missing-from-resourceslices).
