@@ -19,6 +19,7 @@ package main
 const (
 	AmdGpuDeviceType       = "amdgpu"
 	AmdPartitionDeviceType = "amdgpu-partition"
+	VfioDeviceType         = "vfio"
 	UnknownDeviceType      = "unknown"
 )
 

@@ -25,19 +25,23 @@ import (
 // AllocatableDevices represents a collection of allocatable devices mapped by their canonical names
 type AllocatableDevices map[string]*AllocatableDevice
 
-// AllocatableDevice wraps either a full AMD GPU or a partition
+// AllocatableDevice wraps either a full AMD GPU, a partition, or a VFIO device
 type AllocatableDevice struct {
 	AmdGpu       *AmdGpuInfo
 	AmdPartition *AmdPartitionInfo
+	Vfio         *AmdGpuVFIOInfo
 }
 
-// Type returns the device type (amdgpu or amdgpu-partition)
+// Type returns the device type
 func (d *AllocatableDevice) Type() string {
 	if d.AmdGpu != nil {
 		return AmdGpuDeviceType
 	}
 	if d.AmdPartition != nil {
 		return AmdPartitionDeviceType
+	}
+	if d.Vfio != nil {
+		return VfioDeviceType
 	}
 	return UnknownDeviceType
 }
@@ -49,6 +53,8 @@ func (d *AllocatableDevice) CanonicalName() string {
 		return d.AmdGpu.CanonicalName()
 	case AmdPartitionDeviceType:
 		return d.AmdPartition.CanonicalName()
+	case VfioDeviceType:
+		return d.Vfio.CanonicalName()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
@@ -60,6 +66,21 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 		return d.AmdGpu.GetDevice()
 	case AmdPartitionDeviceType:
 		return d.AmdPartition.GetDevice()
+	case VfioDeviceType:
+		return d.Vfio.GetDevice()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
+}
+
+// GetGPUPCIBusID returns the PCI bus ID for this device
+func (d *AllocatableDevice) GetGPUPCIBusID() string {
+	switch d.Type() {
+	case AmdGpuDeviceType:
+		return d.AmdGpu.PCIAddress
+	case AmdPartitionDeviceType:
+		return d.AmdPartition.Parent.PCIAddress
+	case VfioDeviceType:
+		return d.Vfio.PCIAddress
+	}
+	return ""
 }

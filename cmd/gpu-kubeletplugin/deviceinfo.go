@@ -98,6 +98,49 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 }
 
+// AmdGpuVFIOInfo represents a GPU or GPU VF bound to vfio-pci for passthrough
+type AmdGpuVFIOInfo struct {
+	UUID         string
+	PCIAddress   string
+	DeviceID     string
+	VendorID     string
+	IOMMUGroup   string
+	Index        int
+	ProductName  string
+	NumaNode     int
+	IsVF         bool
+	pciBusIDAttr deviceattribute.DeviceAttribute
+	pcieRootAttr deviceattribute.DeviceAttribute
+}
+
+// CanonicalName returns the canonical name for this VFIO device
+func (d *AmdGpuVFIOInfo) CanonicalName() string {
+	return fmt.Sprintf("gpu-vfio-%d", d.Index)
+}
+
+// GetDevice returns the DRA Device representation for a VFIO passthrough GPU
+func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
+	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+		"type":       {StringValue: ptr.To(VfioDeviceType)},
+		"numaNode":   {IntValue: ptr.To(int64(d.NumaNode))},
+		"iommuGroup": {StringValue: ptr.To(d.IOMMUGroup)},
+		"pciAddr":    {StringValue: ptr.To(d.PCIAddress)},
+	}
+	if d.ProductName != "" {
+		attributes["productName"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.ProductName)}
+	}
+	if d.pciBusIDAttr.Name != "" {
+		attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
+	}
+	if d.pcieRootAttr.Name != "" {
+		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	}
+	return resourceapi.Device{
+		Name:       d.CanonicalName(),
+		Attributes: attributes,
+	}
+}
+
 // CanonicalName returns the canonical name for this partition
 func (d *AmdPartitionInfo) CanonicalName() string {
 	return fmt.Sprintf("gpu-%v-%v", d.cardIndex, d.renderIndex)

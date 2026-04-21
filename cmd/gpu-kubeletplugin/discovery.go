@@ -175,5 +175,68 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	}
 
 	klog.Infof("Discovered %d AMD GPU devices", len(alldevices))
+
+	// Discover VFIO passthrough devices (PFs bound to vfio-pci and SR-IOV VFs)
+	vfioIndex := 0
+	pfMap, err := amdgpu.GetPFMapping()
+	if err != nil {
+		klog.V(2).Infof("No VFIO PF devices found: %v", err)
+	} else {
+		for _, pfs := range pfMap {
+			for _, pf := range pfs {
+				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pf.PCIAddress)
+				if err != nil {
+					klog.Warningf("Failed to get PCIe root for VFIO PF %s: %v", pf.PCIAddress, err)
+				}
+				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
+				device := &AmdGpuVFIOInfo{
+					PCIAddress:   pf.PCIAddress,
+					IOMMUGroup:   pf.IOMMUGroup,
+					Index:        vfioIndex,
+					ProductName:  pf.ProductName,
+					NumaNode:     pf.NumaNode,
+					IsVF:         false,
+					pciBusIDAttr: pciBusIDAttr,
+					pcieRootAttr: pcieRootAttr,
+				}
+				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
+				klog.Infof("Found VFIO PF device: %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
+				vfioIndex++
+			}
+		}
+	}
+
+	vfMap, err := amdgpu.GetVFMapping()
+	if err != nil {
+		klog.V(2).Infof("No VFIO VF devices found: %v", err)
+	} else {
+		for _, vfs := range vfMap {
+			for _, vf := range vfs {
+				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(vf.PCIAddress)
+				if err != nil {
+					klog.Warningf("Failed to get PCIe root for VFIO VF %s: %v", vf.PCIAddress, err)
+				}
+				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
+				device := &AmdGpuVFIOInfo{
+					PCIAddress:   vf.PCIAddress,
+					IOMMUGroup:   vf.IOMMUGroup,
+					Index:        vfioIndex,
+					ProductName:  vf.ProductName,
+					NumaNode:     vf.NumaNode,
+					IsVF:         true,
+					pciBusIDAttr: pciBusIDAttr,
+					pcieRootAttr: pcieRootAttr,
+				}
+				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
+				klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
+				vfioIndex++
+			}
+		}
+	}
+
+	if vfioIndex > 0 {
+		klog.Infof("Discovered %d VFIO passthrough devices", vfioIndex)
+	}
+
 	return alldevices, nil
 }
