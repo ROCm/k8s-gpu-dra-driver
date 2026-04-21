@@ -45,7 +45,8 @@ const (
 	GroupName = "gpu.resource.amd.com"
 	Version   = "v1alpha1"
 
-	GpuConfigKind = "GpuConfig"
+	GpuConfigKind        = "GpuConfig"
+	VfioDeviceConfigKind = "VfioDeviceConfig"
 )
 
 // Decoder implements a decoder for objects in this API group.
@@ -78,6 +79,34 @@ func (c *GpuConfig) Normalize() error {
 	return nil
 }
 
+// VfioDeviceConfig holds configuration for VFIO passthrough devices.
+type VfioDeviceConfig struct {
+	metav1.TypeMeta `json:",inline"`
+}
+
+// DefaultVfioDeviceConfig provides the default VFIO configuration.
+func DefaultVfioDeviceConfig() *VfioDeviceConfig {
+	return &VfioDeviceConfig{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: GroupName + "/" + Version,
+			Kind:       VfioDeviceConfigKind,
+		},
+	}
+}
+
+// Normalize updates a VfioDeviceConfig with implied default values.
+func (c *VfioDeviceConfig) Normalize() error {
+	if c == nil {
+		return fmt.Errorf("config is 'nil'")
+	}
+	return nil
+}
+
+// Validate checks a VfioDeviceConfig for invalid settings.
+func (c *VfioDeviceConfig) Validate() error {
+	return nil
+}
+
 func init() {
 	// Create a new scheme and add our types to it. If at some point in the
 	// future a new version of the configuration API becomes necessary, then
@@ -90,6 +119,7 @@ func init() {
 	}
 	scheme.AddKnownTypes(schemeGroupVersion,
 		&GpuConfig{},
+		&VfioDeviceConfig{},
 	)
 	metav1.AddToGroupVersion(scheme, schemeGroupVersion)
 

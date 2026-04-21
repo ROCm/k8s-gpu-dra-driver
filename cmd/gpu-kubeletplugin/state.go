@@ -79,6 +79,7 @@ type DeviceState struct {
 	cdi               *CDIHandler
 	allocatable       AllocatableDevices
 	checkpointManager checkpointmanager.CheckpointManager
+	vfioManager       *VfioPciManager
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -102,9 +103,27 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
 	}
 
+	// Initialize VFIO manager if any VFIO devices were discovered.
+	var vfioMgr *VfioPciManager
+	hasVFIO := false
+	for _, dev := range allocatable {
+		if dev.Type() == VfioDeviceType {
+			hasVFIO = true
+			break
+		}
+	}
+	if hasVFIO {
+		var err2 error
+		vfioMgr, err2 = NewVfioPciManager()
+		if err2 != nil {
+			klog.Warningf("VFIO manager initialization failed (VFIO devices will not be usable): %v", err2)
+		}
+	}
+
 	state := &DeviceState{
 		cdi:               cdi,
 		allocatable:       allocatable,
+		vfioManager:       vfioMgr,
 		checkpointManager: checkpointManager,
 	}
 
@@ -238,34 +257,28 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// config to the set of device allocation results.
 	perDeviceCDIContainerEdits := make(PerDeviceCDIContainerEdits)
 	for c, results := range configResultsMap {
-		// Cast the opaque config to a GpuConfig
-		var config *configapi.GpuConfig
 		switch castConfig := c.(type) {
 		case *configapi.GpuConfig:
-			config = castConfig
+			if err := castConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("error normalizing GPU config: %w", err)
+			}
+			containerEdits, err := s.applyConfig(castConfig, results)
+			if err != nil {
+				return nil, fmt.Errorf("error applying GPU config: %w", err)
+			}
+			for k, v := range containerEdits {
+				perDeviceCDIContainerEdits[k] = v
+			}
+		case *configapi.VfioDeviceConfig:
+			for _, result := range results {
+				edits, err := s.applyVFIOConfig(result)
+				if err != nil {
+					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
+				}
+				perDeviceCDIContainerEdits[result.Device] = edits
+			}
 		default:
-			return nil, fmt.Errorf("runtime object is not a regognized configuration")
-		}
-
-		// Normalize the config to set any implied defaults.
-		if err := config.Normalize(); err != nil {
-			return nil, fmt.Errorf("error normalizing GPU config: %w", err)
-		}
-
-		// Validate the config to ensure its integrity.
-		if err := config.Validate(); err != nil {
-			return nil, fmt.Errorf("error validating GPU config: %w", err)
-		}
-
-		// Apply the config to the list of results associated with it.
-		containerEdits, err := s.applyConfig(config, results)
-		if err != nil {
-			return nil, fmt.Errorf("error applying GPU config: %w", err)
-		}
-
-		// Merge any new container edits with the overall per device map.
-		for k, v := range containerEdits {
-			perDeviceCDIContainerEdits[k] = v
+			return nil, fmt.Errorf("runtime object is not a recognized configuration")
 		}
 	}
 
@@ -274,12 +287,19 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	var preparedDevices PreparedDevices
 	for _, results := range configResultsMap {
 		for _, result := range results {
+			allocDev := s.allocatable[result.Device]
+			var cdiDeviceIDs []string
+			if allocDev != nil && allocDev.Type() == VfioDeviceType {
+				cdiDeviceIDs = s.cdi.GetClaimDevicesVFIO(string(claim.UID), []string{result.Device})
+			} else {
+				cdiDeviceIDs = s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device})
+			}
 			device := &PreparedDevice{
 				Device: drapbv1.Device{
 					RequestNames: []string{result.Request},
 					PoolName:     result.Pool,
 					DeviceName:   result.Device,
-					CdiDeviceIds: s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device}),
+					CdiDeviceIds: cdiDeviceIDs,
 				},
 				ContainerEdits: perDeviceCDIContainerEdits[result.Device],
 			}
@@ -459,4 +479,35 @@ func GetOpaqueDeviceConfigs(
 	}
 
 	return resultConfigs, nil
+}
+
+// applyVFIOConfig configures a VFIO passthrough device and returns CDI edits.
+func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocationResult) (*cdiapi.ContainerEdits, error) {
+	device, exists := s.allocatable[result.Device]
+	if !exists || device.Vfio == nil {
+		return nil, fmt.Errorf("device %s is not a VFIO device", result.Device)
+	}
+
+	if s.vfioManager != nil {
+		if err := s.vfioManager.Configure(device.Vfio); err != nil {
+			return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
+		}
+	}
+
+	vfioDevPath := fmt.Sprintf("/dev/vfio/%s", device.Vfio.IOMMUGroup)
+	edits := &cdispec.ContainerEdits{
+		DeviceNodes: []*cdispec.DeviceNode{
+			{
+				Path:     vfioDevPath,
+				HostPath: vfioDevPath,
+			},
+			{
+				Path:     "/dev/vfio/vfio",
+				HostPath: "/dev/vfio/vfio",
+			},
+		},
+	}
+
+	klog.Infof("Applied VFIO config for %s: iommuGroup=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup)
+	return &cdiapi.ContainerEdits{ContainerEdits: edits}, nil
 }

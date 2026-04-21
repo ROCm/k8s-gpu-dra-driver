@@ -147,3 +147,14 @@ func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []string) []stri
 
 	return cdiDevices
 }
+
+// GetClaimDevicesVFIO returns CDI device IDs for VFIO devices without the
+// common device (/dev/kfd doesn't exist for vfio-pci bound GPUs).
+func (cdi *CDIHandler) GetClaimDevicesVFIO(claimUID string, devices []string) []string {
+	var cdiDevices []string
+	for _, device := range devices {
+		cdiDevice := cdiparser.QualifiedName(cdiVendor, cdiClass, fmt.Sprintf("%s-%s", claimUID, device))
+		cdiDevices = append(cdiDevices, cdiDevice)
+	}
+	return cdiDevices
+}
