@@ -34,6 +34,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -97,6 +98,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 				},
 			},
 		},
+	}
+
+	if resourcesJSON, err := json.MarshalIndent(resources, "", "  "); err != nil {
+		klog.Warningf("Failed to marshal ResourceSlice to JSON: %v", err)
+	} else {
+		klog.Infof("Publishing ResourceSlice:\n%s", string(resourcesJSON))
 	}
 
 	driver.healthcheck, err = startHealthcheck(ctx, config)
