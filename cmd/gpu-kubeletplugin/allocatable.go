@@ -59,6 +59,17 @@ func (d *AllocatableDevice) CanonicalName() string {
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
 
+// GetPCIAddress returns the PCI address for the device
+func (d *AllocatableDevice) GetPCIAddress() string {
+	switch d.Type() {
+	case AmdGpuDeviceType:
+		return d.AmdGpu.PCIAddress
+	case AmdPartitionDeviceType:
+		return d.AmdPartition.Parent.PCIAddress
+	}
+	return ""
+}
+
 // GetDevice returns the DRA Device representation for Kubernetes
 func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {

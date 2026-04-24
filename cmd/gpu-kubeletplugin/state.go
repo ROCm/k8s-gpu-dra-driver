@@ -35,6 +35,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"syscall"
@@ -256,6 +257,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// need to be prepared. Track container edits generated from applying the
 	// config to the set of device allocation results.
 	perDeviceCDIContainerEdits := make(PerDeviceCDIContainerEdits)
+	isVFIO := false
 	for c, results := range configResultsMap {
 		switch castConfig := c.(type) {
 		case *configapi.GpuConfig:
@@ -311,7 +313,138 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
+	for _, device := range devices {
+		allocDev, exists := s.allocatable[device.DeviceName]
+		if !exists {
+			continue
+		}
+		pciAddr := allocDev.GetPCIAddress()
+		if pciAddr == "" {
+			continue
+		}
+		// If the device was bound to vfio-pci, rebind it to amdgpu
+		driverPath := fmt.Sprintf("/sys/bus/pci/devices/%s/driver", pciAddr)
+		if target, err := os.Readlink(driverPath); err == nil && filepath.Base(target) == "vfio-pci" {
+			klog.Infof("Rebinding device %s from vfio-pci to amdgpu", pciAddr)
+			unbindFromDriver(pciAddr, "vfio-pci")
+			bindToDriver(pciAddr, "amdgpu")
+		}
+	}
 	return nil
+}
+
+// bindToVFIO unbinds a PCI device from its current driver and binds it to vfio-pci.
+func bindToVFIO(pciAddr string) error {
+	// Unbind from current driver
+	driverPath := fmt.Sprintf("/sys/bus/pci/devices/%s/driver", pciAddr)
+	if target, err := os.Readlink(driverPath); err == nil {
+		currentDriver := filepath.Base(target)
+		klog.Infof("Unbinding %s from %s", pciAddr, currentDriver)
+		unbindFromDriver(pciAddr, currentDriver)
+	}
+
+	// Set driver_override to vfio-pci
+	overridePath := fmt.Sprintf("/sys/bus/pci/devices/%s/driver_override", pciAddr)
+	if err := os.WriteFile(overridePath, []byte("vfio-pci"), 0644); err != nil {
+		return fmt.Errorf("failed to set driver_override for %s: %v", pciAddr, err)
+	}
+
+	// Bind to vfio-pci
+	if err := bindToDriver(pciAddr, "vfio-pci"); err != nil {
+		return fmt.Errorf("failed to bind %s to vfio-pci: %v", pciAddr, err)
+	}
+
+	// Clear driver_override
+	if err := os.WriteFile(overridePath, []byte(""), 0644); err != nil {
+		klog.Warningf("Failed to clear driver_override for %s: %v", pciAddr, err)
+	}
+
+	klog.Infof("Successfully bound %s to vfio-pci", pciAddr)
+	return nil
+}
+
+func unbindFromDriver(pciAddr, driverName string) {
+	unbindPath := fmt.Sprintf("/sys/bus/pci/drivers/%s/unbind", driverName)
+	if err := os.WriteFile(unbindPath, []byte(pciAddr), 0644); err != nil {
+		klog.Warningf("Failed to unbind %s from %s: %v", pciAddr, driverName, err)
+	}
+}
+
+func bindToDriver(pciAddr, driverName string) error {
+	bindPath := fmt.Sprintf("/sys/bus/pci/drivers/%s/bind", driverName)
+	if err := os.WriteFile(bindPath, []byte(pciAddr), 0644); err != nil {
+		return fmt.Errorf("failed to bind %s to %s: %v", pciAddr, driverName, err)
+	}
+	return nil
+}
+
+// getIOMMUGroup returns the IOMMU group number for a PCI device.
+func getIOMMUGroup(pciAddr string) (string, error) {
+	iommuPath := fmt.Sprintf("/sys/bus/pci/devices/%s/iommu_group", pciAddr)
+	target, err := os.Readlink(iommuPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read IOMMU group for %s: %v", pciAddr, err)
+	}
+	return filepath.Base(target), nil
+}
+
+// applyVFIOConfig binds a device to vfio-pci and returns CDI container edits for /dev/vfio/*.
+func (s *DeviceState) applyVFIOConfig(results []*resourceapi.DeviceRequestAllocationResult) (PerDeviceCDIContainerEdits, error) {
+	perDeviceEdits := make(PerDeviceCDIContainerEdits)
+
+	for _, result := range results {
+		allocDev, exists := s.allocatable[result.Device]
+		if !exists {
+			return nil, fmt.Errorf("device %s not found in allocatable", result.Device)
+		}
+		pciAddr := allocDev.GetPCIAddress()
+		if pciAddr == "" {
+			return nil, fmt.Errorf("device %s has no PCI address", result.Device)
+		}
+
+		// Bind to vfio-pci
+		if err := bindToVFIO(pciAddr); err != nil {
+			return nil, fmt.Errorf("failed to bind %s to vfio-pci: %v", result.Device, err)
+		}
+
+		// Get IOMMU group
+		iommuGroup, err := getIOMMUGroup(pciAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get IOMMU group for %s: %v", result.Device, err)
+		}
+
+		vfioDevPath := fmt.Sprintf("/dev/vfio/%s", iommuGroup)
+		vfioMajor, vfioMinor, vfioDevType, vfioPermission, err := s.getDeviceAttrs(vfioDevPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get device attrs for %s: %v", vfioDevPath, err)
+		}
+
+		edits := &cdispec.ContainerEdits{
+			DeviceNodes: []*cdispec.DeviceNode{
+				{
+					Path:        "/dev/vfio/vfio",
+					HostPath:    "/dev/vfio/vfio",
+					Type:        "c",
+					Major:       10,
+					Minor:       196,
+					Permissions: "rwm",
+				},
+				{
+					Path:        vfioDevPath,
+					HostPath:    vfioDevPath,
+					Type:        vfioDevType,
+					Major:       vfioMajor,
+					Minor:       vfioMinor,
+					Permissions: vfioPermission,
+				},
+			},
+		}
+
+		perDeviceEdits[result.Device] = &cdiapi.ContainerEdits{ContainerEdits: edits}
+		klog.Infof("VFIO configured for device %s: PCI %s, IOMMU group %s", result.Device, pciAddr, iommuGroup)
+	}
+
+	return perDeviceEdits, nil
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.
