@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"sync"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
@@ -139,6 +141,9 @@ func unbindFromDriver(pciAddr string) error {
 	// Use absolute sysfs path. The readlink gives a relative path like
 	// ../../../../bus/pci/drivers/amdgpu — extract just the driver name.
 	driverName := filepath.Base(driverRel)
+	if !isValidDriverName(driverName) {
+		return fmt.Errorf("invalid driver name for %s: %q", pciAddr, driverName)
+	}
 	unbindPath := filepath.Join("/sys/bus/pci/drivers", driverName, "unbind")
 	if err := os.WriteFile(unbindPath, []byte(pciAddr), 0200); err != nil {
 		return fmt.Errorf("failed to write to %s: %w", unbindPath, err)
@@ -160,8 +165,9 @@ func bindToDriver(pciAddr, driver string) error {
 	// Write to the target driver's bind file.
 	bindPath := filepath.Join("/sys/bus/pci/drivers", driver, "bind")
 	if err := os.WriteFile(bindPath, []byte(pciAddr), 0200); err != nil {
-		// Clean up driver_override on failure.
-		_ = os.WriteFile(overridePath, []byte(""), 0200)
+		if cleanupErr := os.WriteFile(overridePath, []byte(""), 0200); cleanupErr != nil {
+			klog.Warningf("Failed to clear driver_override for %s after bind failure: %v", pciAddr, cleanupErr)
+		}
 		return fmt.Errorf("failed to write to %s: %w", bindPath, err)
 	}
 
@@ -196,6 +202,10 @@ func GetVfioCDIContainerEdits(info *AmdGpuVFIOInfo) (*cdiapi.ContainerEdits, err
 		}
 	}
 
+	if _, err := strconv.Atoi(iommuGroup); err != nil {
+		return nil, fmt.Errorf("invalid IOMMU group format for %s: %q", info.PCIAddress, iommuGroup)
+	}
+
 	vfioDevPath := filepath.Join(amdgpu.VFIODevicesRoot, iommuGroup)
 
 	// Read major/minor for proper CDI spec.
@@ -226,6 +236,12 @@ func GetVfioCDIContainerEdits(info *AmdGpuVFIOInfo) (*cdiapi.ContainerEdits, err
 			},
 		},
 	}, nil
+}
+
+var validDriverNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func isValidDriverName(name string) bool {
+	return name != "" && name != "." && name != ".." && validDriverNameRE.MatchString(name)
 }
 
 // getDeviceAttrs is defined in state.go using syscall.Stat_t and unix.Major/Minor.
