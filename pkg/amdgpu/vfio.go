@@ -328,6 +328,8 @@ func readNumaNode(pciPath string) int {
 	}
 	val := strings.TrimSpace(string(data))
 	var node int
-	fmt.Sscanf(val, "%d", &node)
+	if _, err := fmt.Sscanf(val, "%d", &node); err != nil {
+		return -1
+	}
 	return node
 }

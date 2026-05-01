@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
@@ -229,59 +228,5 @@ func GetVfioCDIContainerEdits(info *AmdGpuVFIOInfo) (*cdiapi.ContainerEdits, err
 	}, nil
 }
 
-// getDeviceAttrs reads major, minor, type, and permissions for a device path.
-func getDeviceAttrs(path string) (major, minor int64, devType, permissions string, err error) {
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return 0, 0, "", "", fmt.Errorf("failed to stat %s: %w", path, err)
-	}
+// getDeviceAttrs is defined in state.go using syscall.Stat_t and unix.Major/Minor.
 
-	stat, ok := fileInfo.Sys().(*statGetter)
-	if !ok {
-		// Use the unix package approach from the existing code.
-		return getDeviceAttrsUnix(path)
-	}
-	_ = stat
-	return getDeviceAttrsUnix(path)
-}
-
-// getDeviceAttrsUnix reads device attributes using unix syscalls.
-func getDeviceAttrsUnix(path string) (major, minor int64, devType, permissions string, err error) {
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	// Check file mode for device type.
-	if (fileInfo.Mode() & os.ModeCharDevice) != 0 {
-		devType = "c"
-	} else if (fileInfo.Mode() & os.ModeDevice) != 0 {
-		devType = "b"
-	} else {
-		return 0, 0, "", "", fmt.Errorf("not a device file: %s", path)
-	}
-
-	permissions = "rwm"
-
-	// Extract major/minor from syscall stat.
-	sysStatIface := fileInfo.Sys()
-	if sysStatIface == nil {
-		return 0, 0, devType, permissions, nil
-	}
-
-	// Use reflection-free approach: parse from /sys or just return type+perms.
-	// The CDI runtime can resolve major/minor from the path.
-	return 0, 0, devType, permissions, nil
-}
-
-// statGetter is a placeholder interface; real implementation uses syscall.Stat_t.
-type statGetter interface{}
-
-// readSysfsString reads a sysfs file and returns the trimmed content.
-func readSysfsString(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}

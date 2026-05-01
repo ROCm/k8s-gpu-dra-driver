@@ -66,6 +66,8 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 		return d.AmdGpu.PCIAddress
 	case AmdPartitionDeviceType:
 		return d.AmdPartition.Parent.PCIAddress
+	case VfioDeviceType:
+		return d.Vfio.PCIAddress
 	}
 	return ""
 }
