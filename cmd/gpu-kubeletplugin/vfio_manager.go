@@ -69,8 +69,9 @@ func NewVfioPciManager() (*VfioPciManager, error) {
 // Configure binds a GPU to the vfio-pci driver. If the device is already
 // bound to vfio-pci, this is a no-op.
 func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
-	perGpuLock.Get(info.PCIAddress).Lock()
-	defer perGpuLock.Get(info.PCIAddress).Unlock()
+	gpuMu := perGpuLock.Get(info.PCIAddress)
+	gpuMu.Lock()
+	defer gpuMu.Unlock()
 
 	currentDriver, err := amdgpu.GetPCIDriver(info.PCIAddress)
 	if err != nil {
