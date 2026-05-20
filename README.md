@@ -4,8 +4,6 @@ This repository implements an AMD GPU resource driver for Kubernetes' Dynamic
 Resource Allocation (DRA) feature. The driver exposes device classes and
 implements allocation and lifecycle behavior for GPU resources on nodes.
 
-> Status: Experimental (alpha). Not recommended for production environments yet.
-
 ## DRA Concepts
 
 - Device class: a logical grouping of devices exposed by the driver (for
