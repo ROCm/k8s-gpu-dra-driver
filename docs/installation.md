@@ -4,6 +4,26 @@ This document collects the common build, package, and demo commands used for
 working with the k8s-gpu-dra-driver repository. It pulls together the Makefile
 and demo script workflows so you can reproduce builds and demos locally.
 
+## Quick Start
+
+Install the DRA driver from the published Helm repository:
+
+```bash
+# Install Helm
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+
+# Add the Helm repository
+helm repo add rocm-k8s-gpu-dra-driver https://rocm.github.io/k8s-gpu-dra-driver
+helm repo update
+
+# Install the DRA driver
+helm install k8s-gpu-dra-driver rocm-k8s-gpu-dra-driver/k8s-gpu-dra-driver \
+  --namespace kube-amd-gpu \
+  --create-namespace
+```
+
 ## Prerequisites
 
 - GNU Make 3.81+
