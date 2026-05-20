@@ -41,6 +41,26 @@ https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocat
 - `scripts/` — project-level build and release helpers
 - `docs/` — documentation (installation, developer guides) (browse: https://github.com/ROCm/k8s-gpu-dra-driver/tree/main/docs)
 
+## Quick Start
+
+Install the DRA driver from the published Helm repository:
+
+```bash
+# Install Helm
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+
+# Add the Helm repository
+helm repo add rocm-k8s-gpu-dra-driver https://rocm.github.io/k8s-gpu-dra-driver
+helm repo update
+
+# Install the DRA driver
+helm install k8s-gpu-dra-driver rocm-k8s-gpu-dra-driver/k8s-gpu-dra-driver \
+  --namespace kube-amd-gpu \
+  --create-namespace
+```
+
 ## Getting started
 
 Read the Installation & Developer Guide for full, step-by-step installation and developer
