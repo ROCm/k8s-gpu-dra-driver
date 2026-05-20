@@ -66,8 +66,8 @@ func NewVfioPciManager() (*VfioPciManager, error) {
 	return &VfioPciManager{}, nil
 }
 
-// Configure binds a GPU to the vfio-pci driver. If the device is already
-// bound to vfio-pci, this is a no-op.
+// Configure binds a GIM SR-IOV VF to the vfio-pci driver. Records the
+// pre-configure driver so Unconfigure knows whether to rebind.
 func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 	gpuMu := perGpuLock.Get(info.PCIAddress)
 	gpuMu.Lock()
@@ -77,19 +77,22 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 	}
+
+	if info.preConfigureDriver == "" {
+		info.preConfigureDriver = currentDriver
+	}
+
 	if currentDriver == amdgpu.VFIODriverName {
 		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
 		return nil
 	}
 
-	// If currently on amdgpu, unbind first.
 	if currentDriver != "" {
 		if err := unbindFromDriver(info.PCIAddress); err != nil {
 			return fmt.Errorf("failed to unbind %s from %s: %w", info.PCIAddress, currentDriver, err)
 		}
 	}
 
-	// Bind to vfio-pci.
 	if err := bindToDriver(info.PCIAddress, amdgpu.VFIODriverName); err != nil {
 		return fmt.Errorf("failed to bind %s to vfio-pci: %w", info.PCIAddress, err)
 	}
@@ -98,33 +101,36 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 	return nil
 }
 
-// Unconfigure rebinds a GPU back to the amdgpu driver.
+// Unconfigure rebinds a VF back to its pre-configure driver. If the VF was
+// already on vfio-pci before Configure, it stays on vfio-pci.
 func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
 	perGpuLock.Get(info.PCIAddress).Lock()
 	defer perGpuLock.Get(info.PCIAddress).Unlock()
+
+	if info.preConfigureDriver == amdgpu.VFIODriverName || info.preConfigureDriver == "" {
+		klog.Infof("Device %s was pre-bound to %q, leaving on vfio-pci", info.PCIAddress, info.preConfigureDriver)
+		return nil
+	}
 
 	currentDriver, err := amdgpu.GetPCIDriver(info.PCIAddress)
 	if err != nil {
 		return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 	}
-	if currentDriver == amdgpuDriver {
-		klog.Infof("Device %s already bound to amdgpu", info.PCIAddress)
+	if currentDriver == info.preConfigureDriver {
 		return nil
 	}
-	if currentDriver == "" {
-		// No driver bound, just bind to amdgpu.
-		return bindToDriver(info.PCIAddress, amdgpuDriver)
+
+	if currentDriver != "" {
+		if err := unbindFromDriver(info.PCIAddress); err != nil {
+			return fmt.Errorf("failed to unbind %s from %s: %w", info.PCIAddress, currentDriver, err)
+		}
 	}
 
-	if err := unbindFromDriver(info.PCIAddress); err != nil {
-		return fmt.Errorf("failed to unbind %s from %s: %w", info.PCIAddress, currentDriver, err)
+	if err := bindToDriver(info.PCIAddress, info.preConfigureDriver); err != nil {
+		return fmt.Errorf("failed to bind %s to %s: %w", info.PCIAddress, info.preConfigureDriver, err)
 	}
 
-	if err := bindToDriver(info.PCIAddress, amdgpuDriver); err != nil {
-		return fmt.Errorf("failed to bind %s to amdgpu: %w", info.PCIAddress, err)
-	}
-
-	klog.Infof("Unconfigured %s: rebound to amdgpu", info.PCIAddress)
+	klog.Infof("Unconfigured %s: rebound to %s", info.PCIAddress, info.preConfigureDriver)
 	return nil
 }
 
@@ -246,4 +252,3 @@ func isValidDriverName(name string) bool {
 }
 
 // getDeviceAttrs is defined in state.go using syscall.Stat_t and unix.Major/Minor.
-

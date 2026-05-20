@@ -98,19 +98,20 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 }
 
-// AmdGpuVFIOInfo represents a GPU or GPU VF bound to vfio-pci for passthrough
+// AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
 type AmdGpuVFIOInfo struct {
-	UUID         string
-	PCIAddress   string
-	DeviceID     string
-	VendorID     string
-	IOMMUGroup   string
-	Index        int
-	ProductName  string
-	NumaNode     int
-	IsVF         bool
-	pciBusIDAttr deviceattribute.DeviceAttribute
-	pcieRootAttr deviceattribute.DeviceAttribute
+	UUID               string
+	PCIAddress         string
+	DeviceID           string
+	VendorID           string
+	IOMMUGroup         string
+	Index              int
+	ProductName        string
+	NumaNode           int
+	IsVF               bool
+	pciBusIDAttr       deviceattribute.DeviceAttribute
+	pcieRootAttr       deviceattribute.DeviceAttribute
+	preConfigureDriver string
 }
 
 // CanonicalName returns the canonical name for this VFIO device

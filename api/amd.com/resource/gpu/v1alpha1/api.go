@@ -58,10 +58,6 @@ var Decoder runtime.Decoder
 // GpuConfig holds the set of parameters for configuring a GPU.
 type GpuConfig struct {
 	metav1.TypeMeta `json:",inline"`
-	// Driver selects the host driver binding mode.
-	// Empty string (default) uses the native amdgpu/ROCm driver.
-	// "vfio-pci" binds the GPU to vfio-pci for VM passthrough.
-	Driver string `json:"driver,omitempty"`
 }
 
 // DefaultGpuConfig provides the default GPU configuration.

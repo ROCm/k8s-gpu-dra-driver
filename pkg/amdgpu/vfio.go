@@ -60,23 +60,7 @@ const (
 	VFIOModulePath = "/sys/module/vfio_pci"
 )
 
-// PFInfo holds metadata for a Physical Function discovered in VFIO passthrough mode.
-type PFInfo struct {
-	// PCIAddress is the PCI BDF address (e.g. "0000:c0:00.0").
-	PCIAddress string
-	// DeviceID is the PCI device ID (e.g. "0x7400").
-	DeviceID string
-	// VendorID is the PCI vendor ID (always "0x1002" for AMD).
-	VendorID string
-	// IOMMUGroup is the IOMMU group number for this device.
-	IOMMUGroup string
-	// ProductName is the human-readable device name from sysfs.
-	ProductName string
-	// NumaNode is the NUMA node affinity.
-	NumaNode int
-}
-
-// VFInfo holds metadata for a Virtual Function discovered via SR-IOV.
+// VFInfo holds metadata for a Virtual Function discovered via GIM SR-IOV.
 type VFInfo struct {
 	// ParentPCIAddress is the PCI address of the parent PF.
 	ParentPCIAddress string
@@ -94,74 +78,11 @@ type VFInfo struct {
 	NumaNode int
 }
 
-// GetPFMapping scans PCI devices for AMD GPUs whose Physical Functions are
-// bound to the vfio-pci driver (PF passthrough mode). Returns a map keyed by
-// IOMMU group ID, with each value being the list of PFs in that group.
-//
-// This is ported from the AMD k8s-device-plugin gpu-virtualization branch.
-func GetPFMapping() (map[string][]PFInfo, error) {
-	pfMap := make(map[string][]PFInfo)
-
-	entries, err := os.ReadDir(PCIDevicePath)
-	if err != nil {
-		return nil, fmt.Errorf("error reading %s: %v", PCIDevicePath, err)
-	}
-
-	for _, entry := range entries {
-		pciAddr := entry.Name()
-		pciPath := filepath.Join(PCIDevicePath, pciAddr)
-
-		// Only consider AMD devices.
-		vendor, err := readSysfsFile(filepath.Join(pciPath, "vendor"))
-		if err != nil {
-			continue
-		}
-		if vendor != AMDVendorID {
-			continue
-		}
-
-		// Check if this device is bound to vfio-pci.
-		driverLink := filepath.Join(pciPath, "driver")
-		driver, err := os.Readlink(driverLink)
-		if err != nil {
-			continue
-		}
-		if filepath.Base(driver) != VFIODriverName {
-			continue
-		}
-
-		// Get IOMMU group.
-		iommuGroup, err := GetIOMMUGroup(pciAddr)
-		if err != nil {
-			glog.Warningf("Failed to get IOMMU group for %s: %v", pciAddr, err)
-			continue
-		}
-
-		deviceID, _ := readSysfsFile(filepath.Join(pciPath, "device"))
-		productName := readProductName(pciAddr)
-		numaNode := readNumaNode(pciPath)
-
-		pfInfo := PFInfo{
-			PCIAddress:  pciAddr,
-			DeviceID:    deviceID,
-			VendorID:    vendor,
-			IOMMUGroup:  iommuGroup,
-			ProductName: productName,
-			NumaNode:    numaNode,
-		}
-		pfMap[iommuGroup] = append(pfMap[iommuGroup], pfInfo)
-
-		glog.Infof("VFIO PF: %s IOMMU group: %s device: %s", pciAddr, iommuGroup, deviceID)
-	}
-	return pfMap, nil
-}
-
-// GetVFMapping scans PCI devices for AMD GPUs whose Physical Functions are
-// bound to the GIM driver (SR-IOV) and discovers their Virtual Functions.
-// Returns a map keyed by IOMMU group ID, with each value being the list of
-// VFs in that group.
-//
-// This is ported from the AMD k8s-device-plugin gpu-virtualization branch.
+// GetVFMapping scans for AMD GPU Virtual Functions created by the GIM SR-IOV
+// driver. It finds PFs managed by GIM and discovers their VFs via virtfn*
+// symlinks. Returns a map keyed by IOMMU group ID. VFs are discovered
+// regardless of their current driver binding — the DRA driver handles
+// binding to vfio-pci at prepare time.
 func GetVFMapping() (map[string][]VFInfo, error) {
 	vfMap := make(map[string][]VFInfo)
 
