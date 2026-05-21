@@ -60,6 +60,71 @@ const (
 	VFIOModulePath = "/sys/module/vfio_pci"
 )
 
+// PFInfo holds metadata for a Physical Function already bound to vfio-pci
+// by the GPU Operator (pf-passthrough mode). The DRA driver discovers these
+// but does not manage their driver binding.
+type PFInfo struct {
+	PCIAddress  string
+	DeviceID    string
+	VendorID    string
+	IOMMUGroup  string
+	ProductName string
+	NumaNode    int
+}
+
+// GetPFMapping discovers AMD GPU PFs that are already bound to vfio-pci
+// (managed by the GPU Operator in pf-passthrough mode). The DRA driver does
+// not bind or unbind PFs — it only discovers them for allocation.
+func GetPFMapping() (map[string][]PFInfo, error) {
+	pfMap := make(map[string][]PFInfo)
+
+	entries, err := os.ReadDir(PCIDevicePath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading %s: %v", PCIDevicePath, err)
+	}
+
+	for _, entry := range entries {
+		pciAddr := entry.Name()
+		pciPath := filepath.Join(PCIDevicePath, pciAddr)
+
+		vendor, err := readSysfsFile(filepath.Join(pciPath, "vendor"))
+		if err != nil || vendor != AMDVendorID {
+			continue
+		}
+
+		driver, err := GetPCIDriver(pciAddr)
+		if err != nil || driver != VFIODriverName {
+			continue
+		}
+
+		// Skip VFs — they have a physfn symlink pointing to their parent PF.
+		if _, err := os.Readlink(filepath.Join(pciPath, "physfn")); err == nil {
+			continue
+		}
+
+		iommuGroup, err := GetIOMMUGroup(pciAddr)
+		if err != nil {
+			glog.Warningf("Failed to get IOMMU group for %s: %v", pciAddr, err)
+			continue
+		}
+
+		deviceID, _ := readSysfsFile(filepath.Join(pciPath, "device"))
+		productName := readProductName(pciAddr)
+		numaNode := readNumaNode(pciPath)
+
+		pfMap[iommuGroup] = append(pfMap[iommuGroup], PFInfo{
+			PCIAddress:  pciAddr,
+			DeviceID:    deviceID,
+			VendorID:    vendor,
+			IOMMUGroup:  iommuGroup,
+			ProductName: productName,
+			NumaNode:    numaNode,
+		})
+		glog.Infof("VFIO PF (pre-bound): %s IOMMU group: %s device: %s", pciAddr, iommuGroup, deviceID)
+	}
+	return pfMap, nil
+}
+
 // VFInfo holds metadata for a Virtual Function discovered via GIM SR-IOV.
 type VFInfo struct {
 	// ParentPCIAddress is the PCI address of the parent PF.

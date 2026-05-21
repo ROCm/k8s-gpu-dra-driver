@@ -176,8 +176,40 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 	klog.Infof("Discovered %d AMD GPU devices", len(alldevices))
 
-	// Discover GIM SR-IOV VFs for VFIO passthrough
+	// Discover VFIO passthrough devices:
+	// - PFs already bound to vfio-pci by the GPU Operator (pf-passthrough mode)
+	// - GIM SR-IOV VFs (vf-passthrough mode)
 	vfioIndex := 0
+
+	pfMap, err := amdgpu.GetPFMapping()
+	if err != nil {
+		klog.V(2).Infof("No VFIO PF devices found: %v", err)
+	} else {
+		for _, pfs := range pfMap {
+			for _, pf := range pfs {
+				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pf.PCIAddress)
+				if err != nil {
+					klog.Warningf("Failed to get PCIe root for VFIO PF %s: %v", pf.PCIAddress, err)
+				}
+				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
+				device := &AmdGpuVFIOInfo{
+					PCIAddress:         pf.PCIAddress,
+					IOMMUGroup:         pf.IOMMUGroup,
+					Index:              vfioIndex,
+					ProductName:        pf.ProductName,
+					NumaNode:           pf.NumaNode,
+					IsVF:               false,
+					pciBusIDAttr:       pciBusIDAttr,
+					pcieRootAttr:       pcieRootAttr,
+					preConfigureDriver: amdgpu.VFIODriverName,
+				}
+				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
+				klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
+				vfioIndex++
+			}
+		}
+	}
+
 	vfMap, err := amdgpu.GetVFMapping()
 	if err != nil {
 		klog.V(2).Infof("No VFIO VF devices found: %v", err)
