@@ -33,6 +33,7 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -116,7 +117,12 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		var err2 error
 		vfioMgr, err2 = NewVfioPciManager()
 		if err2 != nil {
-			klog.Warningf("VFIO manager initialization failed (VFIO devices will not be usable): %v", err2)
+			klog.Warningf("VFIO manager initialization failed, removing VFIO devices from allocatable: %v", err2)
+			for name, dev := range allocatable {
+				if dev.Type() == VfioDeviceType {
+					delete(allocatable, name)
+				}
+			}
 		}
 	}
 
@@ -262,6 +268,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			if err := castConfig.Normalize(); err != nil {
 				return nil, fmt.Errorf("error normalizing GPU config: %w", err)
 			}
+			if err := castConfig.Validate(); err != nil {
+				return nil, fmt.Errorf("error validating GPU config: %w", err)
+			}
 			containerEdits, err := s.applyConfig(castConfig, results)
 			if err != nil {
 				return nil, fmt.Errorf("error applying GPU config: %w", err)
@@ -270,11 +279,29 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 				perDeviceCDIContainerEdits[k] = v
 			}
 		case *configapi.VfioDeviceConfig:
+			if err := castConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("error normalizing VFIO config: %w", err)
+			}
+			if err := castConfig.Validate(); err != nil {
+				return nil, fmt.Errorf("error validating VFIO config: %w", err)
+			}
+			var configuredDevices []*AmdGpuVFIOInfo
 			for _, result := range results {
 				edits, err := s.applyVFIOConfig(result)
 				if err != nil {
+					// Include the failing device in rollback — Configure may
+					// have succeeded before the CDI spec build failed.
+					if dev := s.allocatable[result.Device]; dev != nil && dev.Vfio != nil {
+						configuredDevices = append(configuredDevices, dev.Vfio)
+					}
+					for _, info := range configuredDevices {
+						if unconfigErr := s.vfioManager.Unconfigure(info); unconfigErr != nil {
+							klog.Warningf("Rollback: failed to unconfigure %s: %v", info.PCIAddress, unconfigErr)
+						}
+					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
+				configuredDevices = append(configuredDevices, s.allocatable[result.Device].Vfio)
 				perDeviceCDIContainerEdits[result.Device] = edits
 			}
 		default:
@@ -311,6 +338,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
+	var errs []error
 	for _, device := range devices {
 		allocDev, exists := s.allocatable[device.DeviceName]
 		if !exists {
@@ -318,11 +346,11 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 		}
 		if allocDev.Type() == VfioDeviceType && allocDev.Vfio != nil && s.vfioManager != nil {
 			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
-				klog.Warningf("Failed to unconfigure VFIO device %s: %v", device.DeviceName, err)
+				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.
@@ -496,26 +524,24 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 		return nil, fmt.Errorf("device %s is not a VFIO device", result.Device)
 	}
 
-	if s.vfioManager != nil {
-		if err := s.vfioManager.Configure(device.Vfio); err != nil {
-			return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
-		}
+	if s.vfioManager == nil {
+		return nil, fmt.Errorf("VFIO manager not available for device %s", result.Device)
+	}
+	if err := s.vfioManager.Configure(device.Vfio); err != nil {
+		return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
 	}
 
-	vfioDevPath := fmt.Sprintf("/dev/vfio/%s", device.Vfio.IOMMUGroup)
-	edits := &cdispec.ContainerEdits{
-		DeviceNodes: []*cdispec.DeviceNode{
-			{
-				Path:     vfioDevPath,
-				HostPath: vfioDevPath,
-			},
-			{
-				Path:     "/dev/vfio/vfio",
-				HostPath: "/dev/vfio/vfio",
-			},
-		},
+	deviceEdits, err := GetVfioCDIContainerEdits(device.Vfio)
+	if err != nil {
+		return nil, fmt.Errorf("error building CDI edits for %s: %w", result.Device, err)
 	}
+
+	commonEdits, err := GetVfioCommonCDIContainerEdits()
+	if err != nil {
+		return nil, fmt.Errorf("error building common VFIO CDI edits: %w", err)
+	}
+	deviceEdits.ContainerEdits.DeviceNodes = append(deviceEdits.ContainerEdits.DeviceNodes, commonEdits.ContainerEdits.DeviceNodes...)
 
 	klog.Infof("Applied VFIO config for %s: iommuGroup=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup)
-	return &cdiapi.ContainerEdits{ContainerEdits: edits}, nil
+	return deviceEdits, nil
 }

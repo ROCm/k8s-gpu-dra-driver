@@ -145,9 +145,9 @@ type VFInfo struct {
 
 // GetVFMapping scans for AMD GPU Virtual Functions created by the GIM SR-IOV
 // driver. It finds PFs managed by GIM and discovers their VFs via virtfn*
-// symlinks. Returns a map keyed by IOMMU group ID. VFs are discovered
-// regardless of their current driver binding — the DRA driver handles
-// binding to vfio-pci at prepare time.
+// symlinks. Returns a map keyed by IOMMU group ID. Only VFs that are unbound
+// or already on vfio-pci are included — VFs bound to other drivers (e.g.
+// amdgpu) are skipped to avoid yanking them from active workloads.
 func GetVFMapping() (map[string][]VFInfo, error) {
 	vfMap := make(map[string][]VFInfo)
 
@@ -195,6 +195,17 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 			}
 			vfAddr := filepath.Base(vfTarget)
 			vfFullPath := filepath.Join(PCIDevicePath, vfAddr)
+
+			// Skip VFs already bound to a driver other than vfio-pci.
+			// Unbound VFs (driver == "") are eligible for VFIO binding.
+			vfDriver, err := GetPCIDriver(vfAddr)
+			if err != nil {
+				continue
+			}
+			if vfDriver != "" && vfDriver != VFIODriverName {
+				glog.V(2).Infof("Skipping VF %s: bound to %s", vfAddr, vfDriver)
+				continue
+			}
 
 			iommuGroup, err := GetIOMMUGroup(vfAddr)
 			if err != nil {

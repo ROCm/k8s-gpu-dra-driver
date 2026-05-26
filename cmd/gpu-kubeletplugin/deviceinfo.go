@@ -100,7 +100,6 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
 type AmdGpuVFIOInfo struct {
-	UUID               string
 	PCIAddress         string
 	DeviceID           string
 	VendorID           string
@@ -126,9 +125,16 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 		"numaNode":   {IntValue: ptr.To(int64(d.NumaNode))},
 		"iommuGroup": {StringValue: ptr.To(d.IOMMUGroup)},
 		"pciAddr":    {StringValue: ptr.To(d.PCIAddress)},
+		"isVF":       {BoolValue: ptr.To(d.IsVF)},
 	}
 	if d.ProductName != "" {
 		attributes["productName"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.ProductName)}
+	}
+	if d.DeviceID != "" {
+		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DeviceID)}
+	}
+	if d.VendorID != "" {
+		attributes["vendorID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.VendorID)}
 	}
 	if d.pciBusIDAttr.Name != "" {
 		attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value

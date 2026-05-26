@@ -104,8 +104,9 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 // Unconfigure rebinds a VF back to its pre-configure driver. If the VF was
 // already on vfio-pci before Configure, it stays on vfio-pci.
 func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
-	perGpuLock.Get(info.PCIAddress).Lock()
-	defer perGpuLock.Get(info.PCIAddress).Unlock()
+	gpuMu := perGpuLock.Get(info.PCIAddress)
+	gpuMu.Lock()
+	defer gpuMu.Unlock()
 
 	if info.preConfigureDriver == amdgpu.VFIODriverName || info.preConfigureDriver == "" {
 		klog.Infof("Device %s was pre-bound to %q, leaving on vfio-pci", info.PCIAddress, info.preConfigureDriver)
@@ -178,22 +179,38 @@ func bindToDriver(pciAddr, driver string) error {
 		return fmt.Errorf("failed to write to %s: %w", bindPath, err)
 	}
 
+	// Clear driver_override after successful bind so the device isn't pinned
+	// to this driver across reboots or rescan events.
+	if err := os.WriteFile(overridePath, []byte(""), 0200); err != nil {
+		klog.Warningf("Failed to clear driver_override for %s after successful bind: %v", pciAddr, err)
+	}
+
 	klog.Infof("Bound %s to %s", pciAddr, driver)
 	return nil
 }
 
 // GetVfioCommonCDIContainerEdits returns CDI edits for the /dev/vfio/vfio
 // container device, shared across all VFIO allocations.
-func GetVfioCommonCDIContainerEdits() *cdiapi.ContainerEdits {
+func GetVfioCommonCDIContainerEdits() (*cdiapi.ContainerEdits, error) {
+	vfioPath := filepath.Join(amdgpu.VFIODevicesRoot, "vfio")
+	major, minor, devType, permissions, err := getDeviceAttrs(vfioPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read device attrs for %s: %w", vfioPath, err)
+	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
 			DeviceNodes: []*cdispec.DeviceNode{
 				{
-					Path: filepath.Join(amdgpu.VFIODevicesRoot, "vfio"),
+					Path:        vfioPath,
+					HostPath:    vfioPath,
+					Type:        devType,
+					Major:       major,
+					Minor:       minor,
+					Permissions: permissions,
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 // GetVfioCDIContainerEdits returns CDI edits for a specific VFIO device,

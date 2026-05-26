@@ -194,6 +194,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
 				device := &AmdGpuVFIOInfo{
 					PCIAddress:         pf.PCIAddress,
+					DeviceID:           pf.DeviceID,
+					VendorID:           pf.VendorID,
 					IOMMUGroup:         pf.IOMMUGroup,
 					Index:              vfioIndex,
 					ProductName:        pf.ProductName,
@@ -223,6 +225,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
 				device := &AmdGpuVFIOInfo{
 					PCIAddress:   vf.PCIAddress,
+					DeviceID:     vf.DeviceID,
+					VendorID:     vf.VendorID,
 					IOMMUGroup:   vf.IOMMUGroup,
 					Index:        vfioIndex,
 					ProductName:  vf.ProductName,
