@@ -26,39 +26,54 @@ import (
 )
 
 const (
-	// VFIODriverPath is the sysfs path for the vfio-pci driver.
-	VFIODriverPath = "/sys/bus/pci/drivers/vfio-pci"
-
 	// VFIODriverName is the kernel driver name for VFIO PCI passthrough.
 	VFIODriverName = "vfio-pci"
-
-	// GIMDriverPath is the sysfs path for the AMD GIM (GPU-IOV Module) driver.
-	GIMDriverPath = "/sys/bus/pci/drivers/gim"
 
 	// GIMDriverName is the kernel driver name for AMD SR-IOV.
 	GIMDriverName = "gim"
 
-	// GIMModulePath is the sysfs module path for the GIM driver.
-	GIMModulePath = "/sys/module/gim"
-
-	// PCIDevicePath is the sysfs path where PCI devices are enumerated.
-	PCIDevicePath = "/sys/bus/pci/devices/"
-
 	// AMDVendorID is the PCI vendor ID for AMD.
 	AMDVendorID = "0x1002"
 
-	// VFIODevicesRoot is the devfs path for VFIO device files.
-	VFIODevicesRoot = "/dev/vfio"
-
-	// KernelIOMMUGroupPath is the sysfs path for IOMMU group enumeration.
-	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
-
 	// VFIOPCIModule is the kernel module name for vfio-pci.
 	VFIOPCIModule = "vfio_pci"
-
-	// VFIOModulePath is the sysfs path to check if vfio_pci module is loaded.
-	VFIOModulePath = "/sys/module/vfio_pci"
 )
+
+var (
+	PCIDevicePath        = "/sys/bus/pci/devices/"
+	PCIDriversPath       = "/sys/bus/pci/drivers"
+	VFIODriverPath       = "/sys/bus/pci/drivers/vfio-pci"
+	GIMDriverPath        = "/sys/bus/pci/drivers/gim"
+	GIMModulePath        = "/sys/module/gim"
+	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
+	VFIOModulePath       = "/sys/module/vfio_pci"
+	VFIODevicesRoot      = "/dev/vfio"
+)
+
+// SetSysfsRoot rebases all sysfs/devfs path variables under the given root.
+// Used by tests to redirect I/O to a tmpdir-backed fake sysfs.
+func SetSysfsRoot(root string) {
+	PCIDevicePath = filepath.Join(root, "sys/bus/pci/devices") + "/"
+	PCIDriversPath = filepath.Join(root, "sys/bus/pci/drivers")
+	VFIODriverPath = filepath.Join(root, "sys/bus/pci/drivers/vfio-pci")
+	GIMDriverPath = filepath.Join(root, "sys/bus/pci/drivers/gim")
+	GIMModulePath = filepath.Join(root, "sys/module/gim")
+	KernelIOMMUGroupPath = filepath.Join(root, "sys/kernel/iommu_groups")
+	VFIOModulePath = filepath.Join(root, "sys/module/vfio_pci")
+	VFIODevicesRoot = filepath.Join(root, "dev/vfio")
+}
+
+// ResetSysfsRoot restores all path variables to their real system defaults.
+func ResetSysfsRoot() {
+	PCIDevicePath = "/sys/bus/pci/devices/"
+	PCIDriversPath = "/sys/bus/pci/drivers"
+	VFIODriverPath = "/sys/bus/pci/drivers/vfio-pci"
+	GIMDriverPath = "/sys/bus/pci/drivers/gim"
+	GIMModulePath = "/sys/module/gim"
+	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
+	VFIOModulePath = "/sys/module/vfio_pci"
+	VFIODevicesRoot = "/dev/vfio"
+}
 
 // PFInfo holds metadata for a Physical Function already bound to vfio-pci
 // by the GPU Operator (pf-passthrough mode). The DRA driver discovers these
@@ -301,7 +316,7 @@ func readSysfsFile(path string) (string, error) {
 // readProductName reads the product_name from sysfs for a PCI device.
 func readProductName(pciAddr string) string {
 	// Try the DRM card path first.
-	matches, _ := filepath.Glob(fmt.Sprintf("/sys/bus/pci/devices/%s/drm/card*/device/product_name", pciAddr))
+	matches, _ := filepath.Glob(filepath.Join(PCIDevicePath, pciAddr, "drm/card*/device/product_name"))
 	if len(matches) > 0 {
 		if data, err := os.ReadFile(matches[0]); err == nil {
 			replacer := strings.NewReplacer(" ", "_", "(", "", ")", "")

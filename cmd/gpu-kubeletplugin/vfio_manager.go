@@ -30,10 +30,6 @@ import (
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
 
-const (
-	amdgpuDriver = "amdgpu"
-)
-
 // perGpuLock provides per-PCI-address mutual exclusion for bind/unbind operations.
 var perGpuLock = &gpuLockMap{locks: make(map[string]*sync.Mutex)}
 
@@ -152,7 +148,7 @@ func unbindFromDriver(pciAddr string) error {
 	if !isValidDriverName(driverName) {
 		return fmt.Errorf("invalid driver name for %s: %q", pciAddr, driverName)
 	}
-	unbindPath := filepath.Join("/sys/bus/pci/drivers", driverName, "unbind")
+	unbindPath := filepath.Join(amdgpu.PCIDriversPath, driverName, "unbind")
 	if err := os.WriteFile(unbindPath, []byte(pciAddr), 0200); err != nil {
 		return fmt.Errorf("failed to write to %s: %w", unbindPath, err)
 	}
@@ -171,7 +167,7 @@ func bindToDriver(pciAddr, driver string) error {
 	}
 
 	// Write to the target driver's bind file.
-	bindPath := filepath.Join("/sys/bus/pci/drivers", driver, "bind")
+	bindPath := filepath.Join(amdgpu.PCIDriversPath, driver, "bind")
 	if err := os.WriteFile(bindPath, []byte(pciAddr), 0200); err != nil {
 		if cleanupErr := os.WriteFile(overridePath, []byte(""), 0200); cleanupErr != nil {
 			klog.Warningf("Failed to clear driver_override for %s after bind failure: %v", pciAddr, cleanupErr)
