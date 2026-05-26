@@ -56,10 +56,13 @@ func newTestGates(t *testing.T) featuregate.MutableVersionedFeatureGate {
 	return fg
 }
 
-func TestDeviceMetadataGateDefaultsOff(t *testing.T) {
+func TestFeatureGatesDefaultOff(t *testing.T) {
 	fg := FeatureGates()
 	if fg.Enabled(DeviceMetadata) {
 		t.Fatalf("DeviceMetadata should default to false (Alpha)")
+	}
+	if fg.Enabled(VFIOPassthrough) {
+		t.Fatalf("VFIOPassthrough should default to false (Alpha)")
 	}
 }
 

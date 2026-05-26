@@ -138,6 +138,12 @@ host configuration beyond the standard GPU compute driver:
 Without IOMMU enabled, the VFIO manager will fail to initialize and VFIO devices
 will be removed from the allocatable list (GPU compute devices remain available).
 
+**PF passthrough mode:** By default, only GIM SR-IOV VFs are discovered for VFIO.
+To also discover AMD GPUs already bound to `vfio-pci` (e.g., by the GPU Operator
+in pf-passthrough mode), enable the `VFIOPassthrough` feature gate:
+`--feature-gates=VFIOPassthrough=true` or the Helm value
+`featureGates: {VFIOPassthrough: true}`.
+
 ### Key values
 
 | Value | Default | Description |

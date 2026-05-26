@@ -37,6 +37,7 @@ import (
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	klog "k8s.io/klog/v2"
 )
@@ -181,33 +182,35 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	// - GIM SR-IOV VFs (vf-passthrough mode)
 	vfioIndex := 0
 
-	pfMap, err := amdgpu.GetPFMapping()
-	if err != nil {
-		klog.V(2).Infof("No VFIO PF devices found: %v", err)
-	} else {
-		for _, pfs := range pfMap {
-			for _, pf := range pfs {
-				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pf.PCIAddress)
-				if err != nil {
-					klog.Warningf("Failed to get PCIe root for VFIO PF %s: %v", pf.PCIAddress, err)
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		pfMap, err := amdgpu.GetPFMapping()
+		if err != nil {
+			klog.V(2).Infof("No VFIO PF devices found: %v", err)
+		} else {
+			for _, pfs := range pfMap {
+				for _, pf := range pfs {
+					pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pf.PCIAddress)
+					if err != nil {
+						klog.Warningf("Failed to get PCIe root for VFIO PF %s: %v", pf.PCIAddress, err)
+					}
+					pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
+					device := &AmdGpuVFIOInfo{
+						PCIAddress:         pf.PCIAddress,
+						DeviceID:           pf.DeviceID,
+						VendorID:           pf.VendorID,
+						IOMMUGroup:         pf.IOMMUGroup,
+						Index:              vfioIndex,
+						ProductName:        pf.ProductName,
+						NumaNode:           pf.NumaNode,
+						IsVF:               false,
+						pciBusIDAttr:       pciBusIDAttr,
+						pcieRootAttr:       pcieRootAttr,
+						preConfigureDriver: amdgpu.VFIODriverName,
+					}
+					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
+					klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
+					vfioIndex++
 				}
-				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
-				device := &AmdGpuVFIOInfo{
-					PCIAddress:         pf.PCIAddress,
-					DeviceID:           pf.DeviceID,
-					VendorID:           pf.VendorID,
-					IOMMUGroup:         pf.IOMMUGroup,
-					Index:              vfioIndex,
-					ProductName:        pf.ProductName,
-					NumaNode:           pf.NumaNode,
-					IsVF:               false,
-					pciBusIDAttr:       pciBusIDAttr,
-					pcieRootAttr:       pcieRootAttr,
-					preConfigureDriver: amdgpu.VFIODriverName,
-				}
-				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
-				klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
-				vfioIndex++
 			}
 		}
 	}
