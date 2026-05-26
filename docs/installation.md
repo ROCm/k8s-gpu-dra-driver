@@ -121,6 +121,23 @@ kubelet plugin DaemonSet pod. This container polls `/sys/class/kfd` and
 `/sys/module/amdgpu/drivers/` and blocks the plugin from starting until the
 kernel driver is loaded.
 
+### VFIO passthrough prerequisites
+
+VFIO passthrough (for VM use cases via KubeVirt or similar) requires additional
+host configuration beyond the standard GPU compute driver:
+
+- **IOMMU enabled** — set `intel_iommu=on` or `amd_iommu=on` in kernel cmdline
+- **vfio_pci module loaded** — `modprobe vfio_pci` or add to `/etc/modules-load.d/`
+- **GIM driver** (SR-IOV VF mode) — the AMD GPU-IOV Module (`gim`) must be loaded
+  on the PF for VF discovery. VFs are created via GIM's SR-IOV interface.
+- **CAP_SYS_ADMIN** — the kubelet plugin pod requires privileged mode (default in
+  the Helm chart) for sysfs driver bind/unbind operations
+- **IOMMU groups** — each VF must be in its own IOMMU group for safe passthrough.
+  Check with `ls /sys/kernel/iommu_groups/`
+
+Without IOMMU enabled, the VFIO manager will fail to initialize and VFIO devices
+will be removed from the allocatable list (GPU compute devices remain available).
+
 ### Key values
 
 | Value | Default | Description |
