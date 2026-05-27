@@ -34,6 +34,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
@@ -187,7 +188,15 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		if err != nil {
 			klog.V(2).Infof("No VFIO PF devices found: %v", err)
 		} else {
-			for _, pfs := range pfMap {
+			pfKeys := make([]string, 0, len(pfMap))
+			for k := range pfMap {
+				pfKeys = append(pfKeys, k)
+			}
+			sort.Strings(pfKeys)
+			for _, k := range pfKeys {
+				// Sort PFs within an IOMMU group by PCI address for stability.
+				pfs := pfMap[k]
+				sort.Slice(pfs, func(i, j int) bool { return pfs[i].PCIAddress < pfs[j].PCIAddress })
 				for _, pf := range pfs {
 					pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pf.PCIAddress)
 					if err != nil {
@@ -219,7 +228,15 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	if err != nil {
 		klog.V(2).Infof("No VFIO VF devices found: %v", err)
 	} else {
-		for _, vfs := range vfMap {
+		vfKeys := make([]string, 0, len(vfMap))
+		for k := range vfMap {
+			vfKeys = append(vfKeys, k)
+		}
+		sort.Strings(vfKeys)
+		for _, k := range vfKeys {
+			// Sort VFs within an IOMMU group by PCI address for stability.
+			vfs := vfMap[k]
+			sort.Slice(vfs, func(i, j int) bool { return vfs[i].PCIAddress < vfs[j].PCIAddress })
 			for _, vf := range vfs {
 				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(vf.PCIAddress)
 				if err != nil {
