@@ -93,7 +93,7 @@ func TestBindToDriver(t *testing.T) {
 
 		overrideContent, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/driver_override"))
 		require.NoError(t, err)
-		assert.Equal(t, "", string(overrideContent), "driver_override should be cleared after successful bind")
+		assert.Equal(t, "\n", string(overrideContent), "driver_override should be cleared after successful bind")
 	})
 
 	t.Run("bind failure clears driver_override", func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestBindToDriver(t *testing.T) {
 
 		overrideContent, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/driver_override"))
 		require.NoError(t, err)
-		assert.Equal(t, "", string(overrideContent), "driver_override should be cleared on bind failure")
+		assert.Equal(t, "\n", string(overrideContent), "driver_override should be cleared on bind failure")
 	})
 }
 

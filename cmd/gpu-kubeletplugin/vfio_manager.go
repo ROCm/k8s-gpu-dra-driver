@@ -169,7 +169,7 @@ func bindToDriver(pciAddr, driver string) error {
 	// Write to the target driver's bind file.
 	bindPath := filepath.Join(amdgpu.PCIDriversPath, driver, "bind")
 	if err := os.WriteFile(bindPath, []byte(pciAddr), 0200); err != nil {
-		if cleanupErr := os.WriteFile(overridePath, []byte(""), 0200); cleanupErr != nil {
+		if cleanupErr := os.WriteFile(overridePath, []byte("\n"), 0200); cleanupErr != nil {
 			klog.Warningf("Failed to clear driver_override for %s after bind failure: %v", pciAddr, cleanupErr)
 		}
 		return fmt.Errorf("failed to write to %s: %w", bindPath, err)
@@ -177,7 +177,7 @@ func bindToDriver(pciAddr, driver string) error {
 
 	// Clear driver_override after successful bind so the device isn't pinned
 	// to this driver across reboots or rescan events.
-	if err := os.WriteFile(overridePath, []byte(""), 0200); err != nil {
+	if err := os.WriteFile(overridePath, []byte("\n"), 0200); err != nil {
 		klog.Warningf("Failed to clear driver_override for %s after successful bind: %v", pciAddr, err)
 	}
 
