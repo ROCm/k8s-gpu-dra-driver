@@ -231,13 +231,14 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		return nil, fmt.Errorf("error getting opaque device configs: %v", err)
 	}
 
-	// Add the default GPU Config to the front of the config list with the
-	// lowest precedence. This guarantees there will be at least one config in
-	// the list with len(Requests) == 0 for the lookup below.
-	configs = slices.Insert(configs, 0, &OpaqueDeviceConfig{
-		Requests: []string{},
-		Config:   configapi.DefaultGpuConfig(),
-	})
+	// Add default configs (one per device type) to the front of the list with
+	// the lowest precedence. This guarantees every allocated device finds a
+	// type-compatible default if the claim/class did not supply an explicit
+	// config.
+	configs = slices.Insert(configs, 0,
+		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
+		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultVfioDeviceConfig()},
+	)
 
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
@@ -247,10 +248,25 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		if result.Driver != consts.DriverName {
 			continue
 		}
-		if _, exists := s.allocatable[result.Device]; !exists {
+		allocDev, exists := s.allocatable[result.Device]
+		if !exists {
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
+		isVFIO := allocDev.Type() == VfioDeviceType
 		for _, c := range slices.Backward(configs) {
+			// Only consider configs whose type matches the device type. A
+			// GpuConfig must not be applied to a VFIO device (its prepare path
+			// would fail to parse the device name) and vice versa.
+			switch c.Config.(type) {
+			case *configapi.VfioDeviceConfig:
+				if !isVFIO {
+					continue
+				}
+			case *configapi.GpuConfig:
+				if isVFIO {
+					continue
+				}
+			}
 			if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
 				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
 				break
@@ -314,13 +330,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	var preparedDevices PreparedDevices
 	for _, results := range configResultsMap {
 		for _, result := range results {
-			allocDev := s.allocatable[result.Device]
-			var cdiDeviceIDs []string
-			if allocDev != nil && allocDev.Type() == VfioDeviceType {
-				cdiDeviceIDs = s.cdi.GetClaimDevicesVFIO(string(claim.UID), []string{result.Device})
-			} else {
-				cdiDeviceIDs = s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device})
-			}
+			cdiDeviceIDs := s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device})
 			device := &PreparedDevice{
 				Device: drapbv1.Device{
 					RequestNames: []string{result.Request},
