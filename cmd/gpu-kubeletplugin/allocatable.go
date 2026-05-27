@@ -84,16 +84,3 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
-
-// GetGPUPCIBusID returns the PCI bus ID for this device
-func (d *AllocatableDevice) GetGPUPCIBusID() string {
-	switch d.Type() {
-	case AmdGpuDeviceType:
-		return d.AmdGpu.PCIAddress
-	case AmdPartitionDeviceType:
-		return d.AmdPartition.Parent.PCIAddress
-	case VfioDeviceType:
-		return d.Vfio.PCIAddress
-	}
-	return ""
-}
