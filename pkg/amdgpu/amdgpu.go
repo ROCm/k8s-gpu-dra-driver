@@ -35,7 +35,7 @@ import (
 func GetDriverVersion() string {
 	matches, _ := filepath.Glob("/sys/class/drm/card*/device/driver/module/version")
 	if len(matches) == 0 {
-		glog.Warningf("No AMD GPU cards found for driver version reading")
+		glog.Warningf("No AMD GPU cards found for driver version reading; driverVersion attribute will be omitted")
 		return ""
 	}
 
@@ -50,7 +50,10 @@ func GetDriverVersion() string {
 		}
 	}
 
-	glog.Warningf("Failed to read AMDGPU driver version from any card")
+	// In-kernel amdgpu module may not set a version string (empty /sys/module/amdgpu/version).
+	// Return empty so the caller omits the driverVersion attribute entirely rather than
+	// publishing a synthetic value; the ResourceSlice is still valid without it.
+	glog.Warningf("Failed to read AMDGPU driver version from any card; driverVersion attribute will be omitted")
 	return ""
 }
 

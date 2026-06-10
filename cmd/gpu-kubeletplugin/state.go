@@ -218,6 +218,10 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
 	for _, result := range claim.Status.Allocation.Devices.Results {
+		// Skip devices from other drivers in multi-driver claims.
+		if result.Driver != consts.DriverName {
+			continue
+		}
 		if _, exists := s.allocatable[result.Device]; !exists {
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
