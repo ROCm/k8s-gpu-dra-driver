@@ -243,17 +243,19 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 					klog.Warningf("Failed to get PCIe root for VFIO VF %s: %v", vf.PCIAddress, err)
 				}
 				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
+				currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
 				device := &AmdGpuVFIOInfo{
-					PCIAddress:   vf.PCIAddress,
-					DeviceID:     vf.DeviceID,
-					VendorID:     vf.VendorID,
-					IOMMUGroup:   vf.IOMMUGroup,
-					Index:        vfioIndex,
-					ProductName:  vf.ProductName,
-					NumaNode:     vf.NumaNode,
-					IsVF:         true,
-					pciBusIDAttr: pciBusIDAttr,
-					pcieRootAttr: pcieRootAttr,
+					PCIAddress:         vf.PCIAddress,
+					DeviceID:           vf.DeviceID,
+					VendorID:           vf.VendorID,
+					IOMMUGroup:         vf.IOMMUGroup,
+					Index:              vfioIndex,
+					ProductName:        vf.ProductName,
+					NumaNode:           vf.NumaNode,
+					IsVF:               true,
+					pciBusIDAttr:       pciBusIDAttr,
+					pcieRootAttr:       pcieRootAttr,
+					preConfigureDriver: currentDriver,
 				}
 				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 				klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)

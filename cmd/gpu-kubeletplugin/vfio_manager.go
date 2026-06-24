@@ -74,10 +74,6 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 	}
 
-	if info.preConfigureDriver == "" {
-		info.preConfigureDriver = currentDriver
-	}
-
 	if currentDriver == amdgpu.VFIODriverName {
 		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
 		return nil

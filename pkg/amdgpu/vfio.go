@@ -260,11 +260,15 @@ func GetIOMMUGroup(pciAddr string) (string, error) {
 // GetPCIDriver returns the kernel driver currently bound to a PCI device,
 // or "" if no driver is bound.
 func GetPCIDriver(pciAddr string) (string, error) {
-	driverLink := filepath.Join(PCIDevicePath, pciAddr, "driver")
+	devicePath := filepath.Join(PCIDevicePath, pciAddr)
+	if _, err := os.Stat(devicePath); err != nil {
+		return "", fmt.Errorf("PCI device %s not found in sysfs: %w", pciAddr, err)
+	}
+	driverLink := filepath.Join(devicePath, "driver")
 	target, err := os.Readlink(driverLink)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return "", nil // no driver bound
 		}
 		return "", err
 	}
