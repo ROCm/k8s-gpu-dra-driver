@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - develop
+      - main
       - 'release-v*'
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -25,7 +26,7 @@ jobs:
     if: github.event_name == 'push' && github.repository == 'ROCm/k8s-gpu-dra-driver'
     uses: ROCm/common-infra-operator/.github/workflows/auto-tag.yaml@main
     with:
-      branch-type: ${{ startsWith(github.ref, 'refs/heads/release-v') && 'release' || 'develop' }}
+      branch-type: ${{ startsWith(github.ref, 'refs/heads/release-v') && 'release' || github.ref == 'refs/heads/main' && 'main' || 'develop' }}
     permissions:
       contents: write
 
@@ -83,6 +84,10 @@ jobs:
             # develop-4 -> 0.0.0-develop.4
             BUILD_NUM="${TAG#develop-}"
             CHART_VERSION="0.0.0-develop.${BUILD_NUM}"
+          elif [ "$BRANCH" = "main" ]; then
+            # main-4 -> 0.0.0-main.4
+            BUILD_NUM="${TAG#main-}"
+            CHART_VERSION="0.0.0-main.${BUILD_NUM}"
           else
             # v1.0.0-3 -> 1.0.0-3
             CHART_VERSION="${TAG#v}"
