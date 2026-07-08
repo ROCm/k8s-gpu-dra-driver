@@ -16,6 +16,10 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
+deviceClass:
+  # -- Create the gpu.amd.com DeviceClass resource. Set to false if deploying via gpu-operator.
+  create: true
+
 serviceAccount:
   # Specifies whether a service account should be created
   create: true

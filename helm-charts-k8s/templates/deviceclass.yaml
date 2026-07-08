@@ -1,9 +1,12 @@
+{{- $draApi := include "k8s-gpu-dra-driver.draApiVersion" . -}}
+{{- if and .Values.deviceClass.create $draApi }}
 ---
-apiVersion: {{ include "k8s-gpu-dra-driver.draApiVersion" . }}
+apiVersion: {{ $draApi }}
 kind: DeviceClass
 metadata:
   name: gpu.amd.com
 spec:
   selectors:
-  - cel: 
+  - cel:
       expression: "device.driver == 'gpu.amd.com'"
+{{- end }}

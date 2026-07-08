@@ -1,0 +1,27 @@
+name: Enforce main source branch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check-source-branch:
+    name: PR into main must come from develop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify head branch is develop from this repo
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::PRs into 'main' must originate from the '$BASE_REPO' repository, not a fork ($HEAD_REPO)."
+            exit 1
+          fi
+          if [ "$HEAD_REF" != "develop" ]; then
+            echo "::error::PRs into 'main' must come from the 'develop' branch. This PR is from '$HEAD_REF'."
+            exit 1
+          fi
+          echo "OK: PR into 'main' is from '$BASE_REPO:develop'."
