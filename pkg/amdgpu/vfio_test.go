@@ -76,7 +76,7 @@ func TestGetPCIDriver(t *testing.T) {
 func TestGetPCIDriver_DeviceMissing(t *testing.T) {
 	setupFakeSysfs(t)
 	driver, err := GetPCIDriver("0000:ff:00.0")
-	assert.NoError(t, err)
+	assert.Error(t, err)
 	assert.Equal(t, "", driver)
 }
 

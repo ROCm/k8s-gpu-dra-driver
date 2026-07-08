@@ -143,7 +143,7 @@ func TestConfigure(t *testing.T) {
 		createDriverDir(t, root, "vfio-pci")
 
 		vm := &VfioPciManager{}
-		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", preConfigureDriver: "vfio-pci"}
 
 		err := vm.Configure(info)
 		assert.NoError(t, err)
@@ -174,7 +174,7 @@ func TestConfigure(t *testing.T) {
 		createDriverDir(t, root, "vfio-pci")
 
 		vm := &VfioPciManager{}
-		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", preConfigureDriver: "amdgpu"}
 
 		err := vm.Configure(info)
 		assert.NoError(t, err)
