@@ -43,9 +43,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
+	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
-	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	klog "k8s.io/klog/v2"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
@@ -156,25 +156,13 @@ func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.Reso
 			CDIDeviceIDs: preparedPB.GetCdiDeviceIds(),
 		}
 
-		// KEP-5304: expose GPU attributes to workloads via native metadata API
 		if allocDev, exists := d.state.allocatable[preparedPB.GetDeviceName()]; exists {
-			attrs := make(map[string]resourceapi.DeviceAttribute)
-			if allocDev.AmdGpu != nil {
-				pci := allocDev.AmdGpu.PCIAddress
-				product := allocDev.AmdGpu.ProductName
-				numa := int64(allocDev.AmdGpu.NumaNode)
-				attrs["resource.kubernetes.io/pciBusID"] = resourceapi.DeviceAttribute{StringValue: &pci}
-				attrs["productName"] = resourceapi.DeviceAttribute{StringValue: &product}
-				attrs["numaNode"] = resourceapi.DeviceAttribute{IntValue: &numa}
-			} else if allocDev.AmdPartition != nil {
-				pci := allocDev.AmdPartition.Parent.PCIAddress
-				product := allocDev.AmdPartition.Parent.ProductName
-				numa := int64(allocDev.AmdPartition.NumaNode)
-				attrs["resource.kubernetes.io/pciBusID"] = resourceapi.DeviceAttribute{StringValue: &pci}
-				attrs["productName"] = resourceapi.DeviceAttribute{StringValue: &product}
-				attrs["numaNode"] = resourceapi.DeviceAttribute{IntValue: &numa}
-			}
-			if len(attrs) > 0 {
+			device := allocDev.GetDevice()
+			if len(device.Attributes) > 0 {
+				attrs := make(map[string]resourceapi.DeviceAttribute, len(device.Attributes))
+				for k, v := range device.Attributes {
+					attrs[string(k)] = v
+				}
 				dev.Metadata = &kubeletplugin.DeviceMetadata{
 					Attributes: attrs,
 				}
