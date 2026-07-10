@@ -203,8 +203,12 @@ func TestUnconfigure(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("pre-unbound is no-op", func(t *testing.T) {
-		setupFakeVfioSysfs(t)
+	t.Run("pre-unbound device not on vfio is no-op", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		// Device exists but has no driver (unbound)
+		devPath := filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0")
+		require.NoError(t, os.MkdirAll(devPath, 0755))
+
 		vm := &VfioPciManager{}
 		info := &AmdGpuVFIOInfo{
 			PCIAddress:         "0000:0d:00.0",
@@ -213,6 +217,26 @@ func TestUnconfigure(t *testing.T) {
 
 		err := vm.Unconfigure(info)
 		assert.NoError(t, err)
+	})
+
+	t.Run("pre-unbound device on vfio gets unbound", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
+		createDriverDir(t, root, "vfio-pci")
+
+		vm := &VfioPciManager{}
+		info := &AmdGpuVFIOInfo{
+			PCIAddress:         "0000:0d:00.0",
+			preConfigureDriver: "",
+		}
+
+		err := vm.Unconfigure(info)
+		assert.NoError(t, err)
+
+		// Should have written to unbind
+		unbindContent, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/unbind"))
+		require.NoError(t, err)
+		assert.Equal(t, "0000:0d:00.0", string(unbindContent))
 	})
 
 	t.Run("rebind to original driver", func(t *testing.T) {
