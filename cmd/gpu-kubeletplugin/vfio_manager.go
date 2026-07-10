@@ -100,8 +100,27 @@ func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
 	gpuMu.Lock()
 	defer gpuMu.Unlock()
 
-	if info.preConfigureDriver == amdgpu.VFIODriverName || info.preConfigureDriver == "" {
-		klog.Infof("Device %s was pre-bound to %q, leaving on vfio-pci", info.PCIAddress, info.preConfigureDriver)
+	if info.preConfigureDriver == amdgpu.VFIODriverName {
+		klog.Infof("Device %s was pre-bound to vfio-pci, leaving on vfio-pci", info.PCIAddress)
+		return nil
+	}
+
+	// If the device had no driver before Configure (GIM VF), unbind from
+	// vfio-pci and clear driver_override to return it to the unbound state.
+	if info.preConfigureDriver == "" {
+		currentDriver, err := amdgpu.GetPCIDriver(info.PCIAddress)
+		if err != nil {
+			return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
+		}
+		if currentDriver == amdgpu.VFIODriverName {
+			if err := unbindFromDriver(info.PCIAddress); err != nil {
+				return fmt.Errorf("failed to unbind %s from vfio-pci: %w", info.PCIAddress, err)
+			}
+			if err := clearDriverOverride(info.PCIAddress); err != nil {
+				klog.Warningf("Failed to clear driver_override for %s: %v", info.PCIAddress, err)
+			}
+			klog.Infof("Unconfigured %s: unbound from vfio-pci (was unbound before Configure)", info.PCIAddress)
+		}
 		return nil
 	}
 
@@ -179,6 +198,11 @@ func bindToDriver(pciAddr, driver string) error {
 
 	klog.Infof("Bound %s to %s", pciAddr, driver)
 	return nil
+}
+
+func clearDriverOverride(pciAddr string) error {
+	overridePath := filepath.Join(amdgpu.PCIDevicePath, pciAddr, "driver_override")
+	return os.WriteFile(overridePath, []byte("\n"), 0200)
 }
 
 // GetVfioCommonCDIContainerEdits returns CDI edits for the /dev/vfio/vfio
