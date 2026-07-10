@@ -106,24 +106,17 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
 	}
 
-	// Initialize VFIO manager if any VFIO devices were discovered.
+	// Always initialize VFIO manager if IOMMU is available. GIM VFs on
+	// amdgpu are VFIO-capable and can be dynamically bound to vfio-pci
+	// during Prepare when a VfioDeviceConfig is present in the claim.
 	var vfioMgr *VfioPciManager
-	hasVFIO := false
-	for _, dev := range allocatable {
-		if dev.Type() == VfioDeviceType {
-			hasVFIO = true
-			break
-		}
-	}
-	if hasVFIO {
-		var err2 error
-		vfioMgr, err2 = NewVfioPciManager()
-		if err2 != nil {
-			klog.Warningf("VFIO manager initialization failed, removing VFIO devices from allocatable: %v", err2)
-			for name, dev := range allocatable {
-				if dev.Type() == VfioDeviceType {
-					delete(allocatable, name)
-				}
+	vfioMgr, err2 := NewVfioPciManager()
+	if err2 != nil {
+		klog.Warningf("VFIO manager initialization failed (VFIO passthrough unavailable): %v", err2)
+		vfioMgr = nil
+		for name, dev := range allocatable {
+			if dev.Type() == VfioDeviceType {
+				delete(allocatable, name)
 			}
 		}
 	}
