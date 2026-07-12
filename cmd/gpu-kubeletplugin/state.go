@@ -217,14 +217,6 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 
 	// Retrieve the full set of device configs for the driver.
-	klog.Infof("Allocation has %d configs:", len(claim.Status.Allocation.Devices.Config))
-	for i, cfg := range claim.Status.Allocation.Devices.Config {
-		if cfg.DeviceConfiguration.Opaque != nil {
-			klog.Infof("  config[%d]: driver=%s source=%s raw=%s", i, cfg.DeviceConfiguration.Opaque.Driver, cfg.Source, string(cfg.DeviceConfiguration.Opaque.Parameters.Raw))
-		} else {
-			klog.Infof("  config[%d]: non-opaque source=%s", i, cfg.Source)
-		}
-	}
 	configs, err := GetOpaqueDeviceConfigs(
 		configapi.Decoder,
 		consts.DriverName,
@@ -233,7 +225,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	if err != nil {
 		return nil, fmt.Errorf("error getting opaque device configs: %v", err)
 	}
-	klog.Infof("Decoded %d configs for driver %s", len(configs), consts.DriverName)
+	klog.V(2).Infof("Decoded %d opaque configs for driver %s", len(configs), consts.DriverName)
 
 	// Add default configs (one per device type) to the front of the list with
 	// the lowest precedence. This guarantees every allocated device finds a
@@ -258,34 +250,35 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		}
 		isVFIO := allocDev.Type() == VfioDeviceType
 		for _, c := range slices.Backward(configs) {
-			klog.V(2).Infof("Config dispatch: device=%s isVFIO=%v configType=%T requests=%v", result.Device, isVFIO, c.Config, c.Requests)
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
-				klog.Infof("VfioDeviceConfig matched for device %s (isVFIO=%v, hasAmdGpu=%v)", result.Device, isVFIO, allocDev.AmdGpu != nil)
 				if !isVFIO {
-					// Check if the device is a GIM VF that can be dynamically
-					// bound to vfio-pci. If so, convert it to a VFIO device.
+					// Convert an AmdGpu device to VFIO on demand when a
+					// VfioDeviceConfig is present. Supports both:
+					//   - GIM VFs (has physfn) — SR-IOV virtual function
+					//   - PFs (no physfn) — full GPU passthrough
 					if allocDev.AmdGpu != nil {
 						physfn := filepath.Join(amdgpu.PCIDevicePath, allocDev.AmdGpu.PCIAddress, "physfn")
-						if _, err := os.Lstat(physfn); err == nil {
-							klog.Infof("Converting GPU %s to VFIO device (GIM VF with VfioDeviceConfig)", allocDev.AmdGpu.PCIAddress)
-							vfioInfo := &AmdGpuVFIOInfo{
-								PCIAddress:         allocDev.AmdGpu.PCIAddress,
-								DeviceID:           allocDev.AmdGpu.DeviceID,
-								VendorID:           amdgpu.AMDVendorID,
-								ProductName:        allocDev.AmdGpu.ProductName,
-								NumaNode:           allocDev.AmdGpu.NumaNode,
-								IsVF:               true,
-								pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
-								pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
-								preConfigureDriver: "amdgpu",
-							}
-							iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
-							vfioInfo.IOMMUGroup = iommuGroup
-							allocDev.Vfio = vfioInfo
-							allocDev.AmdGpu = nil
-							isVFIO = true
+						_, physfnErr := os.Lstat(physfn)
+						isVF := physfnErr == nil
+
+						klog.Infof("Converting GPU %s to VFIO device (isVF=%v, VfioDeviceConfig present)", allocDev.AmdGpu.PCIAddress, isVF)
+						vfioInfo := &AmdGpuVFIOInfo{
+							PCIAddress:         allocDev.AmdGpu.PCIAddress,
+							DeviceID:           allocDev.AmdGpu.DeviceID,
+							VendorID:           amdgpu.AMDVendorID,
+							ProductName:        allocDev.AmdGpu.ProductName,
+							NumaNode:           allocDev.AmdGpu.NumaNode,
+							IsVF:               isVF,
+							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
+							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
+							preConfigureDriver: "amdgpu",
 						}
+						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
+						vfioInfo.IOMMUGroup = iommuGroup
+						allocDev.Vfio = vfioInfo
+						allocDev.AmdGpu = nil
+						isVFIO = true
 					}
 					if !isVFIO {
 						continue

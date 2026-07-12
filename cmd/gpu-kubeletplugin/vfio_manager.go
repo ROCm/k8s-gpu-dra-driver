@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
@@ -79,6 +80,18 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return nil
 	}
 
+	// For PF passthrough, verify no SR-IOV VFs are active. Binding a PF
+	// to vfio-pci while VFs exist would break them.
+	if !info.IsVF {
+		numVFsPath := filepath.Join(amdgpu.PCIDevicePath, info.PCIAddress, "sriov_numvfs")
+		if data, err := os.ReadFile(numVFsPath); err == nil {
+			numVFs := strings.TrimSpace(string(data))
+			if numVFs != "0" && numVFs != "" {
+				return fmt.Errorf("cannot passthrough PF %s: %s active VFs must be removed first", info.PCIAddress, numVFs)
+			}
+		}
+	}
+
 	if currentDriver != "" {
 		if err := unbindFromDriver(info.PCIAddress); err != nil {
 			return fmt.Errorf("failed to unbind %s from %s: %w", info.PCIAddress, currentDriver, err)
@@ -89,7 +102,7 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return fmt.Errorf("failed to bind %s to vfio-pci: %w", info.PCIAddress, err)
 	}
 
-	klog.Infof("Configured %s for VFIO passthrough", info.PCIAddress)
+	klog.Infof("Configured %s for VFIO passthrough (isVF=%v)", info.PCIAddress, info.IsVF)
 	return nil
 }
 

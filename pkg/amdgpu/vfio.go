@@ -257,6 +257,17 @@ func GetIOMMUGroup(pciAddr string) (string, error) {
 	return filepath.Base(target), nil
 }
 
+// GetPFAddress returns the PCI address of the parent PF for a VF.
+// Returns "" if the device is not a VF (no physfn link).
+func GetPFAddress(vfAddr string) (string, error) {
+	physfnLink := filepath.Join(PCIDevicePath, vfAddr, "physfn")
+	target, err := os.Readlink(physfnLink)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(target), nil
+}
+
 // GetPCIDriver returns the kernel driver currently bound to a PCI device,
 // or "" if no driver is bound.
 func GetPCIDriver(pciAddr string) (string, error) {
