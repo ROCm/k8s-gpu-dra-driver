@@ -93,3 +93,39 @@ func TestSetUnknownGateFails(t *testing.T) {
 		t.Fatalf("Set should reject unknown gate")
 	}
 }
+
+// TestSetGateNotYetAvailableFails verifies that a gate whose introduction
+// version is newer than the registry's emulation version resolves to PreAlpha
+// and cannot be set. This is the version-boundary behavior our driver-only
+// registry relies on.
+func TestSetGateNotYetAvailableFails(t *testing.T) {
+	fg := featuregate.NewVersionedFeatureGate(emulationVersion)
+	const future featuregate.Feature = "FutureFeature"
+	if err := fg.AddVersioned(map[featuregate.Feature]featuregate.VersionedSpecs{
+		future: {{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(9, 9)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fg.Set("FutureFeature=true"); err == nil {
+		t.Fatalf("setting a gate newer than the emulation version should fail")
+	}
+}
+
+// TestSetGraduatedGaGateIsLocked verifies that a gate graduated to GA is locked
+// to its default: flipping it to the non-default value fails, while setting it
+// to its default value succeeds.
+func TestSetGraduatedGaGateIsLocked(t *testing.T) {
+	fg := featuregate.NewVersionedFeatureGate(emulationVersion)
+	const graduated featuregate.Feature = "GraduatedFeature"
+	if err := fg.AddVersioned(map[featuregate.Feature]featuregate.VersionedSpecs{
+		graduated: {{Default: true, PreRelease: featuregate.GA, LockToDefault: true, Version: version.MajorMinor(0, 1)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fg.Set("GraduatedFeature=false"); err == nil {
+		t.Fatalf("flipping a GA locked-to-default gate to the non-default value should fail")
+	}
+	if err := fg.Set("GraduatedFeature=true"); err != nil {
+		t.Fatalf("setting a GA gate to its default value should succeed, got %v", err)
+	}
+}
