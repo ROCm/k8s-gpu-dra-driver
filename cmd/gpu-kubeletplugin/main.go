@@ -48,7 +48,8 @@ import (
 	klog "k8s.io/klog/v2"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
-	"github.com/ROCm/k8s-gpu-dra-driver/pkg/flags"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
+	cflags "github.com/ROCm/k8s-gpu-dra-driver/pkg/flags"
 )
 
 const (
@@ -56,8 +57,8 @@ const (
 )
 
 type Flags struct {
-	kubeClientConfig flags.KubeClientConfig
-	loggingConfig    *flags.LoggingConfig
+	kubeClientConfig cflags.KubeClientConfig
+	loggingConfig    *cflags.LoggingConfig
 
 	nodeName                      string
 	cdiRoot                       string
@@ -85,7 +86,7 @@ func main() {
 
 func newApp() *cli.App {
 	flags := &Flags{
-		loggingConfig: flags.NewLoggingConfig(),
+		loggingConfig: cflags.NewLoggingConfig(),
 	}
 	cliFlags := []cli.Flag{
 		&cli.StringFlag{
@@ -126,6 +127,7 @@ func newApp() *cli.App {
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, flags.loggingConfig.Flags()...)
+	cliFlags = append(cliFlags, cflags.FeatureGateFlags(flags.loggingConfig)...)
 
 	app := &cli.App{
 		Name:            "gpu-amd-kubeletplugin",
@@ -137,9 +139,16 @@ func newApp() *cli.App {
 			if c.Args().Len() > 0 {
 				return fmt.Errorf("arguments not supported: %v", c.Args().Slice())
 			}
-			return flags.loggingConfig.Apply()
+			if err := flags.loggingConfig.Apply(); err != nil {
+				return err
+			}
+			if err := featuregates.ValidateFeatureGates(); err != nil {
+				return fmt.Errorf("feature gate validation failed: %w", err)
+			}
+			return nil
 		},
 		Action: func(c *cli.Context) error {
+			klog.Infof("Feature gates: %v", featuregates.ToMap())
 			ctx := c.Context
 			clientSets, err := flags.kubeClientConfig.NewClientSets()
 			if err != nil {

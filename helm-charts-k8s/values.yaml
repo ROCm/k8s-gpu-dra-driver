@@ -82,3 +82,11 @@ webhook:
 
 cdi:
   dynamicPath: /var/run/cdi
+
+# Feature gates for alpha/experimental features (key: true/false), rendered into
+# the FEATURE_GATES environment variable. Standard Kubernetes logging gates (e.g.
+# ContextualLogging) are also accepted here.
+# Example:
+#   featureGates:
+#     ExampleFeature: true
+featureGates: {}
