@@ -34,4 +34,20 @@ allocation requests.
 | `--logging-format` | string | `text` | `LOGGING_FORMAT` | Log output format. Permitted formats: `text`, `json`. |
 | `--log-flush-frequency` | duration | `5s` | `LOG_FLUSH_FREQUENCY` | Maximum number of seconds between log flushes. |
 | `--vmodule` | string | *(empty)* | `VMODULE` | Comma-separated list of `pattern=N` settings for file-filtered logging (text format only). |
-| `--feature-gates` | string | `ContextualLogging=true` | `FEATURE_GATES` | A set of `key=value` pairs describing feature gates for alpha/experimental logging features. |
+
+## Feature Gates
+
+The driver supports Kubernetes-style feature gates via the `--feature-gates`
+flag (or the `FEATURE_GATES` environment variable), a comma-separated list of
+`Name=true|false` pairs. The single flag controls both the driver's own gates
+and the standard Kubernetes logging gates (e.g. `ContextualLogging`). Unknown
+names cause the plugin to fail at startup.
+
+Gates are set via Helm:
+
+```yaml
+featureGates:
+  ExampleFeature: true
+```
+
+or `helm ... --set featureGates.ExampleFeature=true`.
