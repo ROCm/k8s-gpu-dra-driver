@@ -148,7 +148,7 @@ func newApp() *cli.App {
 			return nil
 		},
 		Action: func(c *cli.Context) error {
-			klog.Infof("Feature gates: %v", featuregates.ToMap())
+			klog.Infof("Feature gates: %s", cflags.FeatureGatesString(flags.loggingConfig))
 			ctx := c.Context
 			clientSets, err := flags.kubeClientConfig.NewClientSets()
 			if err != nil {

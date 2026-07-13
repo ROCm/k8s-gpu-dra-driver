@@ -53,13 +53,8 @@ type gateMux struct {
 
 // owner returns the registry that knows key, or nil if none do. GetAll includes
 // GA/Deprecated gates (KnownFeatures hides them), so routing stays correct across
-// maturity stages.
-//
-// Note: the built-in AllAlpha/AllBeta meta-gates are registered in every
-// component-base registry, so they resolve to the FIRST registry only and are
-// not fanned out to the others. Setting AllAlpha/AllBeta therefore affects just
-// that first registry's gates. This is acceptable here (driver gates are set by
-// name); revisit if broadcasting meta-gates across registries is ever needed.
+// maturity stages. The AllAlpha/AllBeta meta-gates exist in every registry and
+// are rejected in Set before reaching here, so ambiguous ownership never arises.
 func (m *gateMux) owner(key string) featuregate.MutableVersionedFeatureGate {
 	for _, r := range m.registries {
 		if _, ok := r.GetAll()[featuregate.Feature(key)]; ok {
@@ -80,6 +75,12 @@ func (m *gateMux) Set(value string) error {
 			return fmt.Errorf("missing bool value for feature gate %q", strings.TrimSpace(kv[0]))
 		}
 		key := strings.TrimSpace(kv[0])
+		// The AllAlpha/AllBeta meta-gates exist in every registry, so they cannot
+		// be routed to a single owner unambiguously and would silently toggle only
+		// the first registry's gates. Reject them rather than mislead.
+		if key == "AllAlpha" || key == "AllBeta" {
+			return fmt.Errorf("feature gate %s is not supported through this flag; set individual gates by name", key)
+		}
 		b, err := strconv.ParseBool(strings.TrimSpace(kv[1]))
 		if err != nil {
 			return fmt.Errorf("invalid value for feature gate %s: %w", key, err)
@@ -92,6 +93,13 @@ func (m *gateMux) Set(value string) error {
 			perRegistry[owner] = map[string]bool{}
 		}
 		perRegistry[owner][key] = b
+	}
+	// Validate every registry's batch against a deep copy before mutating any of
+	// them, so a failure in one registry does not leave another partially applied.
+	for reg, keys := range perRegistry {
+		if err := reg.DeepCopy().SetFromMap(keys); err != nil {
+			return err
+		}
 	}
 	for reg, keys := range perRegistry {
 		if err := reg.SetFromMap(keys); err != nil {
@@ -123,6 +131,14 @@ func newGateMux(logCfg *LoggingConfig) *gateMux {
 		logCfg.FeatureGate(),
 		featuregates.FeatureGates(),
 	}}
+}
+
+// FeatureGatesString returns the aggregated enablement state of all gates
+// reachable through the --feature-gates flag (logging + driver registries),
+// suitable for a startup log line. Unlike featuregates.ToMap(), which reports
+// only the driver registry, this reflects everything the flag controls.
+func FeatureGatesString(logCfg *LoggingConfig) string {
+	return newGateMux(logCfg).String()
 }
 
 // FeatureGateFlags returns the single --feature-gates flag (env FEATURE_GATES)

@@ -85,9 +85,10 @@ func KnownFeatures() []string { return FeatureGates().KnownFeatures() }
 
 // ToMap returns the current enablement state of all driver gates.
 func ToMap() map[string]bool {
+	fg := FeatureGates()
 	out := map[string]bool{}
-	for f := range FeatureGates().GetAll() {
-		out[string(f)] = FeatureGates().Enabled(f)
+	for f := range fg.GetAll() {
+		out[string(f)] = fg.Enabled(f)
 	}
 	return out
 }

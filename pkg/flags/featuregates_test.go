@@ -116,6 +116,46 @@ func TestMuxStringReflectsEnabledGates(t *testing.T) {
 	}
 }
 
+func TestMuxRejectsMetaGates(t *testing.T) {
+	a, b := buildTwoRegistries(t)
+	mux := &gateMux{registries: []featuregate.MutableVersionedFeatureGate{a, b}}
+	for _, meta := range []string{"AllAlpha=true", "AllBeta=false"} {
+		if err := mux.Set(meta); err == nil {
+			t.Errorf("Set(%q) should be rejected", meta)
+		}
+	}
+	// A real gate is still unaffected and stays disabled.
+	if a.Enabled("Alpha1") {
+		t.Errorf("Alpha1 should not have been enabled by a rejected meta-gate set")
+	}
+}
+
+func TestMuxSetIsAtomicAcrossRegistries(t *testing.T) {
+	// Registry a owns a settable Alpha gate; registry b owns a GA gate locked to
+	// its default, so setting it to the non-default value fails inside SetFromMap
+	// (i.e. it passes parsing but fails to apply). The mux must not leave
+	// registry a's gate mutated when registry b's batch fails.
+	a := featuregate.NewVersionedFeatureGate(version.MajorMinor(0, 1))
+	if err := a.AddVersioned(map[featuregate.Feature]featuregate.VersionedSpecs{
+		"Alpha1": {{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := featuregate.NewVersionedFeatureGate(version.MajorMinor(0, 1))
+	if err := b.AddVersioned(map[featuregate.Feature]featuregate.VersionedSpecs{
+		"Locked1": {{Default: true, PreRelease: featuregate.GA, LockToDefault: true, Version: version.MajorMinor(0, 1)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mux := &gateMux{registries: []featuregate.MutableVersionedFeatureGate{a, b}}
+	if err := mux.Set("Alpha1=true,Locked1=false"); err == nil {
+		t.Fatalf("expected Set to fail because Locked1 is locked to its default")
+	}
+	if a.Enabled("Alpha1") {
+		t.Errorf("Alpha1 must not be enabled when another registry's batch failed")
+	}
+}
+
 func TestFeatureGateFlagsSingleFlag(t *testing.T) {
 	logCfg := NewLoggingConfig()
 	flags := FeatureGateFlags(logCfg)
