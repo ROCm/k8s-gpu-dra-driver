@@ -25,7 +25,7 @@
 : ${APIS:=gpu/v1alpha1}
 
 # Toolchain
-: ${GOLANG_VERSION:=1.26.4}
+: ${GOLANG_VERSION:=1.26.5}
 : ${BUILDIMAGE_TAG:=v1.1}
 
 # Container/image defaults
