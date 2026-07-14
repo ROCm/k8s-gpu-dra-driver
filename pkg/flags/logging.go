@@ -52,7 +52,6 @@ type LoggingConfig struct {
 
 func NewLoggingConfig() *LoggingConfig {
 	fg := featuregate.NewFeatureGate()
-	var _ pflag.Value = fg // compile-time check for the type conversion below
 	l := &LoggingConfig{
 		featureGate: fg,
 		config:      logsapi.NewLoggingConfiguration(),
@@ -68,21 +67,16 @@ func (l *LoggingConfig) Apply() error {
 	return logsapi.ValidateAndApply(l.config, l.featureGate)
 }
 
+// FeatureGate exposes the logging feature-gate registry so it can be fronted by
+// the shared --feature-gates flag mux.
+func (l *LoggingConfig) FeatureGate() featuregate.MutableVersionedFeatureGate {
+	return l.featureGate
+}
+
 // Flags returns the flags for the configuration.
 func (l *LoggingConfig) Flags() []cli.Flag {
 	var fs pflag.FlagSet
 	logsapi.AddFlags(l.config, &fs)
-
-	// Adding the feature gates flag to fs means that its going to be added
-	// with "logging" as category. In practice, the logging code is the
-	// only code which uses the flag, therefore that seems like a good
-	// place to report it.
-	fs.AddFlag(&pflag.Flag{
-		Name: "feature-gates",
-		Usage: "A set of key=value pairs that describe feature gates for alpha/experimental features. " +
-			"Options are:\n     " + strings.Join(l.featureGate.KnownFeatures(), "\n     "),
-		Value: l.featureGate.(pflag.Value), //nolint:forcetypeassert // No need for type check: l.featureGate is a *featuregate.featureGate, which implements pflag.Value.
-	})
 
 	var flags []cli.Flag
 	fs.VisitAll(func(flag *pflag.Flag) {
