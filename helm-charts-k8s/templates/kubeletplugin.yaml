@@ -88,6 +88,12 @@ spec:
         - name: HEALTHCHECK_PORT
           value: {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | quote }}
         {{- end }}
+        {{- if .Values.featureGates }}
+        - name: FEATURE_GATES
+          value: "{{- $pairs := list -}}
+            {{- range $k, $v := .Values.featureGates }}{{ $pairs = append $pairs (printf "%s=%v" $k $v) }}{{- end -}}
+            {{- join "," $pairs -}}"
+        {{- end }}
         volumeMounts:
         - name: plugins-registry
           mountPath: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
