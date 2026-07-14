@@ -56,9 +56,10 @@ func newTestGates(t *testing.T) featuregate.MutableVersionedFeatureGate {
 	return fg
 }
 
-func TestDriverRegistryShipsNoGates(t *testing.T) {
-	if len(defaultFeatureGates) != 0 {
-		t.Fatalf("driver ships the feature-gate machinery only; defaultFeatureGates should be empty, got %v", defaultFeatureGates)
+func TestDeviceMetadataGateDefaultsOff(t *testing.T) {
+	fg := FeatureGates()
+	if fg.Enabled(DeviceMetadata) {
+		t.Fatalf("DeviceMetadata should default to false (Alpha)")
 	}
 }
 
