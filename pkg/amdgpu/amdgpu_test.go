@@ -18,7 +18,7 @@ package amdgpu
 
 import "testing"
 
-func TestNormalizeDriverVersion(t *testing.T) {
+func TestSemverDriverVersion(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -32,8 +32,8 @@ func TestNormalizeDriverVersion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeDriverVersion(tt.in); got != tt.want {
-				t.Errorf("normalizeDriverVersion(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := SemverDriverVersion(tt.in); got != tt.want {
+				t.Errorf("SemverDriverVersion(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

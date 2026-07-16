@@ -46,7 +46,7 @@ func GetDriverVersion() string {
 		}
 		driverVersion := strings.TrimSpace(string(b))
 		if driverVersion != "" {
-			return normalizeDriverVersion(driverVersion)
+			return driverVersion
 		}
 	}
 
@@ -57,12 +57,13 @@ func GetDriverVersion() string {
 	return ""
 }
 
-// normalizeDriverVersion trims the AMDGPU version to MAJOR.MINOR.PATCH. The
+// SemverDriverVersion trims the AMDGPU version to MAJOR.MINOR.PATCH. The
 // out-of-tree amdgpu module reports a 4-component string (e.g. "6.19.14.31400000"
 // where the trailing field is a build number), which the DRA ResourceSlice
 // VersionValue rejects for not being valid semver 2.0.0. Keep the first three
-// numeric components and drop the build metadata.
-func normalizeDriverVersion(version string) string {
+// numeric components and drop the build metadata; the full raw string is
+// published separately as a string attribute.
+func SemverDriverVersion(version string) string {
 	parts := strings.Split(version, ".")
 	if len(parts) <= 3 {
 		return version
