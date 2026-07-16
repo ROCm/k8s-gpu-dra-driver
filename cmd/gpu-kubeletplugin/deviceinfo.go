@@ -23,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
+
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 )
 
 // AmdGpuInfo represents a full AMD GPU device
@@ -70,7 +72,8 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 		"numaNode":    {IntValue: ptr.To(int64(d.NumaNode))},
 	}
 	if d.DriverVersion != "" {
-		attributes["driverVersion"] = resourceapi.DeviceAttribute{VersionValue: ptr.To(d.DriverVersion)}
+		attributes["driverVersion"] = resourceapi.DeviceAttribute{VersionValue: ptr.To(amdgpu.SemverDriverVersion(d.DriverVersion))}
+		attributes["driverVersionFull"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DriverVersion)}
 	}
 	if d.DeviceID != "" {
 		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DeviceID)}
@@ -109,7 +112,8 @@ func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 		"numaNode":         {IntValue: ptr.To(int64(d.NumaNode))},
 	}
 	if d.Parent.DriverVersion != "" {
-		attributes["driverVersion"] = resourceapi.DeviceAttribute{VersionValue: ptr.To(d.Parent.DriverVersion)}
+		attributes["driverVersion"] = resourceapi.DeviceAttribute{VersionValue: ptr.To(amdgpu.SemverDriverVersion(d.Parent.DriverVersion))}
+		attributes["driverVersionFull"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.Parent.DriverVersion)}
 	}
 	if d.Parent.DeviceID != "" {
 		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.Parent.DeviceID)}
