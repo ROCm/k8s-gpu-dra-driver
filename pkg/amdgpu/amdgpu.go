@@ -46,7 +46,7 @@ func GetDriverVersion() string {
 		}
 		driverVersion := strings.TrimSpace(string(b))
 		if driverVersion != "" {
-			return driverVersion
+			return normalizeDriverVersion(driverVersion)
 		}
 	}
 
@@ -55,6 +55,19 @@ func GetDriverVersion() string {
 	// publishing a synthetic value; the ResourceSlice is still valid without it.
 	glog.Warningf("Failed to read AMDGPU driver version from any card; driverVersion attribute will be omitted")
 	return ""
+}
+
+// normalizeDriverVersion trims the AMDGPU version to MAJOR.MINOR.PATCH. The
+// out-of-tree amdgpu module reports a 4-component string (e.g. "6.19.14.31400000"
+// where the trailing field is a build number), which the DRA ResourceSlice
+// VersionValue rejects for not being valid semver 2.0.0. Keep the first three
+// numeric components and drop the build metadata.
+func normalizeDriverVersion(version string) string {
+	parts := strings.Split(version, ".")
+	if len(parts) <= 3 {
+		return version
+	}
+	return strings.Join(parts[:3], ".")
 }
 
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
