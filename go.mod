@@ -1,6 +1,6 @@
 module github.com/ROCm/k8s-gpu-dra-driver
 
-go 1.26.0
+go 1.26.5
 
 require (
 	github.com/golang/glog v1.2.5
