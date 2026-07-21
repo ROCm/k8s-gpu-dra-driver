@@ -12,7 +12,10 @@ jobs:
     if: github.repository == 'ROCm/k8s-gpu-dra-driver'
     uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
     with:
-      image-registry: docker.io/rocm
+      # Release images are staged to amdpsdo and promoted to docker.io/rocm
+      # manually. The published Helm chart still references docker.io/rocm, so
+      # do not publish the drafted release until the image has been promoted.
+      image-registry: docker.io/amdpsdo
       image-name: k8s-gpu-dra-driver
       image-tag: ${{ github.ref_name }}
       push: true
