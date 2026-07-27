@@ -45,20 +45,16 @@ import (
 // through to PreAlpha, so there is no startup-panic risk.
 var emulationVersion = version.MajorMinor(0, 1)
 
-// ExampleFeature is a template for adding a driver feature gate. Define a
-// featuregate.Feature constant for each gate:
-//
-//	const ExampleFeature featuregate.Feature = "ExampleFeature"
+// DeviceMetadata enables KEP-5304 device metadata: device attributes are
+// published alongside prepared devices so the scheduler and kubelet can
+// inspect per-device properties (numaNode, pciBusID, pcieRoot, etc.).
+const DeviceMetadata featuregate.Feature = "DeviceMetadata"
 
-// defaultFeatureGates registers the driver's feature gates. Add each gate here,
-// defaulting off at Alpha on the driver's version line:
-//
-//	var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
-//		ExampleFeature: {
-//			{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
-//		},
-//	}
-var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{}
+var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
+	DeviceMetadata: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+}
 
 var (
 	once         sync.Once
