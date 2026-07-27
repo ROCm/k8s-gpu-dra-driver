@@ -43,11 +43,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
+	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	klog "k8s.io/klog/v2"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 )
 
 type driver struct {
@@ -70,15 +72,21 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.state = state
 
-	helper, err := kubeletplugin.Start(
-		ctx,
-		driver,
+	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(config.coreclient),
 		kubeletplugin.NodeName(config.flags.nodeName),
 		kubeletplugin.DriverName(consts.DriverName),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
-	)
+	}
+	if featuregates.Enabled(featuregates.DeviceMetadata) {
+		opts = append(opts,
+			kubeletplugin.EnableDeviceMetadata(true),
+			kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion),
+		)
+		klog.Infof("DeviceMetadata feature gate enabled: KEP-5304 device metadata will be published")
+	}
+	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,12 +154,29 @@ func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.Reso
 	}
 	var prepared []kubeletplugin.Device
 	for _, preparedPB := range preparedPBs {
-		prepared = append(prepared, kubeletplugin.Device{
+		dev := kubeletplugin.Device{
 			Requests:     preparedPB.GetRequestNames(),
 			PoolName:     preparedPB.GetPoolName(),
 			DeviceName:   preparedPB.GetDeviceName(),
 			CDIDeviceIDs: preparedPB.GetCdiDeviceIds(),
-		})
+		}
+
+		if featuregates.Enabled(featuregates.DeviceMetadata) {
+			if allocDev, exists := d.state.allocatable[preparedPB.GetDeviceName()]; exists {
+				device := allocDev.GetDevice()
+				if len(device.Attributes) > 0 {
+					attrs := make(map[string]resourceapi.DeviceAttribute, len(device.Attributes))
+					for k, v := range device.Attributes {
+						attrs[string(k)] = v
+					}
+					dev.Metadata = &kubeletplugin.DeviceMetadata{
+						Attributes: attrs,
+					}
+				}
+			}
+		}
+
+		prepared = append(prepared, dev)
 	}
 
 	klog.Infof("Returning newly prepared devices for claim '%v': %v", claim.UID, prepared)
