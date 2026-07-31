@@ -9,4 +9,7 @@ spec:
   selectors:
   - cel:
       expression: "device.driver == 'gpu.amd.com'"
+  {{- with .Values.deviceClass.extendedResourceName }}
+  extendedResourceName: {{ . }}
+  {{- end }}
 {{- end }}
