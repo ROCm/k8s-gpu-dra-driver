@@ -71,6 +71,28 @@ func SemverDriverVersion(version string) string {
 	return strings.Join(parts[:3], ".")
 }
 
+// resolveDRMIdentity reads a single GPU's card index, render minor, KFD node ID,
+// and unique (kfd) ID from its drm entries. It starts from fresh defaults on every
+// call, so a device with missing drm entries or no topology match reports its own
+// defaults instead of inheriting the previous device's identity.
+func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (card, renderD, nodeId int, devID string) {
+	card, renderD, nodeId, devID = 0, 128, 0, ""
+	for _, devPath := range devPaths {
+		name := filepath.Base(devPath)
+		switch {
+		case strings.HasPrefix(name, "card"):
+			card, _ = strconv.Atoi(name[len("card"):])
+		case strings.HasPrefix(name, "renderD"):
+			renderD, _ = strconv.Atoi(name[len("renderD"):])
+			if info, exists := topologyInfo[renderD]; exists {
+				devID = info.UniqueID
+				nodeId = info.NodeID
+			}
+		}
+	}
+	return
+}
+
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
 func GetAMDGPUs() map[string]map[string]interface{} {
 	if _, err := os.Stat("/sys/module/amdgpu/drivers/"); err != nil {
@@ -81,9 +103,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 	//ex: /sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0
 	matches, _ := filepath.Glob("/sys/module/amdgpu/drivers/pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*")
 
-	devID := ""
 	devices := make(map[string]map[string]interface{})
-	card, renderD, nodeId := 0, 128, 0
 
 	// Get comprehensive topology information once instead of multiple calls
 	topologyInfo := GetTopologyInfo()
@@ -127,20 +147,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 
 		glog.Info(path)
 		devPaths, _ := filepath.Glob(path + "/drm/*")
-
-		for _, devPath := range devPaths {
-			switch name := filepath.Base(devPath); {
-			case name[0:4] == "card":
-				card, _ = strconv.Atoi(name[4:])
-			case name[0:7] == "renderD":
-				renderD, _ = strconv.Atoi(name[7:])
-				if info, exists := topologyInfo[renderD]; exists {
-					devID = info.UniqueID
-					nodeId = info.NodeID
-				}
-			}
-
-		}
+		card, renderD, nodeId, devID := resolveDRMIdentity(devPaths, topologyInfo)
 		// Extract PCI address from path (e.g., "0000:19:00.0" from "/sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0")
 		pciAddr := filepath.Base(path)
 
@@ -196,29 +203,19 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		productName := ""
 		sysfsDeviceID := ""
 
-		for _, devPath := range devPaths {
-			switch name := filepath.Base(devPath); {
-			case name[0:4] == "card":
-				card, _ = strconv.Atoi(name[4:])
-			case name[0:7] == "renderD":
-				renderD, _ = strconv.Atoi(name[7:])
-				if info, exists := topologyInfo[renderD]; exists {
-					devID = info.UniqueID
-					nodeId = info.NodeID
-				}
-				// Set the computePartitionType, memoryPartitionType, numaNode, PCI address from the real GPU using the common devID
-				for _, device := range devices {
-					if device["kfdID"] == devID {
-						parentPciAddr = device["pciAddr"].(string)
-						numaNode = device["numaNode"].(int)
-						productName = device["productName"].(string)
-						sysfsDeviceID = device["deviceID"].(string)
-						if device["computePartitionType"].(string) != "" && device["memoryPartitionType"].(string) != "" {
-							computePartitionType = device["computePartitionType"].(string)
-							memoryPartitionType = device["memoryPartitionType"].(string)
-							break
-						}
-					}
+		card, renderD, nodeId, devID := resolveDRMIdentity(devPaths, topologyInfo)
+		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
+		// and device ID from the parent GPU that shares this kfd (unique) ID.
+		for _, device := range devices {
+			if device["kfdID"] == devID {
+				parentPciAddr = device["pciAddr"].(string)
+				numaNode = device["numaNode"].(int)
+				productName = device["productName"].(string)
+				sysfsDeviceID = device["deviceID"].(string)
+				if device["computePartitionType"].(string) != "" && device["memoryPartitionType"].(string) != "" {
+					computePartitionType = device["computePartitionType"].(string)
+					memoryPartitionType = device["memoryPartitionType"].(string)
+					break
 				}
 			}
 		}

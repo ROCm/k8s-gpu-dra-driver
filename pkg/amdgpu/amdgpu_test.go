@@ -38,3 +38,34 @@ func TestSemverDriverVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDRMIdentity(t *testing.T) {
+	topo := map[int]*TopologyInfo{
+		128: {UniqueID: "gpu-A", NodeID: 2},
+		129: {UniqueID: "gpu-B", NodeID: 3},
+	}
+	tests := []struct {
+		name                           string
+		devPaths                       []string
+		wantCard, wantRender, wantNode int
+		wantDevID                      string
+	}{
+		{"complete device", []string{"/d/card0", "/d/renderD128"}, 0, 128, 2, "gpu-A"},
+		{"another complete device", []string{"/d/card1", "/d/renderD129"}, 1, 129, 3, "gpu-B"},
+		// The following must return fresh defaults rather than a previous device's identity.
+		{"no drm entries", nil, 0, 128, 0, ""},
+		{"renderD without topology", []string{"/d/card4", "/d/renderD200"}, 4, 200, 0, ""},
+		{"card entry only", []string{"/d/card7"}, 7, 128, 0, ""},
+		// A short or unrelated entry is ignored instead of panicking on a name slice.
+		{"short entry ignored", []string{"/d/x"}, 0, 128, 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card, renderD, nodeId, devID := resolveDRMIdentity(tt.devPaths, topo)
+			if card != tt.wantCard || renderD != tt.wantRender || nodeId != tt.wantNode || devID != tt.wantDevID {
+				t.Fatalf("got (card=%d, renderD=%d, node=%d, devID=%q), want (card=%d, renderD=%d, node=%d, devID=%q)",
+					card, renderD, nodeId, devID, tt.wantCard, tt.wantRender, tt.wantNode, tt.wantDevID)
+			}
+		})
+	}
+}
