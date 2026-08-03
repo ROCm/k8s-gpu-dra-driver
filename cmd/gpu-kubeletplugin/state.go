@@ -137,6 +137,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 
 	for _, c := range checkpoints {
 		if c == DriverPluginCheckpointFile {
+			if err := state.reconcileCDISpecs(); err != nil {
+				return nil, fmt.Errorf("unable to reconcile CDI spec files from checkpoint: %v", err)
+			}
 			return state, nil
 		}
 	}
@@ -149,6 +152,62 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
+// validatePreparedDevices rejects a checkpoint entry that cannot be turned into a
+// CDI spec, so a corrupt or partial checkpoint fails the claim loudly rather than
+// panicking at startup or reporting a claim as prepared when it is not.
+func validatePreparedDevices(claimUID string, preparedDevices PreparedDevices) error {
+	if len(preparedDevices) == 0 {
+		return fmt.Errorf("checkpoint entry for claim %s has no prepared devices", claimUID)
+	}
+	for _, pd := range preparedDevices {
+		if pd == nil {
+			return fmt.Errorf("checkpoint entry for claim %s has a nil prepared device", claimUID)
+		}
+		if pd.DeviceName == "" {
+			return fmt.Errorf("checkpoint entry for claim %s has a device with no name", claimUID)
+		}
+		if pd.ContainerEdits == nil || pd.ContainerEdits.ContainerEdits == nil {
+			return fmt.Errorf("checkpoint entry for claim %s device %s has no container edits", claimUID, pd.DeviceName)
+		}
+	}
+	return nil
+}
+
+// ensureClaimSpec makes sure the CDI spec for a checkpointed claim exists, so a
+// claim reported as prepared from the checkpoint is actually usable. It is safe to
+// call repeatedly: CreateClaimSpecFile overwrites the deterministic spec path.
+func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedDevices) error {
+	if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+		return err
+	}
+	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		return fmt.Errorf("ensure CDI spec for claim %s: %w", claimUID, err)
+	}
+	return nil
+}
+
+// reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
+// plugin restart, which can clear the (often tmpfs) spec directory while the
+// checkpoint survives. A claim that fails to rebuild is logged, not fatal; the next
+// Prepare retries it. Recovery replays the checkpointed edits as-is, so it is
+// correct within a boot but not across a node reboot that renumbers device nodes.
+func (s *DeviceState) reconcileCDISpecs() error {
+	checkpoint := newCheckpoint()
+	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+	}
+	if checkpoint.V1 == nil {
+		return fmt.Errorf("checkpoint has no v1 payload")
+	}
+
+	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
+		if err := s.ensureClaimSpec(claimUID, preparedDevices); err != nil {
+			klog.Warningf("unable to rebuild CDI spec for claim %s on startup; the next Prepare will retry: %v", claimUID, err)
+		}
+	}
+	return nil
+}
+
 func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -159,10 +218,18 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
+	if checkpoint.V1 == nil {
+		return nil, fmt.Errorf("checkpoint has no v1 payload")
+	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
-	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), nil
+	if preparedDevices := preparedClaims[claimUID]; preparedDevices != nil {
+		// The spec directory can be cleared (tmpfs) while the checkpoint survives, so
+		// make sure the spec exists before reporting the claim as already prepared.
+		if err := s.ensureClaimSpec(claimUID, preparedDevices); err != nil {
+			return nil, err
+		}
+		return preparedDevices.GetDevices(), nil
 	}
 
 	preparedDevices, err := s.prepareDevices(claim)
@@ -189,6 +256,9 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+	}
+	if checkpoint.V1 == nil {
+		return fmt.Errorf("checkpoint has no v1 payload")
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 

@@ -33,13 +33,23 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
+	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
+
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
+	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
 
 func TestRestoreFromVfio(t *testing.T) {
@@ -172,4 +182,162 @@ func TestPreparedDevicesGetDevices(t *testing.T) {
 			assert.Equal(t, test.expected, devices)
 		})
 	}
+}
+
+func TestReconcileCDISpecs(t *testing.T) {
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	assert.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	assert.NoError(t, err)
+
+	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = PreparedDevices{
+		{
+			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
+				DeviceNodes: []*cdispec.DeviceNode{
+					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
+				},
+			}},
+		},
+	}
+	assert.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	// The spec dir starts empty, as a reboot leaves it.
+	before, err := os.ReadDir(cdiRoot)
+	assert.NoError(t, err)
+	assert.Empty(t, before)
+
+	assert.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	assert.NoError(t, err)
+	require.NotEmpty(t, after, "reconcile should rebuild the CDI spec from the checkpoint")
+
+	data, err := os.ReadFile(filepath.Join(cdiRoot, after[0].Name()))
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), "/dev/kfd", "the rebuilt spec must carry the device node from the checkpoint")
+}
+
+func TestValidatePreparedDevices(t *testing.T) {
+	edits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
+	valid := PreparedDevices{{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: edits}}
+	require.NoError(t, validatePreparedDevices("uid", valid))
+
+	bad := map[string]PreparedDevices{
+		"empty":               {},
+		"nil device":          {nil},
+		"no device name":      {{Device: drapbv1.Device{}, ContainerEdits: edits}},
+		"nil container edits": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}}},
+	}
+	for name, pds := range bad {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, validatePreparedDevices("uid", pds))
+		})
+	}
+}
+
+// A checkpoint-hit Prepare must recreate a spec that a tmpfs-clearing restart
+// removed, rather than reporting the claim as prepared with no spec on disk.
+func TestPrepareRepairsMissingCheckpointedSpec(t *testing.T) {
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	require.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+
+	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+
+	const claimUID = "claim-uid-1"
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims[claimUID] = PreparedDevices{
+		{
+			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
+				DeviceNodes: []*cdispec.DeviceNode{
+					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
+				},
+			}},
+		},
+	}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	before, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, before)
+
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID(claimUID)}}
+	devices, err := s.Prepare(claim)
+	require.NoError(t, err)
+	require.Len(t, devices, 1)
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.NotEmpty(t, after, "a checkpoint-hit Prepare must recreate the missing CDI spec")
+}
+
+// A malformed checkpoint entry is logged and skipped at startup, not a panic.
+func TestReconcileSkipsMalformedCheckpointEntry(t *testing.T) {
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	require.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+
+	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+}
+
+// A checkpoint-hit Prepare must fail closed on a malformed entry rather than
+// report the claim as prepared. A device with no name cannot become a CDI spec,
+// so Prepare has to return an error instead of the devices.
+func TestPrepareRejectsMalformedCheckpointEntry(t *testing.T) {
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	require.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+
+	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+
+	const claimUID = "claim-uid-1"
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims[claimUID] = PreparedDevices{
+		{Device: drapbv1.Device{DeviceName: ""}, ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}},
+	}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID(claimUID)}}
+	_, err = s.Prepare(claim)
+	require.Error(t, err, "checkpoint-hit Prepare with a malformed entry must fail closed, not report success")
+}
+
+// A checkpoint entry whose container edits wrapper is present but hollow (nil
+// inner edits) must be rejected during reconciliation, not dereferenced into a
+// panic while rebuilding the CDI spec.
+func TestReconcileRejectsHollowContainerEdits(t *testing.T) {
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	require.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+
+	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["hollow"] = PreparedDevices{
+		{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: &cdiapi.ContainerEdits{}},
+	}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	// Must not panic; the malformed entry is logged and skipped.
+	require.NoError(t, s.reconcileCDISpecs())
 }
