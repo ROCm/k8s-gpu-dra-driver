@@ -33,11 +33,13 @@ limitations under the License.
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -92,10 +94,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.helper = helper
 
-	devices := make([]resourceapi.Device, 0, len(state.allocatable))
-	for device := range maps.Values(state.allocatable) {
-		devices = append(devices, device.GetDevice())
-	}
+	devices := resourceSliceDevices(state.allocatable)
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
 			config.flags.nodeName: {
@@ -124,6 +123,22 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	return driver, nil
+}
+
+// resourceSliceDevices returns the allocatable devices sorted by name. Go map
+// iteration order is not specified, so without sorting the published
+// ResourceSlice would change on every restart. The order is also the first-fit
+// allocation priority the scheduler applies, so keeping it deterministic
+// matters beyond avoiding churn.
+func resourceSliceDevices(allocatable AllocatableDevices) []resourceapi.Device {
+	devices := make([]resourceapi.Device, 0, len(allocatable))
+	for device := range maps.Values(allocatable) {
+		devices = append(devices, device.GetDevice())
+	}
+	slices.SortFunc(devices, func(a, b resourceapi.Device) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return devices
 }
 
 func (d *driver) Shutdown(logger klog.Logger) error {
