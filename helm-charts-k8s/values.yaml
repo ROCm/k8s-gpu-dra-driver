@@ -19,6 +19,9 @@ image:
 deviceClass:
   # -- Create the gpu.amd.com DeviceClass resource. Set to false if deploying via gpu-operator.
   create: true
+  # -- Maps classic extended-resource requests to this DeviceClass.
+  # Override to another name, or set "" to omit the field.
+  extendedResourceName: amd.com/gpu
 
 serviceAccount:
   # Specifies whether a service account should be created
