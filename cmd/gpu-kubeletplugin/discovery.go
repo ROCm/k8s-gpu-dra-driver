@@ -86,6 +86,18 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }
 
+// addAllocatableDevice inserts a device under its canonical name, returning an
+// error on a name collision instead of silently overwriting a device already
+// discovered under the same name.
+func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice) error {
+	name := device.CanonicalName()
+	if _, exists := devices[name]; exists {
+		return fmt.Errorf("duplicate device identity %q", name)
+	}
+	devices[name] = device
+	return nil
+}
+
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	alldevices := make(AllocatableDevices)
 	allAMDGPUs := amdgpu.GetAMDGPUs()
@@ -133,7 +145,9 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			device := &AllocatableDevice{
 				AmdGpu: amdGpuInfo,
 			}
-			alldevices[device.CanonicalName()] = device
+			if err := addAllocatableDevice(alldevices, device); err != nil {
+				return nil, err
+			}
 
 			klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
@@ -167,7 +181,9 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			device := &AllocatableDevice{
 				AmdPartition: partitionInfo,
 			}
-			alldevices[device.CanonicalName()] = device
+			if err := addAllocatableDevice(alldevices, device); err != nil {
+				return nil, err
+			}
 
 			klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)

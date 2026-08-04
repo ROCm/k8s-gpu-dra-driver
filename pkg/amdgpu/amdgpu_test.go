@@ -49,22 +49,28 @@ func TestResolveDRMIdentity(t *testing.T) {
 		devPaths                       []string
 		wantCard, wantRender, wantNode int
 		wantDevID                      string
+		wantOK                         bool
 	}{
-		{"complete device", []string{"/d/card0", "/d/renderD128"}, 0, 128, 2, "gpu-A"},
-		{"another complete device", []string{"/d/card1", "/d/renderD129"}, 1, 129, 3, "gpu-B"},
-		// The following must return fresh defaults rather than a previous device's identity.
-		{"no drm entries", nil, 0, 128, 0, ""},
-		{"renderD without topology", []string{"/d/card4", "/d/renderD200"}, 4, 200, 0, ""},
-		{"card entry only", []string{"/d/card7"}, 7, 128, 0, ""},
-		// A short or unrelated entry is ignored instead of panicking on a name slice.
-		{"short entry ignored", []string{"/d/x"}, 0, 128, 0, ""},
+		{"complete device", []string{"/d/card0", "/d/renderD128"}, 0, 128, 2, "gpu-A", true},
+		{"another complete device", []string{"/d/card1", "/d/renderD129"}, 1, 129, 3, "gpu-B", true},
+		{"renderD without topology is still valid", []string{"/d/card4", "/d/renderD200"}, 4, 200, 0, "", true},
+		// The rest resolve no complete identity, so ok is false and the caller
+		// skips them instead of publishing a borrowed or default device. Each runs
+		// after the complete cases above to show no state carries over.
+		{"no drm entries", nil, 0, 0, 0, "", false},
+		{"card without renderD", []string{"/d/card7"}, 7, 0, 0, "", false},
+		{"renderD without card", []string{"/d/renderD128"}, 0, 128, 2, "gpu-A", false},
+		{"malformed card suffix", []string{"/d/cardfoo", "/d/renderD128"}, 0, 128, 2, "gpu-A", false},
+		{"conflicting card entries", []string{"/d/card0", "/d/card1", "/d/renderD128"}, 1, 128, 2, "gpu-A", false},
+		{"empty renderD suffix", []string{"/d/card1", "/d/renderD"}, 1, 0, 0, "", false},
+		{"short unrelated entry", []string{"/d/x"}, 0, 0, 0, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			card, renderD, nodeId, devID := resolveDRMIdentity(tt.devPaths, topo)
-			if card != tt.wantCard || renderD != tt.wantRender || nodeId != tt.wantNode || devID != tt.wantDevID {
-				t.Fatalf("got (card=%d, renderD=%d, node=%d, devID=%q), want (card=%d, renderD=%d, node=%d, devID=%q)",
-					card, renderD, nodeId, devID, tt.wantCard, tt.wantRender, tt.wantNode, tt.wantDevID)
+			card, renderD, nodeId, devID, ok := resolveDRMIdentity(tt.devPaths, topo)
+			if card != tt.wantCard || renderD != tt.wantRender || nodeId != tt.wantNode || devID != tt.wantDevID || ok != tt.wantOK {
+				t.Fatalf("got (card=%d, renderD=%d, node=%d, devID=%q, ok=%v), want (card=%d, renderD=%d, node=%d, devID=%q, ok=%v)",
+					card, renderD, nodeId, devID, ok, tt.wantCard, tt.wantRender, tt.wantNode, tt.wantDevID, tt.wantOK)
 			}
 		})
 	}

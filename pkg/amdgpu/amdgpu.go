@@ -71,26 +71,64 @@ func SemverDriverVersion(version string) string {
 	return strings.Join(parts[:3], ".")
 }
 
-// resolveDRMIdentity reads a single GPU's card index, render minor, KFD node ID,
-// and unique (kfd) ID from its drm entries. It starts from fresh defaults on every
-// call, so a device with missing drm entries or no topology match reports its own
-// defaults instead of inheriting the previous device's identity.
-func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (card, renderD, nodeId int, devID string) {
-	card, renderD, nodeId, devID = 0, 128, 0, ""
+// parseDRMIndex returns the numeric index of a DRM node name (for example 128
+// from "renderD128"). ok is false when the prefix is missing or the suffix is
+// not a plain decimal, so a malformed name is skipped instead of read as index 0.
+func parseDRMIndex(name, prefix string) (int, bool) {
+	suffix, found := strings.CutPrefix(name, prefix)
+	if !found || suffix == "" {
+		return 0, false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// resolveDRMIdentity reads a GPU's card index, render minor, KFD node ID, and
+// unique (kfd) ID from its drm entries, starting fresh on every call so a device
+// never inherits the previous one's identity. ok is true only when both a card
+// and a render node resolve to a valid index; otherwise the caller skips the
+// device instead of publishing it with a borrowed or default identity.
+func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (card, renderD, nodeId int, devID string, ok bool) {
+	haveCard, haveRender, conflict := false, false, false
 	for _, devPath := range devPaths {
 		name := filepath.Base(devPath)
 		switch {
 		case strings.HasPrefix(name, "card"):
-			card, _ = strconv.Atoi(name[len("card"):])
+			n, valid := parseDRMIndex(name, "card")
+			if !valid {
+				continue
+			}
+			if haveCard && n != card {
+				conflict = true
+			}
+			card, haveCard = n, true
 		case strings.HasPrefix(name, "renderD"):
-			renderD, _ = strconv.Atoi(name[len("renderD"):])
-			if info, exists := topologyInfo[renderD]; exists {
-				devID = info.UniqueID
-				nodeId = info.NodeID
+			n, valid := parseDRMIndex(name, "renderD")
+			if !valid {
+				continue
+			}
+			if haveRender && n != renderD {
+				conflict = true
+			}
+			renderD, haveRender = n, true
+			// Keep nodeId/devID tied to the current renderD; a render node without
+			// topology contributes no identity rather than a previous one's.
+			if info, exists := topologyInfo[n]; exists {
+				devID, nodeId = info.UniqueID, info.NodeID
+			} else {
+				devID, nodeId = "", 0
 			}
 		}
 	}
-	return
+	return card, renderD, nodeId, devID, haveCard && haveRender && !conflict
 }
 
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
@@ -147,9 +185,13 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 
 		glog.Info(path)
 		devPaths, _ := filepath.Glob(path + "/drm/*")
-		card, renderD, nodeId, devID := resolveDRMIdentity(devPaths, topologyInfo)
 		// Extract PCI address from path (e.g., "0000:19:00.0" from "/sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0")
 		pciAddr := filepath.Base(path)
+		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
+		if !ok {
+			glog.Warningf("Skipping device %s: no valid card and renderD drm entries", pciAddr)
+			continue
+		}
 
 		// Get product name
 		productName := ""
@@ -203,7 +245,11 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		productName := ""
 		sysfsDeviceID := ""
 
-		card, renderD, nodeId, devID := resolveDRMIdentity(devPaths, topologyInfo)
+		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
+		if !ok || devID == "" {
+			glog.Warningf("Skipping platform device %s: unresolved GPU identity", filepath.Base(path))
+			continue
+		}
 		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
 		// and device ID from the parent GPU that shares this kfd (unique) ID.
 		for _, device := range devices {
