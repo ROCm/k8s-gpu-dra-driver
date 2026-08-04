@@ -79,10 +79,11 @@ func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
 
 type DeviceState struct {
 	sync.Mutex
-	cdi               *CDIHandler
-	allocatable       AllocatableDevices
-	checkpointManager checkpointmanager.CheckpointManager
-	vfioManager       *VfioPciManager
+	cdi                  *CDIHandler
+	allocatable          AllocatableDevices
+	checkpointManager    checkpointmanager.CheckpointManager
+	vfioManager          *VfioPciManager
+	claimVfioConversions map[string]*AmdGpuInfo
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -227,20 +228,21 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 	klog.V(2).Infof("Decoded %d opaque configs for driver %s", len(configs), consts.DriverName)
 
-	// Add default configs (one per device type) to the front of the list with
-	// the lowest precedence. This guarantees every allocated device finds a
-	// type-compatible default if the claim/class did not supply an explicit
-	// config.
+	// Add a default GPU config at the front with lowest precedence. No
+	// default VfioDeviceConfig — VFIO conversion requires an explicit config
+	// in the claim to avoid accidentally routing regular GPUs into vfio-pci.
 	configs = slices.Insert(configs, 0,
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
-		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultVfioDeviceConfig()},
 	)
+
+	// Track per-claim VFIO conversions so the long-lived allocatable entry
+	// stays immutable. Restored on unprepare or rollback.
+	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
 
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
 	for _, result := range claim.Status.Allocation.Devices.Results {
-		// Skip devices from other drivers in multi-driver claims.
 		if result.Driver != consts.DriverName {
 			continue
 		}
@@ -253,10 +255,6 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
 				if !isVFIO {
-					// Convert an AmdGpu device to VFIO on demand when a
-					// VfioDeviceConfig is present. Supports both:
-					//   - GIM VFs (has physfn) — SR-IOV virtual function
-					//   - PFs (no physfn) — full GPU passthrough
 					if allocDev.AmdGpu != nil {
 						physfn := filepath.Join(amdgpu.PCIDevicePath, allocDev.AmdGpu.PCIAddress, "physfn")
 						_, physfnErr := os.Lstat(physfn)
@@ -276,6 +274,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
+						s.claimVfioConversions[result.Device] = allocDev.AmdGpu
 						allocDev.Vfio = vfioInfo
 						allocDev.AmdGpu = nil
 						isVFIO = true
@@ -323,23 +322,24 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			if err := castConfig.Validate(); err != nil {
 				return nil, fmt.Errorf("error validating VFIO config: %w", err)
 			}
-			var configuredDevices []*AmdGpuVFIOInfo
+			var configuredNames []string
 			for _, result := range results {
 				edits, err := s.applyVFIOConfig(result)
 				if err != nil {
-					// Include the failing device in rollback — Configure may
-					// have succeeded before the CDI spec build failed.
 					if dev := s.allocatable[result.Device]; dev != nil && dev.Vfio != nil {
-						configuredDevices = append(configuredDevices, dev.Vfio)
+						configuredNames = append(configuredNames, result.Device)
 					}
-					for _, info := range configuredDevices {
-						if unconfigErr := s.vfioManager.Unconfigure(info); unconfigErr != nil {
-							klog.Warningf("Rollback: failed to unconfigure %s: %v", info.PCIAddress, unconfigErr)
+					for _, name := range configuredNames {
+						if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil {
+							if unconfigErr := s.vfioManager.Unconfigure(dev.Vfio); unconfigErr != nil {
+								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
+							}
 						}
+						s.restoreFromVfio(name)
 					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
-				configuredDevices = append(configuredDevices, s.allocatable[result.Device].Vfio)
+				configuredNames = append(configuredNames, result.Device)
 				perDeviceCDIContainerEdits[result.Device] = edits
 			}
 		default:
@@ -380,9 +380,26 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
 				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			}
+			s.restoreFromVfio(device.DeviceName)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s *DeviceState) restoreFromVfio(deviceName string) {
+	if s.claimVfioConversions == nil {
+		return
+	}
+	original, ok := s.claimVfioConversions[deviceName]
+	if !ok {
+		return
+	}
+	if allocDev, exists := s.allocatable[deviceName]; exists {
+		allocDev.AmdGpu = original
+		allocDev.Vfio = nil
+		klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
+	}
+	delete(s.claimVfioConversions, deviceName)
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.
