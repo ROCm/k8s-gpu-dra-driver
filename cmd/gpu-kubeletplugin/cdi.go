@@ -110,6 +110,11 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevi
 	}
 
 	for _, device := range devices {
+		if device == nil || device.ContainerEdits == nil {
+			// Callers validate checkpoint-sourced devices first; guard here too so a
+			// nil entry can never be dereferenced into a panic at spec-build time.
+			return fmt.Errorf("claim %s has a nil prepared device or container edits", claimUID)
+		}
 		klog.Infof("Creating CDI spec for device: %+v", device)
 		claimEdits := cdiapi.ContainerEdits{}
 		claimEdits.Append(device.ContainerEdits)

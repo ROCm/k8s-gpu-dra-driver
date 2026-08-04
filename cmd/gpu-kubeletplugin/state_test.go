@@ -153,6 +153,49 @@ func TestUnprepareDevices_PreDiscoveredVfioNotRestored(t *testing.T) {
 	assert.Nil(t, allocDev.AmdGpu, "should not gain an AmdGpu entry")
 }
 
+func newCacheAndCheckpointer(t *testing.T) (string, *cdiapi.Cache, checkpointmanager.CheckpointManager) {
+	t.Helper()
+	cdiRoot := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
+	require.NoError(t, err)
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+	return cdiRoot, cache, cm
+}
+
+// testDeviceState wires a DeviceState with a temp plugin dir, a matching boot epoch,
+// and the named allocatable devices, so reconcile replays instead of discarding.
+func testDeviceState(t *testing.T, cache *cdiapi.Cache, cm checkpointmanager.CheckpointManager, devices ...string) *DeviceState {
+	t.Helper()
+	alloc := AllocatableDevices{}
+	for _, d := range devices {
+		alloc[d] = &AllocatableDevice{}
+	}
+	s := &DeviceState{
+		cdi:               &CDIHandler{cache: cache},
+		allocatable:       alloc,
+		checkpointManager: cm,
+		pluginPath:        t.TempDir(),
+		bootID:            "test-boot",
+	}
+	require.NoError(t, s.writeEpoch("test-boot"))
+	return s
+}
+
+// kfdDevices is a well-formed single-device claim naming gpu-0-128 with a /dev/kfd node.
+func kfdDevices() PreparedDevices {
+	return PreparedDevices{
+		{
+			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
+				DeviceNodes: []*cdispec.DeviceNode{
+					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
+				},
+			}},
+		},
+	}
+}
+
 func TestPreparedDevicesGetDevices(t *testing.T) {
 	tests := map[string]struct {
 		preparedDevices PreparedDevices
@@ -184,42 +227,29 @@ func TestPreparedDevicesGetDevices(t *testing.T) {
 	}
 }
 
+// Within the same boot, with the device still allocatable, reconcile rebuilds the
+// per-claim CDI spec from the checkpoint.
 func TestReconcileCDISpecs(t *testing.T) {
-	cdiRoot := t.TempDir()
-	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
-	assert.NoError(t, err)
-	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
-	assert.NoError(t, err)
-
-	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
 
 	checkpoint := newCheckpoint()
-	checkpoint.V1.PreparedClaims["claim-uid-1"] = PreparedDevices{
-		{
-			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
-			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
-				DeviceNodes: []*cdispec.DeviceNode{
-					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
-				},
-			}},
-		},
-	}
-	assert.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
-	// The spec dir starts empty, as a reboot leaves it.
 	before, err := os.ReadDir(cdiRoot)
-	assert.NoError(t, err)
-	assert.Empty(t, before)
+	require.NoError(t, err)
+	require.Empty(t, before)
 
-	assert.NoError(t, s.reconcileCDISpecs())
+	require.NoError(t, s.reconcileCDISpecs())
 
 	after, err := os.ReadDir(cdiRoot)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NotEmpty(t, after, "reconcile should rebuild the CDI spec from the checkpoint")
 
 	data, err := os.ReadFile(filepath.Join(cdiRoot, after[0].Name()))
-	assert.NoError(t, err)
-	assert.Contains(t, string(data), "/dev/kfd", "the rebuilt spec must carry the device node from the checkpoint")
+	require.NoError(t, err)
+	require.Contains(t, string(data), "/dev/kfd", "the rebuilt spec must carry the device node from the checkpoint")
 }
 
 func TestValidatePreparedDevices(t *testing.T) {
@@ -227,11 +257,20 @@ func TestValidatePreparedDevices(t *testing.T) {
 	valid := PreparedDevices{{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: edits}}
 	require.NoError(t, validatePreparedDevices("uid", valid))
 
+	nilNode := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{DeviceNodes: []*cdispec.DeviceNode{nil}}}
+	nilHook := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Hooks: []*cdispec.Hook{nil}}}
+	nilMount := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Mounts: []*cdispec.Mount{nil}}}
+	nilNet := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{NetDevices: []*cdispec.LinuxNetDevice{nil}}}
+
 	bad := map[string]PreparedDevices{
 		"empty":               {},
 		"nil device":          {nil},
 		"no device name":      {{Device: drapbv1.Device{}, ContainerEdits: edits}},
 		"nil container edits": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}}},
+		"nil deviceNode":      {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilNode}},
+		"nil hook":            {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilHook}},
+		"nil mount":           {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilMount}},
+		"nil netDevice":       {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilNet}},
 	}
 	for name, pds := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -243,26 +282,12 @@ func TestValidatePreparedDevices(t *testing.T) {
 // A checkpoint-hit Prepare must recreate a spec that a tmpfs-clearing restart
 // removed, rather than reporting the claim as prepared with no spec on disk.
 func TestPrepareRepairsMissingCheckpointedSpec(t *testing.T) {
-	cdiRoot := t.TempDir()
-	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
-	require.NoError(t, err)
-	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
-	require.NoError(t, err)
-
-	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
 
 	const claimUID = "claim-uid-1"
 	checkpoint := newCheckpoint()
-	checkpoint.V1.PreparedClaims[claimUID] = PreparedDevices{
-		{
-			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
-			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
-				DeviceNodes: []*cdispec.DeviceNode{
-					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
-				},
-			}},
-		},
-	}
+	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
 	before, err := os.ReadDir(cdiRoot)
@@ -279,34 +304,28 @@ func TestPrepareRepairsMissingCheckpointedSpec(t *testing.T) {
 	require.NotEmpty(t, after, "a checkpoint-hit Prepare must recreate the missing CDI spec")
 }
 
-// A malformed checkpoint entry is logged and skipped at startup, not a panic.
+// A malformed checkpoint entry is logged and skipped at startup, not a panic, and
+// leaves no spec behind.
 func TestReconcileSkipsMalformedCheckpointEntry(t *testing.T) {
-	cdiRoot := t.TempDir()
-	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
-	require.NoError(t, err)
-	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
-	require.NoError(t, err)
-
-	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm)
 
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
 	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a malformed entry must be skipped, not written as a spec")
 }
 
 // A checkpoint-hit Prepare must fail closed on a malformed entry rather than
-// report the claim as prepared. A device with no name cannot become a CDI spec,
-// so Prepare has to return an error instead of the devices.
+// report the claim as prepared. A device with no name cannot become a CDI spec.
 func TestPrepareRejectsMalformedCheckpointEntry(t *testing.T) {
-	cdiRoot := t.TempDir()
-	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
-	require.NoError(t, err)
-	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
-	require.NoError(t, err)
-
-	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+	_, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm)
 
 	const claimUID = "claim-uid-1"
 	checkpoint := newCheckpoint()
@@ -316,21 +335,15 @@ func TestPrepareRejectsMalformedCheckpointEntry(t *testing.T) {
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
 	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID(claimUID)}}
-	_, err = s.Prepare(claim)
+	_, err := s.Prepare(claim)
 	require.Error(t, err, "checkpoint-hit Prepare with a malformed entry must fail closed, not report success")
 }
 
-// A checkpoint entry whose container edits wrapper is present but hollow (nil
-// inner edits) must be rejected during reconciliation, not dereferenced into a
-// panic while rebuilding the CDI spec.
+// A non-nil but hollow ContainerEdits (nil inner edits) must be rejected during
+// reconciliation, not dereferenced into a panic, and must leave no spec behind.
 func TestReconcileRejectsHollowContainerEdits(t *testing.T) {
-	cdiRoot := t.TempDir()
-	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiRoot))
-	require.NoError(t, err)
-	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
-	require.NoError(t, err)
-
-	s := &DeviceState{cdi: &CDIHandler{cache: cache}, checkpointManager: cm}
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
 
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["hollow"] = PreparedDevices{
@@ -338,6 +351,184 @@ func TestReconcileRejectsHollowContainerEdits(t *testing.T) {
 	}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
-	// Must not panic; the malformed entry is logged and skipped.
 	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a hollow container-edits entry must not be written as a spec")
+}
+
+// A checkpoint written under a different boot must be discarded, not replayed: its
+// device nodes may now point at other hardware.
+func TestReconcileDiscardsCheckpointFromDifferentBoot(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+	require.NoError(t, s.writeEpoch("boot-previous")) // stored epoch now differs from s.bootID
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a checkpoint from a previous boot must not be replayed into a CDI spec")
+
+	reloaded := newCheckpoint()
+	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+	require.Empty(t, reloaded.V1.PreparedClaims, "the stale checkpoint must be discarded")
+}
+
+// A checkpointed device that is no longer in the allocatable inventory (removed or
+// skipped by discovery this boot) must be quarantined, not rebuilt from the checkpoint.
+func TestReconcileSkipsDeviceNotAllocatable(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm) // gpu-0-128 is deliberately absent from allocatable
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a device absent from the current inventory must not be rebuilt")
+}
+
+// A checkpoint with a nested nil device node passes the wrapper checks; reconcile
+// must reject it rather than dereference it into a startup panic.
+func TestReconcileRejectsNestedNullDeviceNode(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["nested"] = PreparedDevices{
+		{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{DeviceNodes: []*cdispec.DeviceNode{nil}}}},
+	}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs()) // must not panic
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a nested nil device node must be rejected, not written as a spec")
+}
+
+// The boot epoch guard must fail closed, not open. A missing epoch file or an
+// unreadable boot id has to discard the checkpoint rather than replay it: guarding
+// only on inequality (stored != bootID) would replay when both are empty.
+func TestReconcileFailsClosedWithoutBootEpoch(t *testing.T) {
+	t.Run("epoch file missing", func(t *testing.T) {
+		cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+		s := &DeviceState{
+			cdi:               &CDIHandler{cache: cache},
+			allocatable:       AllocatableDevices{"gpu-0-128": &AllocatableDevice{}},
+			checkpointManager: cm,
+			pluginPath:        t.TempDir(), // no boot-epoch file written -> stored == ""
+			bootID:            "test-boot",
+		}
+		checkpoint := newCheckpoint()
+		checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+		require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+		require.NoError(t, s.reconcileCDISpecs())
+
+		after, err := os.ReadDir(cdiRoot)
+		require.NoError(t, err)
+		require.Empty(t, after, "a checkpoint with no recorded boot epoch must not be replayed")
+	})
+
+	// Both the stored epoch and the current boot id are empty. The old inequality-only
+	// guard would see "" == "" and replay; the fail-closed guard must discard.
+	t.Run("boot id unreadable", func(t *testing.T) {
+		cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+		s := &DeviceState{
+			cdi:               &CDIHandler{cache: cache},
+			allocatable:       AllocatableDevices{"gpu-0-128": &AllocatableDevice{}},
+			checkpointManager: cm,
+			pluginPath:        t.TempDir(),
+			bootID:            "", // procfs unreadable
+		}
+		require.NoError(t, s.writeEpoch("")) // stored epoch also empty
+		checkpoint := newCheckpoint()
+		checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+		require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+		require.NoError(t, s.reconcileCDISpecs())
+
+		after, err := os.ReadDir(cdiRoot)
+		require.NoError(t, err)
+		require.Empty(t, after, "an unreadable boot id must fail closed, not replay the checkpoint")
+	})
+}
+
+// A checkpoint holding one good and one bad claim must rebuild the good claim's spec
+// and quarantine the bad one, proving the reconcile loop is selective rather than
+// all-or-nothing (and not vacuously passing because nothing is ever written).
+func TestReconcileQuarantinesBadClaimButRebuildsGood(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128") // only the good device is allocatable
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["good"] = kfdDevices()
+	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil} // malformed -> quarantined
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "exactly the good claim's spec must be rebuilt")
+	data, err := os.ReadFile(filepath.Join(cdiRoot, after[0].Name()))
+	require.NoError(t, err)
+	require.Contains(t, string(data), "/dev/kfd")
+}
+
+// A CDI write error during replay is not self-healing: the kubelet may never re-Prepare
+// an already-prepared claim, so reconcile must fail startup loudly instead of
+// registering with a missing spec.
+func TestReconcileFailsLoudOnCDIWriteError(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+
+	const claimUID = "claim-uid-1"
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	// Force WriteSpec to fail deterministically and independently of file permissions
+	// (which root ignores) by planting a directory where the spec file must be written.
+	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClass, claimUID)
+	require.NoError(t, os.Mkdir(filepath.Join(cdiRoot, specName+".yaml"), 0o755))
+
+	require.Error(t, s.reconcileCDISpecs(), "a CDI write failure during replay must fail startup, not be swallowed")
+}
+
+// A cross-boot discard must also delete any stale CDI spec files that survived on a
+// persistent spec directory, so the container runtime cannot resolve a claim against a
+// spec that now points at different hardware.
+func TestReconcileDiscardDeletesStaleSpecs(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+
+	const claimUID = "claim-uid-1"
+	// A spec left on disk by a previous boot.
+	require.NoError(t, s.cdi.CreateClaimSpecFile(claimUID, kfdDevices()))
+	before, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.writeEpoch("boot-previous")) // force a cross-boot discard
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a cross-boot discard must delete the stale CDI spec, not leave it on disk")
 }

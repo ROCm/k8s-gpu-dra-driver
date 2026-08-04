@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -85,6 +86,64 @@ type DeviceState struct {
 	checkpointManager    checkpointmanager.CheckpointManager
 	vfioManager          *VfioPciManager
 	claimVfioConversions map[string]*AmdGpuInfo
+	pluginPath           string
+	bootID               string
+}
+
+// bootEpochFile records the boot the checkpoint's claims were prepared under. It
+// lives next to the checkpoint but outside it, so it does not change the checkpoint
+// checksum and an older binary that does not know about it stays rollback-safe.
+const bootEpochFile = "boot-epoch"
+
+// readBootID returns the current boot identifier from procfs. It changes on every
+// node reboot. An unreadable value is returned empty, which the reconcile guard
+// treats as untrusted and fails closed onto re-preparation.
+func readBootID() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		klog.Warningf("unable to read boot id (%v); checkpoint recovery will fail closed", err)
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (s *DeviceState) epochPath() string {
+	return filepath.Join(s.pluginPath, bootEpochFile)
+}
+
+// readStoredEpoch returns the boot id recorded when the checkpoint was last written,
+// or empty if it is absent or unreadable (both treated as untrusted).
+func (s *DeviceState) readStoredEpoch() string {
+	data, err := os.ReadFile(s.epochPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (s *DeviceState) writeEpoch(id string) error {
+	if err := os.WriteFile(s.epochPath(), []byte(id), 0600); err != nil {
+		return fmt.Errorf("unable to record boot epoch: %w", err)
+	}
+	return nil
+}
+
+// discardCheckpoint removes any CDI spec files for the given claims and then replaces
+// the on-disk checkpoint with an empty one. Used when the recorded boot epoch no longer
+// matches: the checkpointed device nodes may now point at different hardware, so the
+// specs must not survive on a persistent spec directory where the container runtime
+// could still resolve a claim against them. RemoveSpec tolerates an already-absent
+// file, which is the common tmpfs case.
+func (s *DeviceState) discardCheckpoint(claims PreparedClaims) error {
+	for claimUID := range claims {
+		if err := s.cdi.DeleteClaimSpecFile(claimUID); err != nil {
+			return fmt.Errorf("unable to remove stale CDI spec for claim %s: %w", claimUID, err)
+		}
+	}
+	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()); err != nil {
+		return fmt.Errorf("unable to discard stale checkpoint: %w", err)
+	}
+	return nil
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -128,6 +187,8 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		allocatable:       allocatable,
 		vfioManager:       vfioMgr,
 		checkpointManager: checkpointManager,
+		pluginPath:        config.DriverPluginPath(),
+		bootID:            readBootID(),
 	}
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
@@ -140,6 +201,11 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 			if err := state.reconcileCDISpecs(); err != nil {
 				return nil, fmt.Errorf("unable to reconcile CDI spec files from checkpoint: %v", err)
 			}
+			// Record the current boot after reconcile, which reads the previous value,
+			// so a later same-boot restart replays and a reboot fails closed.
+			if err := state.writeEpoch(state.bootID); err != nil {
+				return nil, err
+			}
 			return state, nil
 		}
 	}
@@ -147,6 +213,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	checkpoint := newCheckpoint()
 	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+	}
+	if err := state.writeEpoch(state.bootID); err != nil {
+		return nil, err
 	}
 
 	return state, nil
@@ -169,6 +238,47 @@ func validatePreparedDevices(claimUID string, preparedDevices PreparedDevices) e
 		if pd.ContainerEdits == nil || pd.ContainerEdits.ContainerEdits == nil {
 			return fmt.Errorf("checkpoint entry for claim %s device %s has no container edits", claimUID, pd.DeviceName)
 		}
+		// A non-nil wrapper can still carry nil entries in its pointer slices; CDI
+		// dereferences these while determining the spec version, so a nil entry would
+		// panic before CreateClaimSpecFile could return a normal error.
+		edits := pd.ContainerEdits.ContainerEdits
+		for i, n := range edits.DeviceNodes {
+			if n == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil deviceNodes[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, h := range edits.Hooks {
+			if h == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil hooks[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, m := range edits.Mounts {
+			if m == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil mounts[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, nd := range edits.NetDevices {
+			if nd == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil netDevices[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+	}
+	return nil
+}
+
+// validateCheckpointedClaim rejects a checkpoint entry that cannot be safely turned
+// into a CDI spec: one that is structurally corrupt, or that names a device not in
+// the current allocatable inventory (removed, repartitioned, or skipped by discovery
+// this boot). The name match is necessary but not sufficient; proving it is the same
+// physical GPU needs the stable identity tracked in #83.
+func (s *DeviceState) validateCheckpointedClaim(claimUID string, preparedDevices PreparedDevices) error {
+	if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+		return err
+	}
+	for _, pd := range preparedDevices {
+		if _, ok := s.allocatable[pd.DeviceName]; !ok {
+			return fmt.Errorf("checkpointed device %s for claim %s is not currently allocatable", pd.DeviceName, claimUID)
+		}
 	}
 	return nil
 }
@@ -177,7 +287,7 @@ func validatePreparedDevices(claimUID string, preparedDevices PreparedDevices) e
 // claim reported as prepared from the checkpoint is actually usable. It is safe to
 // call repeatedly: CreateClaimSpecFile overwrites the deterministic spec path.
 func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedDevices) error {
-	if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+	if err := s.validateCheckpointedClaim(claimUID, preparedDevices); err != nil {
 		return err
 	}
 	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
@@ -188,9 +298,10 @@ func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedD
 
 // reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
 // plugin restart, which can clear the (often tmpfs) spec directory while the
-// checkpoint survives. A claim that fails to rebuild is logged, not fatal; the next
-// Prepare retries it. Recovery replays the checkpointed edits as-is, so it is
-// correct within a boot but not across a node reboot that renumbers device nodes.
+// checkpoint survives. Replay is gated on a boot epoch: a checkpoint from a different
+// boot is discarded rather than replayed, so stale device nodes are never rebuilt. A
+// corrupt or no-longer-allocatable entry is quarantined; a CDI write error fails
+// startup, because the kubelet may not re-Prepare an already-prepared claim.
 func (s *DeviceState) reconcileCDISpecs() error {
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
@@ -200,9 +311,33 @@ func (s *DeviceState) reconcileCDISpecs() error {
 		return fmt.Errorf("checkpoint has no v1 payload")
 	}
 
+	// The checkpointed edits carry the /dev/kfd major and DRM card/render numbers seen
+	// when each claim was prepared, and a node reboot can renumber them. Replay is only
+	// trusted within the boot that wrote the checkpoint: if the recorded epoch is missing
+	// or does not match the current boot, discard the claims (and their now-stale specs)
+	// instead of rebuilding a spec that may point at a different GPU. The boot id does not
+	// change on a same-boot driver reload, so that narrower renumbering is not covered
+	// here; safe cross-boot and cross-reload recovery both need the stable device identity
+	// tracked in #83. The first restart after this epoch field is introduced has no
+	// recorded epoch and so also discards once, then records the current boot.
+	stored := s.readStoredEpoch()
+	if s.bootID == "" || stored == "" || stored != s.bootID {
+		klog.Warningf("checkpoint boot epoch %q does not match current %q; discarding %d checkpointed claim(s) without replay", stored, s.bootID, len(checkpoint.V1.PreparedClaims))
+		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
+	}
+
 	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
-		if err := s.ensureClaimSpec(claimUID, preparedDevices); err != nil {
-			klog.Warningf("unable to rebuild CDI spec for claim %s on startup; the next Prepare will retry: %v", claimUID, err)
+		if err := s.validateCheckpointedClaim(claimUID, preparedDevices); err != nil {
+			// Corrupt or no-longer-allocatable entry: quarantine it and keep going,
+			// rather than crash the plugin on a single bad claim.
+			klog.Warningf("skipping unrecoverable checkpoint entry for claim %s: %v", claimUID, err)
+			continue
+		}
+		if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+			// A CDI write or filesystem error is not self-healing: the kubelet may keep
+			// the claim marked prepared and never call Prepare again, so fail startup
+			// loudly instead of registering with a missing spec.
+			return fmt.Errorf("rebuild CDI spec for claim %s on startup: %w", claimUID, err)
 		}
 	}
 	return nil
@@ -220,6 +355,11 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	}
 	if checkpoint.V1 == nil {
 		return nil, fmt.Errorf("checkpoint has no v1 payload")
+	}
+	if checkpoint.V1.PreparedClaims == nil {
+		// An explicit "preparedClaims": null decodes to a nil map; initialize it so the
+		// assignment below does not panic.
+		checkpoint.V1.PreparedClaims = make(PreparedClaims)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
