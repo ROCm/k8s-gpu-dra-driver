@@ -182,14 +182,16 @@ func testDeviceState(t *testing.T, cache *cdiapi.Cache, cm checkpointmanager.Che
 	return s
 }
 
-// kfdDevices is a well-formed single-device claim naming gpu-0-128 with a /dev/kfd node.
+// kfdDevices is a well-formed single-device claim naming gpu-0-128. Its node points at
+// /dev/null (a real char device, major 1 minor 3 on Linux) so the reconcile device-node
+// verification sees numbers that match the host in tests that expect a replay.
 func kfdDevices() PreparedDevices {
 	return PreparedDevices{
 		{
 			Device: drapbv1.Device{DeviceName: "gpu-0-128"},
 			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
 				DeviceNodes: []*cdispec.DeviceNode{
-					{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 1, Permissions: "rw"},
+					{Path: "/dev/null", HostPath: "/dev/null", Type: "c", Major: 1, Minor: 3, Permissions: "rw"},
 				},
 			}},
 		},
@@ -249,7 +251,7 @@ func TestReconcileCDISpecs(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(cdiRoot, after[0].Name()))
 	require.NoError(t, err)
-	require.Contains(t, string(data), "/dev/kfd", "the rebuilt spec must carry the device node from the checkpoint")
+	require.Contains(t, string(data), "/dev/null", "the rebuilt spec must carry the device node from the checkpoint")
 }
 
 func TestValidatePreparedDevices(t *testing.T) {
@@ -483,7 +485,7 @@ func TestReconcileQuarantinesBadClaimButRebuildsGood(t *testing.T) {
 	require.Len(t, after, 1, "exactly the good claim's spec must be rebuilt")
 	data, err := os.ReadFile(filepath.Join(cdiRoot, after[0].Name()))
 	require.NoError(t, err)
-	require.Contains(t, string(data), "/dev/kfd")
+	require.Contains(t, string(data), "/dev/null")
 }
 
 // A CDI write error during replay is not self-healing: the kubelet may never re-Prepare
@@ -531,4 +533,61 @@ func TestReconcileDiscardDeletesStaleSpecs(t *testing.T) {
 	after, err := os.ReadDir(cdiRoot)
 	require.NoError(t, err)
 	require.Empty(t, after, "a cross-boot discard must delete the stale CDI spec, not leave it on disk")
+}
+
+// A same-boot driver reload or repartition can renumber a device node without changing
+// the boot id. A checkpointed node whose major/minor no longer match the host is stale,
+// so reconcile discards it (and its specs) rather than replaying the wrong numbers.
+func TestReconcileDiscardsOnDeviceNodeRenumber(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128") // same boot: epoch matches, inventory has the device
+
+	// A node at /dev/null (major 1, minor 3) but recorded with the wrong major, as if the
+	// device was renumbered after the checkpoint was written.
+	stale := PreparedDevices{{
+		Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+		ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
+			DeviceNodes: []*cdispec.DeviceNode{
+				{Path: "/dev/null", HostPath: "/dev/null", Type: "c", Major: 99, Minor: 3, Permissions: "rw"},
+			},
+		}},
+	}}
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = stale
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a checkpointed node whose device numbers moved must not be replayed")
+
+	reloaded := newCheckpoint()
+	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+	require.Empty(t, reloaded.V1.PreparedClaims, "the stale checkpoint must be discarded")
+}
+
+// A checkpointed node whose HostPath no longer exists (device removed) is stale too, so
+// reconcile discards rather than replaying it.
+func TestReconcileDiscardsOnMissingDeviceNode(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+
+	gone := PreparedDevices{{
+		Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+		ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{
+			DeviceNodes: []*cdispec.DeviceNode{
+				{Path: "/dev/does-not-exist-kfd", HostPath: "/dev/does-not-exist-kfd", Type: "c", Major: 1, Minor: 3, Permissions: "rw"},
+			},
+		}},
+	}}
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = gone
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Empty(t, after, "a checkpointed node whose device path is gone must not be replayed")
 }

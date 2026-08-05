@@ -296,6 +296,35 @@ func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedD
 	return nil
 }
 
+// deviceNodesCurrent reports whether every checkpointed device node still resolves to
+// the major/minor it was prepared with. The boot epoch catches a reboot; this catches a
+// same-boot change that moves a node's numbers without changing the boot id, for example
+// /dev/kfd's dynamically allocated major after a KFD reload, or a node whose path no
+// longer exists. It does NOT catch a node that keeps the same numbers but now backs a
+// different physical GPU (the DRM card/render minors are stable per path), which needs
+// the stable identity tracked in #83. Malformed entries (nil device, nil wrapper, nil
+// node) are left to validateCheckpointedClaim; this skips them.
+func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
+	for _, preparedDevices := range claims {
+		for _, pd := range preparedDevices {
+			if pd == nil || pd.ContainerEdits == nil || pd.ContainerEdits.ContainerEdits == nil {
+				continue
+			}
+			for _, n := range pd.ContainerEdits.ContainerEdits.DeviceNodes {
+				if n == nil || n.HostPath == "" || (n.Major == 0 && n.Minor == 0) {
+					continue
+				}
+				major, minor, _, _, err := getDeviceAttrs(n.HostPath)
+				if err != nil || major != n.Major || minor != n.Minor {
+					klog.Warningf("checkpointed device node %s resolves to %d:%d now, recorded %d:%d (err=%v); the checkpoint is stale", n.HostPath, major, minor, n.Major, n.Minor, err)
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
 // plugin restart, which can clear the (often tmpfs) spec directory while the
 // checkpoint survives. Replay is gated on a boot epoch: a checkpoint from a different
@@ -323,6 +352,15 @@ func (s *DeviceState) reconcileCDISpecs() error {
 	stored := s.readStoredEpoch()
 	if s.bootID == "" || stored == "" || stored != s.bootID {
 		klog.Warningf("checkpoint boot epoch %q does not match current %q; discarding %d checkpointed claim(s) without replay", stored, s.bootID, len(checkpoint.V1.PreparedClaims))
+		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
+	}
+
+	// Same boot, but a driver reload can still renumber a device node, or remove it,
+	// without changing the boot id. If any checkpointed node no longer matches the host,
+	// the edits are stale, so discard instead of rebuilding a spec that points at the
+	// wrong numbers.
+	if !s.deviceNodesCurrent(checkpoint.V1.PreparedClaims) {
+		klog.Warningf("checkpointed device nodes no longer match the host; discarding %d claim(s) without replay", len(checkpoint.V1.PreparedClaims))
 		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
 	}
 
