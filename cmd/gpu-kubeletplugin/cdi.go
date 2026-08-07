@@ -34,7 +34,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	klog "k8s.io/klog/v2"
@@ -53,7 +52,8 @@ const (
 )
 
 type CDIHandler struct {
-	cache *cdiapi.Cache
+	cache    *cdiapi.Cache
+	nodeName string
 }
 
 func NewCDIHandler(config *Config) (*CDIHandler, error) {
@@ -64,7 +64,8 @@ func NewCDIHandler(config *Config) (*CDIHandler, error) {
 		return nil, fmt.Errorf("unable to create a new CDI cache: %w", err)
 	}
 	handler := &CDIHandler{
-		cache: cache,
+		cache:    cache,
+		nodeName: config.flags.nodeName,
 	}
 
 	return handler, nil
@@ -78,7 +79,7 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 				Name: cdiCommonDeviceName,
 				ContainerEdits: cdispec.ContainerEdits{
 					Env: []string{
-						fmt.Sprintf("KUBERNETES_NODE_NAME=%s", os.Getenv("NODE_NAME")),
+						fmt.Sprintf("KUBERNETES_NODE_NAME=%s", cdi.nodeName),
 						fmt.Sprintf("DRA_RESOURCE_DRIVER_NAME=%s", consts.DriverName),
 					},
 				},
