@@ -61,14 +61,14 @@ func extractTopologyInfo(gpuInfoMap map[string]interface{}) (simdUnits, computeU
 	return
 }
 
-// Helper function to get memory bytes with fallback
-func getMemoryBytes(gpuInfoMap map[string]interface{}, defaultBytes uint64, deviceType, pciAddr string) uint64 {
+// getMemoryBytes returns the device VRAM in bytes. 0 is a sentinel for unreadable
+// VRAM, not a measured capacity; discovery re-runs on restart.
+func getMemoryBytes(gpuInfoMap map[string]interface{}, deviceType, pciAddr string) uint64 {
 	if vramBytes, ok := gpuInfoMap["vramBytes"].(uint64); ok && vramBytes > 0 {
 		return vramBytes
 	}
-	// Fallback to default if VRAM parsing failed
-	klog.Warningf("VRAM info not available for %s %s, using default %dGB", deviceType, pciAddr, defaultBytes/(1024*1024*1024))
-	return defaultBytes
+	klog.Warningf("VRAM info not available for %s %s, reporting 0", deviceType, pciAddr)
+	return 0
 }
 
 func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttribute, deviceattribute.DeviceAttribute, string, error) {
@@ -124,7 +124,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				SimdUnits:        simdUnits,
 				ComputeUnits:     computeUnits,
 				NumaNode:         gpuInfoMap["numaNode"].(int),
-				MemoryBytes:      getMemoryBytes(gpuInfoMap, 80*1024*1024*1024, "device", pciAddr),
+				MemoryBytes:      getMemoryBytes(gpuInfoMap, "device", pciAddr),
 			}
 
 			// Create allocatable device for the full GPU
@@ -158,7 +158,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				SimdUnits:        simdUnits,
 				ComputeUnits:     computeUnits,
 				NumaNode:         gpuInfoMap["numaNode"].(int),
-				MemoryBytes:      getMemoryBytes(gpuInfoMap, 20*1024*1024*1024, "partition", pciAddr),
+				MemoryBytes:      getMemoryBytes(gpuInfoMap, "partition", pciAddr),
 			}
 
 			// Create allocatable device for the partition
