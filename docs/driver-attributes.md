@@ -2,7 +2,7 @@
 
 This document summarizes what the AMD GPU DRA driver exposes through
 Kubernetes Dynamic Resource Allocation (DRA) ResourceSlices and how to
-interpret those attributes when selecting devices.
+interpret those attributes and capacities when selecting devices.
 
 The driver discovers AMD GPUs present on a node and advertises them as DRA
 Devices. It supports:
@@ -44,10 +44,28 @@ The following attributes are attached to each full GPU device:
   `pci0000:00`). Standard Kubernetes attribute for topology-aware scheduling.
 
 Capacity values for full GPUs:
-- `memory` (quantity, bytes): Advertised VRAM size; if the underlying topology
-  inspection cannot determine VRAM precisely, a conservative default is used
+- `memory` (quantity, bytes): Advertised VRAM size. When VRAM cannot be read, the
+  driver publishes `0`. Zero is a sentinel for an unknown/unreadable value, not a
+  measured physical capacity.
 - `computeUnits` (quantity): Number of compute units (CUs)
 - `simdUnits` (quantity): Number of SIMD units
+
+Workloads which require a minimum amount of VRAM should explicitly select a
+positive capacity, and should guard the reference so the selector does not abort
+allocation on a device that has no `memory` capacity:
+
+```cel
+cel.bind(cap, device.capacity["gpu.amd.com"],
+  has(cap.memory) && cap.memory.compareTo(quantity("16Gi")) >= 0)
+```
+
+A selector that references a capacity a device does not publish is an evaluation
+error that aborts the whole allocation, not a simple non-match, so the
+`has(cap.memory)` guard keeps the selector robust as other device types are
+added. This driver always publishes `memory` (`0` when unreadable), so the guard
+is precautionary here and matters mainly for capacities other drivers may leave
+unset. Devices with unknown VRAM remain allocatable to claims which do not
+reference memory.
 
 ## Attributes for a partition
 
@@ -65,7 +83,8 @@ The following attributes are attached to each GPU partition device:
 - `resource.kubernetes.io/pcieRoot` (string): parent's PCIe root complex
 
 Capacity values for partitions:
-- `memory` (quantity, bytes): VRAM capacity attributed to the partition
+- `memory` (quantity, bytes): VRAM capacity attributed to the partition, or `0`
+  when it cannot be read (the same unknown/unreadable sentinel as for full GPUs)
 - `computeUnits` (quantity): number of CUs attributed to the partition
 - `simdUnits` (quantity): number of SIMD units attributed to the partition
 
@@ -98,8 +117,9 @@ spec:
             expression: 'device.attributes["gpu.amd.com"].type == "amdgpu-partition"'
 ```
 
-You may also combine with other attributes (e.g., `memory`, `deviceID`,
-`productName`, or the PCIe topology attributes) depending on scheduling needs.
+You may also combine with capacities and other attributes (e.g., the `memory`
+capacity, or the `deviceID`, `productName`, and PCIe topology attributes)
+depending on scheduling needs.
 
 ### Request multiple partitions from the same parent GPU
 
@@ -197,8 +217,10 @@ selectors:
   scheduling.
 - NUMA node discovery: the driver reads the NUMA node for each GPU from sysfs
   and exposes it as an integer attribute for NUMA-aware scheduling.
-- Defaults: when certain metrics (like VRAM) cannot be read reliably, the
-  driver falls back to conservative defaults to remain usable.
+- Unreadable metrics: when VRAM cannot be read reliably, the driver publishes a
+  `memory` capacity of `0` (a sentinel for unknown, not a real size) rather than
+  guessing. Memory-aware claims should require a positive capacity behind an
+  existence guard (see the selector example above).
 
 If you need additional attributes or different representations, please open an
 issue discussing your use case.
