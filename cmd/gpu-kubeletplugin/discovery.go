@@ -224,42 +224,43 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		}
 	}
 
-	vfMap, err := amdgpu.GetVFMapping()
-	if err != nil {
-		klog.V(2).Infof("No VFIO VF devices found: %v", err)
-	} else {
-		vfKeys := make([]string, 0, len(vfMap))
-		for k := range vfMap {
-			vfKeys = append(vfKeys, k)
-		}
-		sort.Strings(vfKeys)
-		for _, k := range vfKeys {
-			// Sort VFs within an IOMMU group by PCI address for stability.
-			vfs := vfMap[k]
-			sort.Slice(vfs, func(i, j int) bool { return vfs[i].PCIAddress < vfs[j].PCIAddress })
-			for _, vf := range vfs {
-				pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(vf.PCIAddress)
-				if err != nil {
-					klog.Warningf("Failed to get PCIe root for VFIO VF %s: %v", vf.PCIAddress, err)
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		vfMap, err := amdgpu.GetVFMapping()
+		if err != nil {
+			klog.V(2).Infof("No VFIO VF devices found: %v", err)
+		} else {
+			vfKeys := make([]string, 0, len(vfMap))
+			for k := range vfMap {
+				vfKeys = append(vfKeys, k)
+			}
+			sort.Strings(vfKeys)
+			for _, k := range vfKeys {
+				vfs := vfMap[k]
+				sort.Slice(vfs, func(i, j int) bool { return vfs[i].PCIAddress < vfs[j].PCIAddress })
+				for _, vf := range vfs {
+					pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(vf.PCIAddress)
+					if err != nil {
+						klog.Warningf("Failed to get PCIe root for VFIO VF %s: %v", vf.PCIAddress, err)
+					}
+					pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
+					currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
+					device := &AmdGpuVFIOInfo{
+						PCIAddress:         vf.PCIAddress,
+						DeviceID:           vf.DeviceID,
+						VendorID:           vf.VendorID,
+						IOMMUGroup:         vf.IOMMUGroup,
+						Index:              vfioIndex,
+						ProductName:        vf.ProductName,
+						NumaNode:           vf.NumaNode,
+						IsVF:               true,
+						pciBusIDAttr:       pciBusIDAttr,
+						pcieRootAttr:       pcieRootAttr,
+						preConfigureDriver: currentDriver,
+					}
+					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
+					klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
+					vfioIndex++
 				}
-				pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
-				currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
-				device := &AmdGpuVFIOInfo{
-					PCIAddress:         vf.PCIAddress,
-					DeviceID:           vf.DeviceID,
-					VendorID:           vf.VendorID,
-					IOMMUGroup:         vf.IOMMUGroup,
-					Index:              vfioIndex,
-					ProductName:        vf.ProductName,
-					NumaNode:           vf.NumaNode,
-					IsVF:               true,
-					pciBusIDAttr:       pciBusIDAttr,
-					pcieRootAttr:       pcieRootAttr,
-					preConfigureDriver: currentDriver,
-				}
-				alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
-				klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
-				vfioIndex++
 			}
 		}
 	}

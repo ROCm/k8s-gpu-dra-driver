@@ -44,6 +44,7 @@ import (
 	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 	"golang.org/x/sys/unix"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -107,17 +108,17 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
 	}
 
-	// Always initialize VFIO manager if IOMMU is available. GIM VFs on
-	// amdgpu are VFIO-capable and can be dynamically bound to vfio-pci
-	// during Prepare when a VfioDeviceConfig is present in the claim.
 	var vfioMgr *VfioPciManager
-	vfioMgr, err2 := NewVfioPciManager()
-	if err2 != nil {
-		klog.Warningf("VFIO manager initialization failed (VFIO passthrough unavailable): %v", err2)
-		vfioMgr = nil
-		for name, dev := range allocatable {
-			if dev.Type() == VfioDeviceType {
-				delete(allocatable, name)
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		var err2 error
+		vfioMgr, err2 = NewVfioPciManager()
+		if err2 != nil {
+			klog.Warningf("VFIO manager initialization failed (VFIO passthrough unavailable): %v", err2)
+			vfioMgr = nil
+			for name, dev := range allocatable {
+				if dev.Type() == VfioDeviceType {
+					delete(allocatable, name)
+				}
 			}
 		}
 	}
@@ -254,6 +255,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		for _, c := range slices.Backward(configs) {
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
+				if !featuregates.Enabled(featuregates.VFIOPassthrough) {
+					continue
+				}
 				if !isVFIO {
 					if allocDev.AmdGpu != nil {
 						physfn := filepath.Join(amdgpu.PCIDevicePath, allocDev.AmdGpu.PCIAddress, "physfn")
