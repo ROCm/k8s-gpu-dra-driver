@@ -327,8 +327,10 @@ func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
 
 // reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
 // plugin restart, which can clear the (often tmpfs) spec directory while the
-// checkpoint survives. Replay is gated on a boot epoch: a checkpoint from a different
-// boot is discarded rather than replayed, so stale device nodes are never rebuilt. A
+// checkpoint survives. A checkpoint from a confirmed different boot is discarded rather
+// than replayed, since a reboot also clears kubelet's prepared state. Otherwise the
+// specs are rebuilt when the device nodes still match, and startup fails when they do
+// not, because deleting them while kubelet still holds the claim would strand it. A
 // corrupt or no-longer-allocatable entry is quarantined; a CDI write error fails
 // startup, because the kubelet may not re-Prepare an already-prepared claim.
 func (s *DeviceState) reconcileCDISpecs() error {
@@ -340,28 +342,31 @@ func (s *DeviceState) reconcileCDISpecs() error {
 		return fmt.Errorf("checkpoint has no v1 payload")
 	}
 
-	// The checkpointed edits carry the /dev/kfd major and DRM card/render numbers seen
-	// when each claim was prepared, and a node reboot can renumber them. Replay is only
-	// trusted within the boot that wrote the checkpoint: if the recorded epoch is missing
-	// or does not match the current boot, discard the claims (and their now-stale specs)
-	// instead of rebuilding a spec that may point at a different GPU. The boot id does not
-	// change on a same-boot driver reload, so that narrower renumbering is not covered
-	// here; safe cross-boot and cross-reload recovery both need the stable device identity
-	// tracked in #83. The first restart after this epoch field is introduced has no
-	// recorded epoch and so also discards once, then records the current boot.
+	// Discarding the checkpoint deletes the CDI spec files that kubelet's cached CDI IDs
+	// resolve against. That is only safe when kubelet has also dropped its prepared-claim
+	// state, which happens across a real reboot. A reboot changes the boot id, so only a
+	// recorded epoch that is present and differs from the current boot proves one. A
+	// missing or unreadable epoch does not: the first restart after this field was added
+	// has none, and a plugin-only upgrade keeps the same kubelet running. In those cases
+	// kubelet still considers the claims prepared and will not call Prepare again, so
+	// discarding here would strand them with no spec to resolve. Cross-boot and
+	// cross-reload device identity still need the stable name tracked in #83.
 	stored := s.readStoredEpoch()
-	if s.bootID == "" || stored == "" || stored != s.bootID {
-		klog.Warningf("checkpoint boot epoch %q does not match current %q; discarding %d checkpointed claim(s) without replay", stored, s.bootID, len(checkpoint.V1.PreparedClaims))
+	if stored != "" && s.bootID != "" && stored != s.bootID {
+		klog.Warningf("checkpoint boot epoch %q differs from current boot %q; discarding %d checkpointed claim(s) without replay", stored, s.bootID, len(checkpoint.V1.PreparedClaims))
 		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
 	}
 
-	// Same boot, but a driver reload can still renumber a device node, or remove it,
-	// without changing the boot id. If any checkpointed node no longer matches the host,
-	// the edits are stale, so discard instead of rebuilding a spec that points at the
-	// wrong numbers.
+	// Same boot, or a boot that cannot be confirmed. kubelet has not necessarily
+	// restarted, so its prepared claims must be preserved. A same-boot driver reload can
+	// still renumber a device node (for example /dev/kfd's major) without changing the
+	// boot id: rebuild the specs when every checkpointed node still resolves to its
+	// recorded numbers, and fail startup when one does not, rather than discarding and
+	// registering healthy while kubelet keeps the claim. Rebuilding a spec that points at
+	// the wrong numbers, or silently dropping a claim kubelet still holds, are both worse
+	// than refusing to start and letting an operator drain or restart kubelet.
 	if !s.deviceNodesCurrent(checkpoint.V1.PreparedClaims) {
-		klog.Warningf("checkpointed device nodes no longer match the host; discarding %d claim(s) without replay", len(checkpoint.V1.PreparedClaims))
-		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
+		return fmt.Errorf("checkpointed device nodes no longer match the host and the boot epoch (stored %q, current %q) does not confirm a reboot; refusing to discard %d claim(s) kubelet may still consider prepared", stored, s.bootID, len(checkpoint.V1.PreparedClaims))
 	}
 
 	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {

@@ -418,10 +418,12 @@ func TestReconcileRejectsNestedNullDeviceNode(t *testing.T) {
 	require.Empty(t, after, "a nested nil device node must be rejected, not written as a spec")
 }
 
-// The boot epoch guard must fail closed, not open. A missing epoch file or an
-// unreadable boot id has to discard the checkpoint rather than replay it: guarding
-// only on inequality (stored != bootID) would replay when both are empty.
-func TestReconcileFailsClosedWithoutBootEpoch(t *testing.T) {
+// The first restart after the boot-epoch field is introduced has no recorded epoch, and
+// a plugin-only upgrade keeps the same kubelet running. Because kubelet still holds the
+// claims, reconcile must NOT discard on a missing or unreadable epoch: deleting the specs
+// would strand claims kubelet will not re-Prepare. It rebuilds instead when the device
+// nodes still match, so the migration is seamless.
+func TestReconcileRebuildsWithoutConfirmedRebootWhenNodesMatch(t *testing.T) {
 	t.Run("epoch file missing", func(t *testing.T) {
 		cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 		s := &DeviceState{
@@ -439,11 +441,13 @@ func TestReconcileFailsClosedWithoutBootEpoch(t *testing.T) {
 
 		after, err := os.ReadDir(cdiRoot)
 		require.NoError(t, err)
-		require.Empty(t, after, "a checkpoint with no recorded boot epoch must not be replayed")
+		require.NotEmpty(t, after, "a missing epoch must rebuild, not discard, while kubelet still holds the claim")
+
+		reloaded := newCheckpoint()
+		require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+		require.NotEmpty(t, reloaded.V1.PreparedClaims, "the checkpoint must be preserved, not discarded")
 	})
 
-	// Both the stored epoch and the current boot id are empty. The old inequality-only
-	// guard would see "" == "" and replay; the fail-closed guard must discard.
 	t.Run("boot id unreadable", func(t *testing.T) {
 		cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 		s := &DeviceState{
@@ -462,7 +466,7 @@ func TestReconcileFailsClosedWithoutBootEpoch(t *testing.T) {
 
 		after, err := os.ReadDir(cdiRoot)
 		require.NoError(t, err)
-		require.Empty(t, after, "an unreadable boot id must fail closed, not replay the checkpoint")
+		require.NotEmpty(t, after, "an unreadable boot id must rebuild, not discard, while kubelet still holds the claim")
 	})
 }
 
@@ -538,7 +542,9 @@ func TestReconcileDiscardDeletesStaleSpecs(t *testing.T) {
 // A same-boot driver reload or repartition can renumber a device node without changing
 // the boot id. A checkpointed node whose major/minor no longer match the host is stale,
 // so reconcile discards it (and its specs) rather than replaying the wrong numbers.
-func TestReconcileDiscardsOnDeviceNodeRenumber(t *testing.T) {
+// Same boot (epoch matches), so a renumbered node is not a reboot. kubelet still holds the
+// claim, so reconcile must fail startup rather than discard the spec it relies on.
+func TestReconcileFailsStartupOnDeviceNodeRenumber(t *testing.T) {
 	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 	s := testDeviceState(t, cache, cm, "gpu-0-128") // same boot: epoch matches, inventory has the device
 
@@ -556,7 +562,7 @@ func TestReconcileDiscardsOnDeviceNodeRenumber(t *testing.T) {
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = stale
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
-	require.NoError(t, s.reconcileCDISpecs())
+	require.Error(t, s.reconcileCDISpecs(), "a same-boot renumber must fail startup, not discard")
 
 	after, err := os.ReadDir(cdiRoot)
 	require.NoError(t, err)
@@ -564,12 +570,12 @@ func TestReconcileDiscardsOnDeviceNodeRenumber(t *testing.T) {
 
 	reloaded := newCheckpoint()
 	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
-	require.Empty(t, reloaded.V1.PreparedClaims, "the stale checkpoint must be discarded")
+	require.NotEmpty(t, reloaded.V1.PreparedClaims, "startup must fail without discarding the checkpoint kubelet still relies on")
 }
 
-// A checkpointed node whose HostPath no longer exists (device removed) is stale too, so
-// reconcile discards rather than replaying it.
-func TestReconcileDiscardsOnMissingDeviceNode(t *testing.T) {
+// A checkpointed node whose HostPath no longer exists (device removed) is stale too, and
+// without a confirmed reboot reconcile must fail startup rather than discard it.
+func TestReconcileFailsStartupOnMissingDeviceNode(t *testing.T) {
 	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 	s := testDeviceState(t, cache, cm, "gpu-0-128")
 
@@ -585,9 +591,13 @@ func TestReconcileDiscardsOnMissingDeviceNode(t *testing.T) {
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = gone
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
-	require.NoError(t, s.reconcileCDISpecs())
+	require.Error(t, s.reconcileCDISpecs(), "a missing node without a confirmed reboot must fail startup")
 
 	after, err := os.ReadDir(cdiRoot)
 	require.NoError(t, err)
 	require.Empty(t, after, "a checkpointed node whose device path is gone must not be replayed")
+
+	reloaded := newCheckpoint()
+	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+	require.NotEmpty(t, reloaded.V1.PreparedClaims, "startup must fail without discarding the checkpoint")
 }
