@@ -193,10 +193,11 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			continue
 		}
 		if devID == "" {
-			// A full GPU with card/render but no KFD topology has no compute identity.
-			// The platform-partition path skips this state; the physical path still
-			// publishes it, so surface it rather than hiding a possibly non-usable GPU.
-			glog.Warningf("device %s (card%d renderD%d) has no KFD topology; publishing it as a full GPU with no compute identity", pciAddr, card, renderD)
+			// An empty KFD unique id (no topology entry, or a topology entry with no
+			// unique id) means the device has no compute identity. The platform-partition
+			// path skips this state; the physical path still publishes it, so surface it
+			// rather than hiding a possibly non-usable GPU.
+			glog.Warningf("device %s (card%d renderD%d) has no KFD compute identity (empty unique id); publishing it as a full GPU anyway", pciAddr, card, renderD)
 		}
 
 		// Get product name
