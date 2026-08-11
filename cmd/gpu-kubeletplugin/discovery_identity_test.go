@@ -16,20 +16,30 @@ limitations under the License.
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// Two devices that resolve to the same canonical name must not silently overwrite
-// each other; discovery reports the collision instead of dropping a GPU.
+// Two devices that resolve to the same canonical name must not silently overwrite each
+// other; discovery reports the collision, with the provenance of both sides, instead of
+// dropping a GPU.
 func TestAddAllocatableDeviceRejectsCollision(t *testing.T) {
 	devices := make(AllocatableDevices)
-	first := &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}}
+	first := &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128, PCIAddress: "0000:03:00.0"}}
 	if err := addAllocatableDevice(devices, first); err != nil {
 		t.Fatalf("first insert: unexpected error %v", err)
 	}
 
-	dup := &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}}
-	if err := addAllocatableDevice(devices, dup); err == nil {
+	dup := &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128, PCIAddress: "0000:04:00.0"}}
+	err := addAllocatableDevice(devices, dup)
+	if err == nil {
 		t.Fatalf("colliding insert: want an error, got nil")
+	}
+	for _, want := range []string{"0000:03:00.0", "0000:04:00.0"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("collision error %q should name the colliding device %s", err, want)
+		}
 	}
 	if devices[first.CanonicalName()] != first {
 		t.Fatalf("colliding insert overwrote the original device")

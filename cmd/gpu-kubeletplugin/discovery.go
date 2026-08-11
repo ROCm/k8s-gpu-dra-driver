@@ -95,8 +95,9 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 // discovered under the same name.
 func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice) error {
 	name := device.CanonicalName()
-	if _, exists := devices[name]; exists {
-		return fmt.Errorf("duplicate device identity %q", name)
+	if existing, exists := devices[name]; exists {
+		return fmt.Errorf("duplicate device identity %q: already discovered as %s at %s, now %s at %s",
+			name, existing.Type(), existing.GetPCIAddress(), device.Type(), device.GetPCIAddress())
 	}
 	devices[name] = device
 	return nil

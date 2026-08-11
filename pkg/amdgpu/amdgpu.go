@@ -192,6 +192,12 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			glog.Warningf("Skipping device %s: no valid card and renderD drm entries", pciAddr)
 			continue
 		}
+		if devID == "" {
+			// A full GPU with card/render but no KFD topology has no compute identity.
+			// The platform-partition path skips this state; the physical path still
+			// publishes it, so surface it rather than hiding a possibly non-usable GPU.
+			glog.Warningf("device %s (card%d renderD%d) has no KFD topology; publishing it as a full GPU with no compute identity", pciAddr, card, renderD)
+		}
 
 		// Get product name
 		productName := ""
