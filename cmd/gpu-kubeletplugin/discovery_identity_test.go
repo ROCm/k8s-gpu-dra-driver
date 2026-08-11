@@ -35,3 +35,38 @@ func TestAddAllocatableDeviceRejectsCollision(t *testing.T) {
 		t.Fatalf("colliding insert overwrote the original device")
 	}
 }
+
+// Only the compute-partition modes the driver models are treated as partitions; spx is a
+// full GPU and anything else is skipped rather than published with an unhandled profile.
+func TestIsKnownComputePartition(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"dpx", true},
+		{"qpx", true},
+		{"cpx", true},
+		{"spx", false}, // spx is a full GPU, classified separately
+		{"", false},
+		{"tpx", false},     // a mode this driver does not model
+		{"garbage", false}, // an unreadable or unexpected value
+	} {
+		if got := isKnownComputePartition(tc.in); got != tc.want {
+			t.Errorf("isKnownComputePartition(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// An optional PCIe attribute lookup can fail, but the device's own BDF is always known, so
+// getPcieInfo must return it rather than an empty string, otherwise a partition's parent
+// PCIAddress ends up blank.
+func TestGetPcieInfoPreservesBDFOnError(t *testing.T) {
+	const bogus = "0000:ff:ff.7" // no such device, so the attribute lookup fails
+	_, _, addr, err := getPcieInfo(map[string]interface{}{"pciAddr": bogus})
+	if err == nil {
+		t.Fatalf("want an error for a nonexistent BDF, got nil")
+	}
+	if addr != bogus {
+		t.Errorf("getPcieInfo returned addr %q on error, want the input BDF %q", addr, bogus)
+	}
+}

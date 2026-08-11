@@ -75,13 +75,17 @@ func getMemoryBytes(gpuInfoMap map[string]interface{}, deviceType, pciAddr strin
 
 func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttribute, deviceattribute.DeviceAttribute, string, error) {
 	pciAddr := gpuInfoMap["pciAddr"].(string)
+	// The PCIe root and bus-id attributes are optional NUMA/topology hints; the caller
+	// keeps going without them. The device's own BDF is known regardless, so return it
+	// even on error rather than an empty string that would leave a partition's parent
+	// PCIAddress blank.
 	pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciAddr)
 	if err != nil {
-		return pcieRootAttr, deviceattribute.DeviceAttribute{}, "", fmt.Errorf("Failed to get PCIe root attribute for device %s: %v", pciAddr, err)
+		return pcieRootAttr, deviceattribute.DeviceAttribute{}, pciAddr, fmt.Errorf("Failed to get PCIe root attribute for device %s: %v", pciAddr, err)
 	}
 	pciBusIDAttr, err := deviceattribute.GetPCIBusIDAttribute(pciAddr)
 	if err != nil {
-		return pcieRootAttr, pciBusIDAttr, "", fmt.Errorf("Failed to get PCI Bus ID attribute for device %s: %v", pciAddr, err)
+		return pcieRootAttr, pciBusIDAttr, pciAddr, fmt.Errorf("Failed to get PCI Bus ID attribute for device %s: %v", pciAddr, err)
 	}
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }
@@ -96,6 +100,19 @@ func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice)
 	}
 	devices[name] = device
 	return nil
+}
+
+// isKnownComputePartition reports whether t is a compute-partition mode this driver
+// models. spx is a full GPU and is handled separately. A type outside this set means the
+// driver cannot model the device's partitioning, so discovery skips it rather than
+// publishing a device with an unhandled profile; a new AMD mode has to be added here.
+func isKnownComputePartition(t string) bool {
+	switch t {
+	case consts.ComputePartitionDPX, consts.ComputePartitionQPX, consts.ComputePartitionCPX:
+		return true
+	default:
+		return false
+	}
 }
 
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
@@ -151,8 +168,14 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 			klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
-		} else if computePartitionType != "" {
-			// This is a partition - create both parent GPU info and partition info
+		} else if isKnownComputePartition(computePartitionType) {
+			// This is a partition - create both parent GPU info and partition info.
+			// A well-formed profile needs both halves; an empty memory type would produce
+			// a truncated "dpx_" profile, so skip an incomplete one rather than publish it.
+			if memoryPartitionType == "" {
+				klog.Warningf("Skipping partition for device %s: compute type %q has no memory partition type", pciAddr, computePartitionType)
+				continue
+			}
 
 			// Create parent GPU info
 			parentGpuInfo := &AmdGpuInfo{
@@ -188,7 +211,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
 		} else {
-			klog.Warningf("Unknown compute partition type '%s' for device %s, skipping", computePartitionType, pciAddr)
+			klog.Warningf("Skipping device %s: unsupported compute partition type %q", pciAddr, computePartitionType)
 		}
 	}
 
