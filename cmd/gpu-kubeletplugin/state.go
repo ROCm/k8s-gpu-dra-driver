@@ -116,7 +116,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 			klog.Warningf("VFIO manager initialization failed (VFIO passthrough unavailable): %v", err2)
 			vfioMgr = nil
 			for name, dev := range allocatable {
-				if dev.Type() == VfioDeviceType {
+				if dev.Type() == consts.VfioDeviceType {
 					delete(allocatable, name)
 				}
 			}
@@ -251,7 +251,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		if !exists {
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
-		isVFIO := allocDev.Type() == VfioDeviceType
+		isVFIO := allocDev.Type() == consts.VfioDeviceType
 		for _, c := range slices.Backward(configs) {
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
@@ -268,7 +268,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 						vfioInfo := &AmdGpuVFIOInfo{
 							PCIAddress:         allocDev.AmdGpu.PCIAddress,
 							DeviceID:           allocDev.AmdGpu.DeviceID,
-							VendorID:           amdgpu.AMDVendorID,
+							VendorID:           consts.AMDVendorID,
 							ProductName:        allocDev.AmdGpu.ProductName,
 							NumaNode:           allocDev.AmdGpu.NumaNode,
 							IsVF:               isVF,
@@ -380,7 +380,7 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 		if !exists {
 			continue
 		}
-		if allocDev.Type() == VfioDeviceType && allocDev.Vfio != nil && s.vfioManager != nil {
+		if allocDev.Type() == consts.VfioDeviceType && allocDev.Vfio != nil && s.vfioManager != nil {
 			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
 				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			} else {

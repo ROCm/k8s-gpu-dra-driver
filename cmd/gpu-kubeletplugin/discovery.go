@@ -214,7 +214,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 						IsVF:               false,
 						pciBusIDAttr:       pciBusIDAttr,
 						pcieRootAttr:       pcieRootAttr,
-						preConfigureDriver: amdgpu.VFIODriverName,
+						preConfigureDriver: consts.VFIODriverName,
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 					klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)

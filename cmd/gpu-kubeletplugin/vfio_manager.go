@@ -18,6 +18,8 @@ package main
 
 import (
 	"fmt"
+
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +77,7 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 	}
 
-	if currentDriver == amdgpu.VFIODriverName {
+	if currentDriver == consts.VFIODriverName {
 		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
 		return nil
 	}
@@ -98,7 +100,7 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		}
 	}
 
-	if err := bindToDriver(info.PCIAddress, amdgpu.VFIODriverName); err != nil {
+	if err := bindToDriver(info.PCIAddress, consts.VFIODriverName); err != nil {
 		return fmt.Errorf("failed to bind %s to vfio-pci: %w", info.PCIAddress, err)
 	}
 
@@ -113,7 +115,7 @@ func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
 	gpuMu.Lock()
 	defer gpuMu.Unlock()
 
-	if info.preConfigureDriver == amdgpu.VFIODriverName {
+	if info.preConfigureDriver == consts.VFIODriverName {
 		klog.Infof("Device %s was pre-bound to vfio-pci, leaving on vfio-pci", info.PCIAddress)
 		return nil
 	}
@@ -125,7 +127,7 @@ func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
 		if err != nil {
 			return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 		}
-		if currentDriver == amdgpu.VFIODriverName {
+		if currentDriver == consts.VFIODriverName {
 			if err := unbindFromDriver(info.PCIAddress); err != nil {
 				return fmt.Errorf("failed to unbind %s from vfio-pci: %w", info.PCIAddress, err)
 			}

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -172,7 +174,7 @@ func TestCheckVFIODriverLoaded(t *testing.T) {
 func setupGIMPFWithVFs(t *testing.T, root, pfAddr string, vfAddrs []string, vfDrivers map[string]string) {
 	t.Helper()
 	pfPath := createFakePCIDevice(t, root, pfAddr,
-		map[string]string{"vendor": AMDVendorID},
+		map[string]string{"vendor": consts.AMDVendorID},
 		map[string]string{"driver": "../../../../bus/pci/drivers/gim"},
 	)
 
@@ -185,7 +187,7 @@ func setupGIMPFWithVFs(t *testing.T, root, pfAddr string, vfAddrs []string, vfDr
 		}
 		vfPath := createFakePCIDevice(t, root, vfAddr,
 			map[string]string{
-				"vendor": AMDVendorID,
+				"vendor": consts.AMDVendorID,
 				"device": "0x740f",
 			},
 			vfSymlinks,
@@ -215,7 +217,7 @@ func TestGetVFMapping(t *testing.T) {
 	t.Run("VF on vfio-pci is included", func(t *testing.T) {
 		root := setupFakeSysfs(t)
 		setupGIMPFWithVFs(t, root, "0000:0a:00.0", []string{"0000:0b:00.0"},
-			map[string]string{"0000:0b:00.0": VFIODriverName})
+			map[string]string{"0000:0b:00.0": consts.VFIODriverName})
 		vfMap, err := GetVFMapping()
 		require.NoError(t, err)
 		total := 0
@@ -270,7 +272,7 @@ func TestGetVFMapping(t *testing.T) {
 	t.Run("PF not on GIM skipped", func(t *testing.T) {
 		root := setupFakeSysfs(t)
 		createFakePCIDevice(t, root, "0000:0a:00.0",
-			map[string]string{"vendor": AMDVendorID},
+			map[string]string{"vendor": consts.AMDVendorID},
 			map[string]string{"driver": "../../../../bus/pci/drivers/amdgpu"},
 		)
 		vfMap, err := GetVFMapping()
@@ -284,7 +286,7 @@ func TestGetPFMapping(t *testing.T) {
 		root := setupFakeSysfs(t)
 		devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
 			map[string]string{
-				"vendor": AMDVendorID,
+				"vendor": consts.AMDVendorID,
 				"device": "0x740f",
 			},
 			map[string]string{"driver": "../../../../bus/pci/drivers/vfio-pci"},
@@ -306,7 +308,7 @@ func TestGetPFMapping(t *testing.T) {
 		root := setupFakeSysfs(t)
 		devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
 			map[string]string{
-				"vendor": AMDVendorID,
+				"vendor": consts.AMDVendorID,
 				"device": "0x740f",
 			},
 			map[string]string{
@@ -326,7 +328,7 @@ func TestGetPFMapping(t *testing.T) {
 	t.Run("non-vfio driver skipped", func(t *testing.T) {
 		root := setupFakeSysfs(t)
 		createFakePCIDevice(t, root, "0000:0c:00.0",
-			map[string]string{"vendor": AMDVendorID},
+			map[string]string{"vendor": consts.AMDVendorID},
 			map[string]string{"driver": "../../../../bus/pci/drivers/amdgpu"},
 		)
 		pfMap, err := GetPFMapping()

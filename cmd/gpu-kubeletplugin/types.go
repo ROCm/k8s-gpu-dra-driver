@@ -16,13 +16,6 @@ limitations under the License.
 
 package main
 
-const (
-	AmdGpuDeviceType       = "amdgpu"
-	AmdPartitionDeviceType = "amdgpu-partition"
-	VfioDeviceType         = "vfio"
-	UnknownDeviceType      = "unknown"
-)
-
 type UUIDProvider interface {
 	UUIDs() []string
 	AmdGpuUUIDs() []string

@@ -34,6 +34,22 @@ package consts
 
 const DriverName = "gpu.amd.com"
 
+// PCI and kernel driver constants
+const (
+	AMDVendorID    = "0x1002"
+	VFIODriverName = "vfio-pci"
+	GIMDriverName  = "gim"
+	VFIOPCIModule  = "vfio_pci"
+)
+
+// Device type constants for ResourceSlice attributes
+const (
+	AmdGpuDeviceType       = "amdgpu"
+	AmdPartitionDeviceType = "amdgpu-partition"
+	VfioDeviceType         = "vfio"
+	UnknownDeviceType      = "unknown"
+)
+
 // Compute partition modes
 const (
 	ComputePartitionSPX = "spx"

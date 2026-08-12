@@ -35,6 +35,8 @@ package main
 import (
 	"testing"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+
 	"github.com/stretchr/testify/assert"
 
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
@@ -59,7 +61,7 @@ func TestRestoreFromVfio(t *testing.T) {
 	assert.Equal(t, "0000:0d:00.0", allocDev.AmdGpu.PCIAddress)
 	assert.Equal(t, 0, allocDev.AmdGpu.cardIndex)
 	assert.Equal(t, 128, allocDev.AmdGpu.renderIndex)
-	assert.Equal(t, AmdGpuDeviceType, allocDev.Type())
+	assert.Equal(t, consts.AmdGpuDeviceType, allocDev.Type())
 	_, inMap := state.claimVfioConversions["gpu-0-128"]
 	assert.False(t, inMap, "device should be removed from claimVfioConversions")
 }
@@ -115,7 +117,7 @@ func TestUnprepareDevices_RestoresConvertedDevice(t *testing.T) {
 	allocDev := state.allocatable["gpu-0-128"]
 	assert.NotNil(t, allocDev.AmdGpu, "AmdGpu should be restored after unprepare")
 	assert.Nil(t, allocDev.Vfio, "Vfio should be cleared after unprepare")
-	assert.Equal(t, AmdGpuDeviceType, allocDev.Type())
+	assert.Equal(t, consts.AmdGpuDeviceType, allocDev.Type())
 }
 
 func TestUnprepareDevices_PreDiscoveredVfioNotRestored(t *testing.T) {

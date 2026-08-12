@@ -19,6 +19,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
@@ -67,7 +69,7 @@ func (d *AmdGpuInfo) CanonicalName() string {
 // GetDevice returns the DRA Device representation for a full AMD GPU
 func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-		"type":        {StringValue: ptr.To(AmdGpuDeviceType)},
+		"type":        {StringValue: ptr.To(consts.AmdGpuDeviceType)},
 		"productName": {StringValue: ptr.To(d.ProductName)},
 		"numaNode":    {IntValue: ptr.To(int64(d.NumaNode))},
 	}
@@ -121,7 +123,7 @@ func (d *AmdGpuVFIOInfo) CanonicalName() string {
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU
 func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-		"type":       {StringValue: ptr.To(VfioDeviceType)},
+		"type":       {StringValue: ptr.To(consts.VfioDeviceType)},
 		"numaNode":   {IntValue: ptr.To(int64(d.NumaNode))},
 		"iommuGroup": {StringValue: ptr.To(d.IOMMUGroup)},
 		"pciAddr":    {StringValue: ptr.To(d.PCIAddress)},
@@ -156,7 +158,7 @@ func (d *AmdPartitionInfo) CanonicalName() string {
 // GetDevice returns the DRA Device representation for an AMD GPU partition
 func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-		"type":             {StringValue: ptr.To(AmdPartitionDeviceType)},
+		"type":             {StringValue: ptr.To(consts.AmdPartitionDeviceType)},
 		"productName":      {StringValue: ptr.To(d.Parent.ProductName)},
 		"partitionProfile": {StringValue: ptr.To(d.PartitionProfile)},
 		"numaNode":         {IntValue: ptr.To(int64(d.NumaNode))},

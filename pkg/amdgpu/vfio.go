@@ -22,21 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/golang/glog"
-)
-
-const (
-	// VFIODriverName is the kernel driver name for VFIO PCI passthrough.
-	VFIODriverName = "vfio-pci"
-
-	// GIMDriverName is the kernel driver name for AMD SR-IOV.
-	GIMDriverName = "gim"
-
-	// AMDVendorID is the PCI vendor ID for AMD.
-	AMDVendorID = "0x1002"
-
-	// VFIOPCIModule is the kernel module name for vfio-pci.
-	VFIOPCIModule = "vfio_pci"
 )
 
 var (
@@ -103,12 +90,12 @@ func GetPFMapping() (map[string][]PFInfo, error) {
 		pciPath := filepath.Join(PCIDevicePath, pciAddr)
 
 		vendor, err := readSysfsFile(filepath.Join(pciPath, "vendor"))
-		if err != nil || vendor != AMDVendorID {
+		if err != nil || vendor != consts.AMDVendorID {
 			continue
 		}
 
 		driver, err := GetPCIDriver(pciAddr)
-		if err != nil || driver != VFIODriverName {
+		if err != nil || driver != consts.VFIODriverName {
 			continue
 		}
 
@@ -180,7 +167,7 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 		if err != nil {
 			continue
 		}
-		if vendor != AMDVendorID {
+		if vendor != consts.AMDVendorID {
 			continue
 		}
 
@@ -190,7 +177,7 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 		if err != nil {
 			continue
 		}
-		if filepath.Base(driver) != GIMDriverName {
+		if filepath.Base(driver) != consts.GIMDriverName {
 			continue
 		}
 
@@ -217,7 +204,7 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 			if err != nil {
 				continue
 			}
-			if vfDriver != "" && vfDriver != VFIODriverName {
+			if vfDriver != "" && vfDriver != consts.VFIODriverName {
 				glog.V(2).Infof("Skipping VF %s: bound to %s", vfAddr, vfDriver)
 				continue
 			}

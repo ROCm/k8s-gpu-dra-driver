@@ -19,6 +19,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+
 	resourceapi "k8s.io/api/resource/v1"
 )
 
@@ -35,25 +37,25 @@ type AllocatableDevice struct {
 // Type returns the device type
 func (d *AllocatableDevice) Type() string {
 	if d.AmdGpu != nil {
-		return AmdGpuDeviceType
+		return consts.AmdGpuDeviceType
 	}
 	if d.AmdPartition != nil {
-		return AmdPartitionDeviceType
+		return consts.AmdPartitionDeviceType
 	}
 	if d.Vfio != nil {
-		return VfioDeviceType
+		return consts.VfioDeviceType
 	}
-	return UnknownDeviceType
+	return consts.UnknownDeviceType
 }
 
 // CanonicalName returns the canonical device name
 func (d *AllocatableDevice) CanonicalName() string {
 	switch d.Type() {
-	case AmdGpuDeviceType:
+	case consts.AmdGpuDeviceType:
 		return d.AmdGpu.CanonicalName()
-	case AmdPartitionDeviceType:
+	case consts.AmdPartitionDeviceType:
 		return d.AmdPartition.CanonicalName()
-	case VfioDeviceType:
+	case consts.VfioDeviceType:
 		return d.Vfio.CanonicalName()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
@@ -62,11 +64,11 @@ func (d *AllocatableDevice) CanonicalName() string {
 // GetPCIAddress returns the PCI address for the device
 func (d *AllocatableDevice) GetPCIAddress() string {
 	switch d.Type() {
-	case AmdGpuDeviceType:
+	case consts.AmdGpuDeviceType:
 		return d.AmdGpu.PCIAddress
-	case AmdPartitionDeviceType:
+	case consts.AmdPartitionDeviceType:
 		return d.AmdPartition.Parent.PCIAddress
-	case VfioDeviceType:
+	case consts.VfioDeviceType:
 		return d.Vfio.PCIAddress
 	}
 	return ""
@@ -75,11 +77,11 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 // GetDevice returns the DRA Device representation for Kubernetes
 func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {
-	case AmdGpuDeviceType:
+	case consts.AmdGpuDeviceType:
 		return d.AmdGpu.GetDevice()
-	case AmdPartitionDeviceType:
+	case consts.AmdPartitionDeviceType:
 		return d.AmdPartition.GetDevice()
-	case VfioDeviceType:
+	case consts.VfioDeviceType:
 		return d.Vfio.GetDevice()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
