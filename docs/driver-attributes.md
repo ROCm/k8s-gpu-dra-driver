@@ -200,6 +200,39 @@ selectors:
 - Defaults: when certain metrics (like VRAM) cannot be read reliably, the
   driver falls back to conservative defaults to remain usable.
 
+## VFIO passthrough devices
+
+When the `VFIOPassthrough` feature gate is enabled, the driver discovers GIM
+SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
+
+### Attributes for a VFIO device
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `type` | string | Always `vfio` |
+| `numaNode` | int | NUMA node affinity |
+| `iommuGroup` | string | IOMMU group number |
+| `pciAddr` | string | PCI BDF address (e.g., `0000:1b:02.0`) |
+| `isVF` | bool | `true` for SR-IOV VFs, `false` for PF passthrough |
+| `productName` | string | GPU product name (e.g., `Instinct_MI300X`) |
+| `deviceID` | string | PCI device ID (e.g., `0x740f`) |
+| `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
+
+Standard topology attributes (`resource.kubernetes.io/pciBusID`,
+`resource.kubernetes.io/pcieRoot`) are also published when available.
+
+### Selecting VFIO devices
+
+```yaml
+selectors:
+- cel:
+    expression: >-
+      device.driver == 'gpu.amd.com' &&
+      device.attributes['gpu.amd.com'].type == 'vfio'
+```
+
+---
+
 If you need additional attributes or different representations, please open an
 issue discussing your use case.
 

@@ -121,12 +121,25 @@ kubelet plugin DaemonSet pod. This container polls `/sys/class/kfd` and
 `/sys/module/amdgpu/drivers/` and blocks the plugin from starting until the
 kernel driver is loaded.
 
-### VFIO passthrough prerequisites
+### VFIO passthrough
 
-VFIO passthrough (for VM use cases via KubeVirt or similar) requires additional
-host configuration beyond the standard GPU compute driver:
+VFIO passthrough enables GPU allocation to VMs via KubeVirt or similar
+frameworks. All VFIO functionality requires the `VFIOPassthrough` feature gate.
 
-- **IOMMU enabled** — set `intel_iommu=on` or `amd_iommu=on` in kernel cmdline
+**Enabling VFIO:**
+
+```bash
+# CLI
+--feature-gates=VFIOPassthrough=true
+
+# Helm
+featureGates:
+  VFIOPassthrough: true
+```
+
+**Host prerequisites:**
+
+- **IOMMU enabled** — set `amd_iommu=on` (or `intel_iommu=on`) in kernel cmdline
 - **vfio_pci module loaded** — `modprobe vfio_pci` or add to `/etc/modules-load.d/`
 - **GIM driver** (SR-IOV VF mode) — the AMD GPU-IOV Module (`gim`) must be loaded
   on the PF for VF discovery. VFs are created via GIM's SR-IOV interface.
@@ -135,14 +148,34 @@ host configuration beyond the standard GPU compute driver:
 - **IOMMU groups** — each VF must be in its own IOMMU group for safe passthrough.
   Check with `ls /sys/kernel/iommu_groups/`
 
-Without IOMMU enabled, the VFIO manager will fail to initialize and VFIO devices
-will be removed from the allocatable list (GPU compute devices remain available).
+Without IOMMU enabled, the VFIO manager will not initialize and no VFIO devices
+will be advertised. GPU compute devices remain available.
 
-**PF passthrough mode:** By default, only GIM SR-IOV VFs are discovered for VFIO.
-To also discover AMD GPUs already bound to `vfio-pci` (e.g., by the GPU Operator
-in pf-passthrough mode), enable the `VFIOPassthrough` feature gate:
-`--feature-gates=VFIOPassthrough=true` or the Helm value
-`featureGates: {VFIOPassthrough: true}`.
+**Usage:**
+
+To allocate a VFIO GPU, create a ResourceClaim with a `VfioDeviceConfig`:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-vfio
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.amd.com
+    config:
+    - opaque:
+        driver: gpu.amd.com
+        parameters:
+          apiVersion: gpu.resource.amd.com/v1alpha1
+          kind: VfioDeviceConfig
+```
+
+The driver binds the allocated VF to `vfio-pci` during Prepare and unbinds
+on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 
 ### Key values
 
