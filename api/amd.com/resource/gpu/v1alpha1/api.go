@@ -78,6 +78,8 @@ func (c *GpuConfig) Normalize() error {
 	return nil
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // VfioDeviceConfig holds configuration for VFIO passthrough devices.
 type VfioDeviceConfig struct {
 	metav1.TypeMeta `json:",inline"`
