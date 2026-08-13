@@ -50,8 +50,16 @@ var emulationVersion = version.MajorMinor(0, 1)
 // inspect per-device properties (numaNode, pciBusID, pcieRoot, etc.).
 const DeviceMetadata featuregate.Feature = "DeviceMetadata"
 
+// VFIOPassthrough enables VFIO passthrough support: discovery of AMD GPUs
+// already bound to vfio-pci (PF passthrough) and on-demand binding of GPUs
+// from amdgpu to vfio-pci when a VfioDeviceConfig is present in the claim.
+const VFIOPassthrough featuregate.Feature = "VFIOPassthrough"
+
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	DeviceMetadata: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+	VFIOPassthrough: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 }

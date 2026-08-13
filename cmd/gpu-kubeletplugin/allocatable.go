@@ -19,47 +19,70 @@ package main
 import (
 	"fmt"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+
 	resourceapi "k8s.io/api/resource/v1"
 )
 
 // AllocatableDevices represents a collection of allocatable devices mapped by their canonical names
 type AllocatableDevices map[string]*AllocatableDevice
 
-// AllocatableDevice wraps either a full AMD GPU or a partition
+// AllocatableDevice wraps either a full AMD GPU, a partition, or a VFIO device
 type AllocatableDevice struct {
 	AmdGpu       *AmdGpuInfo
 	AmdPartition *AmdPartitionInfo
+	Vfio         *AmdGpuVFIOInfo
 }
 
-// Type returns the device type (amdgpu or amdgpu-partition)
+// Type returns the device type
 func (d *AllocatableDevice) Type() string {
 	if d.AmdGpu != nil {
-		return AmdGpuDeviceType
+		return consts.AmdGpuDeviceType
 	}
 	if d.AmdPartition != nil {
-		return AmdPartitionDeviceType
+		return consts.AmdPartitionDeviceType
 	}
-	return UnknownDeviceType
+	if d.Vfio != nil {
+		return consts.VfioDeviceType
+	}
+	return consts.UnknownDeviceType
 }
 
 // CanonicalName returns the canonical device name
 func (d *AllocatableDevice) CanonicalName() string {
 	switch d.Type() {
-	case AmdGpuDeviceType:
+	case consts.AmdGpuDeviceType:
 		return d.AmdGpu.CanonicalName()
-	case AmdPartitionDeviceType:
+	case consts.AmdPartitionDeviceType:
 		return d.AmdPartition.CanonicalName()
+	case consts.VfioDeviceType:
+		return d.Vfio.CanonicalName()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
+}
+
+// GetPCIAddress returns the PCI address for the device
+func (d *AllocatableDevice) GetPCIAddress() string {
+	switch d.Type() {
+	case consts.AmdGpuDeviceType:
+		return d.AmdGpu.PCIAddress
+	case consts.AmdPartitionDeviceType:
+		return d.AmdPartition.Parent.PCIAddress
+	case consts.VfioDeviceType:
+		return d.Vfio.PCIAddress
+	}
+	return ""
 }
 
 // GetDevice returns the DRA Device representation for Kubernetes
 func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {
-	case AmdGpuDeviceType:
+	case consts.AmdGpuDeviceType:
 		return d.AmdGpu.GetDevice()
-	case AmdPartitionDeviceType:
+	case consts.AmdPartitionDeviceType:
 		return d.AmdPartition.GetDevice()
+	case consts.VfioDeviceType:
+		return d.Vfio.GetDevice()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
