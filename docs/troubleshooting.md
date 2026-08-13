@@ -140,3 +140,60 @@ When opening a GitHub issue, include the following information to help us diagno
 - Steps to reproduce
 
 Use the [bug report issue template](https://github.com/ROCm/k8s-gpu-dra-driver/issues/new?template=bug_report.md) for a structured format.
+
+## VFIO passthrough troubleshooting
+
+### No VFIO devices in ResourceSlice
+
+The `VFIOPassthrough` feature gate must be enabled:
+
+```bash
+--feature-gates=VFIOPassthrough=true
+```
+
+Verify with: `kubectl get resourceslices -o json | jq '.items[].spec.devices[].attributes["gpu.amd.com"].type'` — look for `vfio` entries.
+
+### IOMMU not enabled
+
+```bash
+ls /sys/kernel/iommu_groups/
+```
+
+If empty or missing, IOMMU is not enabled. Add `amd_iommu=on` to the kernel
+cmdline and reboot. Without IOMMU, the VFIO manager will not initialize.
+
+### GIM driver not loaded (no VFs discovered)
+
+```bash
+lsmod | grep gim
+ls /sys/bus/pci/drivers/gim/
+```
+
+GIM must be loaded for SR-IOV VF discovery. VFs appear as `virtfn*` symlinks
+under the GIM-managed PF in sysfs.
+
+### vfio_pci module not loaded
+
+```bash
+lsmod | grep vfio_pci
+```
+
+If not loaded: `modprobe vfio_pci`. The driver logs a warning at startup but
+continues without it — pre-bound devices still work, but on-demand binding
+will fail.
+
+### Device stuck on vfio-pci after VM deletion
+
+If `Unconfigure` fails during Unprepare, the device remains bound to `vfio-pci`.
+Check the driver logs for errors:
+
+```bash
+kubectl logs <driver-pod> | grep -i "unconfigure\|unbind"
+```
+
+Manual recovery: unbind from vfio-pci and rebind to the original driver:
+
+```bash
+echo <pci-addr> > /sys/bus/pci/drivers/vfio-pci/unbind
+echo <pci-addr> > /sys/bus/pci/drivers/amdgpu/bind
+```
