@@ -26,7 +26,7 @@ import (
 
 // add near imports
 var skipDirNames = map[string]bool{
-	".git": true, ".cache": true, "vendor": true, "node_modules": true, "third_party": true,
+	".git": true, ".cache": true, "vendor": true, "node_modules": true, "third_party": true, "libamdsmi": true,
 }
 
 func addCopyright(filePath string, yourCopyright string) error {

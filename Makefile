@@ -53,7 +53,7 @@ CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := assert-fmt vet lint ineffassign copyrights
-MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate $(CHECK_TARGETS)
+MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate update-amdsmi $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -61,6 +61,19 @@ DOCKER_TARGETS := $(patsubst %,docker-%, $(TARGETS))
 .PHONY: $(TARGETS) $(DOCKER_TARGETS)
 
 GOOS ?= linux
+
+# ---------------------------------------------------------------------------
+# AMD SMI (vendored under third_party/amd_smi)
+# ---------------------------------------------------------------------------
+# The prebuilt libamd_smi.so, its required rocm_sysdeps netlink libraries, and
+# amdsmi.h are committed under third_party/amd_smi and linked directly by the cgo
+# bindings in pkg/amdsmi. `update-amdsmi` refreshes them from the ROCm theRock
+# tarball (ROCM_TARBALL_URL, defined in env.sh); it is version-guarded and a
+# no-op unless that URL points at a different ROCm release. See
+# third_party/amd_smi/README.md.
+.PHONY: update-amdsmi
+update-amdsmi:
+	@bash $(CURDIR)/scripts/update-amdsmi.sh
 
 ifneq ($(PREFIX),)
 cmd-%: COMMAND_BUILD_OPTIONS = -o $(PREFIX)/$(*)
@@ -109,7 +122,8 @@ vet:
 
 COVERAGE_FILE := coverage.out
 test:
-	go test -v -coverprofile=$(COVERAGE_FILE) $(MODULE)/...
+	LD_LIBRARY_PATH=$(CURDIR)/third_party/amd_smi/lib:$$LD_LIBRARY_PATH \
+		go test -v -coverprofile=$(COVERAGE_FILE) $(MODULE)/...
 
 coverage: test
 	cat $(COVERAGE_FILE) | grep -v "_mock.go" > $(COVERAGE_FILE).no-mocks

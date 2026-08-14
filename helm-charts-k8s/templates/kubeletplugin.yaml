@@ -94,6 +94,10 @@ spec:
             {{- range $k, $v := .Values.featureGates }}{{ $pairs = append $pairs (printf "%s=%v" $k $v) }}{{- end -}}
             {{- join "," $pairs -}}"
         {{- end }}
+        {{- if .Values.kubeletPlugin.kmmDriverEnabled }}
+        - name: KMM_DRIVER_ENABLED
+          value: "true"
+        {{- end }}
         volumeMounts:
         - name: plugins-registry
           mountPath: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
@@ -105,6 +109,16 @@ spec:
           mountPath: /dev
         - name: sys
           mountPath: /sys
+        # Required by BOTH auto-partition reload paths so the amdgpu kernel module
+        # can be reloaded from inside the container after a memory-partition change:
+        #  - non-KMM: amdsmi_gpu_driver_reload() fails with AMDSMI_STATUS_AMDGPU_RESTART_ERR
+        #    (54) unless the host module tree is visible (needs the amdgpu .ko + modules.dep).
+        #  - KMM: `modprobe -rv amdgpu` resolves the module from here.
+        # Verified on hardware: an in-pod reload returns 54 without this mount and
+        # succeeds with it.
+        - name: lib-modules
+          mountPath: /lib/modules
+          readOnly: true
       volumes:
       - name: plugins-registry
         hostPath:
@@ -121,6 +135,10 @@ spec:
       - name: sys
         hostPath:
           path: /sys
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
       {{- with .Values.kubeletPlugin.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

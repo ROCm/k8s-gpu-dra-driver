@@ -186,3 +186,195 @@ func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 		},
 	}
 }
+
+// SyntheticPartitionDevice represents a virtual partition device for synthetic-partition mode.
+// Each physical GPU generates one of these for each valid compute+memory combination.
+type SyntheticPartitionDevice struct {
+	GPUIndex         int
+	ComputePartition string
+	MemoryPartition  string
+	PartitionCount   int
+	PCIAddress       string
+	ProductName      string
+	DeviceID         string
+	DriverVersion    string
+	MemoryBytes      uint64 // per-partition memory (total / count)
+	ComputeUnits     int    // per-partition CUs
+	SimdUnits        int    // per-partition SIMDs
+	NumaNode         int
+	pcieRootAttr     deviceattribute.DeviceAttribute
+	pciBusIDAttr     deviceattribute.DeviceAttribute
+	// Taints holds any taints applied to this device (e.g. memory partition conflicts).
+	// This field is set dynamically and may be updated during runtime.
+	Taints []resourceapi.DeviceTaint
+}
+
+// CanonicalName returns the canonical name for this synthetic-partition device
+func (d *SyntheticPartitionDevice) CanonicalName() string {
+	return fmt.Sprintf("gpu-%d-%s-%s", d.GPUIndex, d.ComputePartition, d.MemoryPartition)
+}
+
+// GetDevice returns the DRA Device representation for a synthetic-partition device
+func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
+	// Use the same user-visible type attribute values as real GPU/partition devices:
+	// SPX (full GPU, 1 partition) -> "amdgpu", DPX/CPX (partitioned) -> "amdgpu-partition"
+	deviceType := consts.AmdPartitionDeviceType
+	if d.ComputePartition == consts.ComputePartitionSPX {
+		deviceType = consts.AmdGpuDeviceType
+	}
+
+	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+		"type": {
+			StringValue: ptr.To(deviceType),
+		},
+		"computePartition": {
+			StringValue: ptr.To(d.ComputePartition),
+		},
+		"memoryPartition": {
+			StringValue: ptr.To(d.MemoryPartition),
+		},
+		"gpuIndex": {
+			IntValue: ptr.To(int64(d.GPUIndex)),
+		},
+		"productName": {
+			StringValue: ptr.To(d.ProductName),
+		},
+		"pciAddr": {
+			StringValue: ptr.To(d.PCIAddress),
+		},
+		"numaNode": {
+			IntValue: ptr.To(int64(d.NumaNode)),
+		},
+	}
+	if d.DriverVersion != "" {
+		attributes["driverVersion"] = resourceapi.DeviceAttribute{VersionValue: ptr.To(amdgpu.SemverDriverVersion(d.DriverVersion))}
+		attributes["driverVersionFull"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DriverVersion)}
+	}
+	if d.DeviceID != "" {
+		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DeviceID)}
+	}
+
+	// Add PCI bus ID and PCIe root attributes if available
+	if d.pciBusIDAttr.Name != "" {
+		attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
+	}
+	if d.pcieRootAttr.Name != "" {
+		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	}
+
+	// Build partitions capacity entry. For partition types with count > 1,
+	// use RequestPolicy so each allocation consumes 1 partition by default.
+	// For SPX (count=1), omit RequestPolicy since the device cannot be
+	// shared and AllowMultipleAllocations would be false.
+	partitionsCapacity := resourceapi.DeviceCapacity{
+		Value: *resource.NewQuantity(int64(d.PartitionCount), resource.DecimalSI),
+	}
+	if d.PartitionCount > 1 {
+		partitionsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: resource.NewQuantity(1, resource.DecimalSI),
+		}
+	}
+
+	// Build capacity entries for memory, computeUnits, simdUnits.
+	// d.MemoryBytes/ComputeUnits/SimdUnits are per-partition values.
+	// Value = total for device (per-partition * count), Default = per-partition.
+	memoryCapacity := resourceapi.DeviceCapacity{
+		Value: *resource.NewQuantity(int64(d.MemoryBytes)*int64(d.PartitionCount), resource.BinarySI),
+	}
+	computeUnitsCapacity := resourceapi.DeviceCapacity{
+		Value: *resource.NewQuantity(int64(d.ComputeUnits)*int64(d.PartitionCount), resource.DecimalSI),
+	}
+	simdUnitsCapacity := resourceapi.DeviceCapacity{
+		Value: *resource.NewQuantity(int64(d.SimdUnits)*int64(d.PartitionCount), resource.DecimalSI),
+	}
+	if d.PartitionCount > 1 {
+		memoryCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI),
+		}
+		computeUnitsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: resource.NewQuantity(int64(d.ComputeUnits), resource.DecimalSI),
+		}
+		simdUnitsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: resource.NewQuantity(int64(d.SimdUnits), resource.DecimalSI),
+		}
+	}
+
+	device := resourceapi.Device{
+		Name:       d.CanonicalName(),
+		Attributes: attributes,
+		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+			"partitions":   partitionsCapacity,
+			"memory":       memoryCapacity,
+			"computeUnits": computeUnitsCapacity,
+			"simdUnits":    simdUnitsCapacity,
+		},
+		ConsumesCounters: []resourceapi.DeviceCounterConsumption{
+			{
+				CounterSet: fmt.Sprintf("gpu-%d-mutex", d.GPUIndex),
+				Counters: map[string]resourceapi.Counter{
+					"partition-mode": {
+						Value: *resource.NewQuantity(1, resource.DecimalSI),
+					},
+				},
+			},
+		},
+	}
+
+	// AllowMultipleAllocations is true for partition types with count > 1
+	if d.PartitionCount > 1 {
+		device.AllowMultipleAllocations = ptr.To(true)
+	}
+
+	// Apply taints if any (e.g., memory partition conflicts)
+	if len(d.Taints) > 0 {
+		device.Taints = d.Taints
+	}
+
+	return device
+}
+
+// mutexCounterSetName returns the shared counter set name for a GPU's partition mutex.
+func mutexCounterSetName(gpuIndex int) string {
+	return fmt.Sprintf("gpu-%d-mutex", gpuIndex)
+}
+
+// buildMutexCounterSet returns the CounterSet for a GPU's partition-mode mutex.
+func buildMutexCounterSet(gpuIndex int) resourceapi.CounterSet {
+	return resourceapi.CounterSet{
+		Name: mutexCounterSetName(gpuIndex),
+		Counters: map[string]resourceapi.Counter{
+			"partition-mode": {
+				Value: *resource.NewQuantity(1, resource.DecimalSI),
+			},
+		},
+	}
+}
+
+// IsCompatibleMemoryMode checks whether the given memory mode is compatible
+// with the currently active memory mode (or if no mode is active).
+func IsCompatibleMemoryMode(activeMode, requestedMode string) bool {
+	return activeMode == "" || activeMode == requestedMode
+}
+
+// parseSyntheticPartitionDeviceName parses a device name like "gpu-0-cpx-nps4"
+// and returns the gpuIndex, compute partition mode, and memory partition mode.
+func parseSyntheticPartitionDeviceName(name string) (gpuIndex int, compute, memory string, err error) {
+	_, err = fmt.Sscanf(name, "gpu-%d-", &gpuIndex)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("failed to parse synthetic-partition device name %s: %v", name, err)
+	}
+
+	// Parse the remaining parts after "gpu-<index>-"
+	prefix := fmt.Sprintf("gpu-%d-", gpuIndex)
+	remainder := name[len(prefix):]
+
+	// Valid patterns: "spx-nps1", "dpx-nps2", "cpx-nps1", "cpx-nps4"
+	for _, cfg := range consts.ValidPartitionConfigs {
+		expected := fmt.Sprintf("%s-%s", cfg.Compute, cfg.Memory)
+		if remainder == expected {
+			return gpuIndex, cfg.Compute, cfg.Memory, nil
+		}
+	}
+
+	return 0, "", "", fmt.Errorf("unrecognized synthetic-partition device name: %s", name)
+}
