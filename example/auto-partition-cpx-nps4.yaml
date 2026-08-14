@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test
+
+---
+## [Beta] Request a single CPX-NPS4 compute partition via auto-partition mode.
+## The driver will dynamically set the GPU to CPX compute mode with NPS4 memory
+## when the pod is scheduled. Requires featureGates.AutoPartition=true in Helm values
+## and Kubernetes 1.36+.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: gpu-test
+  name: cpx-nps4-partition
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.amd.com
+        selectors:
+        - cel:
+            expression: >-
+              device.attributes["gpu.amd.com"].computePartition == "cpx" &&
+              device.attributes["gpu.amd.com"].memoryPartition == "nps4"
+        capacity:
+          requests:
+            partitions: "1"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test
+  name: cpx-nps4-pod
+  labels:
+    app: auto-partition-test
+spec:
+  containers:
+  - name: gpu-workload
+    image: docker.io/rocm/pytorch:latest
+    command: ["bash", "-c"]
+    args: ["export; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimName: cpx-nps4-partition

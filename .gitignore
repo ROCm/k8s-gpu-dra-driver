@@ -6,3 +6,6 @@ helm-charts-k8s/*.tgz
 # cmd/ source directories of the same name are not ignored.
 /gpu-kubeletplugin
 /webhook
+
+# Build artifacts
+build/

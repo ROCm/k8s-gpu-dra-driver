@@ -33,6 +33,13 @@ serviceAccount:
   name: ""
 
 kubeletPlugin:
+  # Set to true when the amdgpu kernel driver on the node is managed by Kernel
+  # Module Management (KMM). This changes how the driver reloads amdgpu after an
+  # auto-partition memory-mode change: on a KMM-managed node the amd-smi reload
+  # is skipped (it would restore the inbox driver) and the KMM reload path is
+  # used instead. When deploying via the GPU operator, the operator sets this;
+  # set it here for standalone Helm deployments.
+  kmmDriverEnabled: false
   priorityClassName: "system-node-critical"
   updateStrategy:
     type: RollingUpdate
@@ -91,5 +98,5 @@ cdi:
 # ContextualLogging) are also accepted here.
 # Example:
 #   featureGates:
-#     ExampleFeature: true
+#     AutoPartition: true
 featureGates: {}

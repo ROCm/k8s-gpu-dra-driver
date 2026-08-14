@@ -43,6 +43,7 @@ import (
 
 	cli "github.com/urfave/cli/v2"
 
+	"k8s.io/client-go/dynamic"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	klog "k8s.io/klog/v2"
@@ -70,6 +71,7 @@ type Flags struct {
 type Config struct {
 	flags         *Flags
 	coreclient    coreclientset.Interface
+	dynamicClient dynamic.Interface
 	cancelMainCtx func(error)
 }
 
@@ -156,8 +158,9 @@ func newApp() *cli.App {
 			}
 
 			config := &Config{
-				flags:      flags,
-				coreclient: clientSets.Core,
+				flags:         flags,
+				coreclient:    clientSets.Core,
+				dynamicClient: clientSets.Dynamic,
 			}
 
 			return RunPlugin(ctx, config)

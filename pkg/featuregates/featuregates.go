@@ -55,11 +55,21 @@ const DeviceMetadata featuregate.Feature = "DeviceMetadata"
 // from amdgpu to vfio-pci when a VfioDeviceConfig is present in the claim.
 const VFIOPassthrough featuregate.Feature = "VFIOPassthrough"
 
+// AutoPartition enables auto-partition mode: the driver advertises every valid
+// compute+memory partition configuration as a virtual device and dynamically
+// reconfigures the GPU hardware via amd-smi when a ResourceClaim is prepared.
+// Requires Kubernetes 1.36+ with DRAPartitionableDevices, DRAConsumableCapacity,
+// and DRADeviceTaints enabled.
+const AutoPartition featuregate.Feature = "AutoPartition"
+
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	DeviceMetadata: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 	VFIOPassthrough: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+	AutoPartition: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 }

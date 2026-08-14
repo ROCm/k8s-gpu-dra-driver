@@ -8,13 +8,17 @@ The driver discovers AMD GPUs present on a node and advertises them as DRA
 Devices. It supports:
 - Full, unpartitioned GPUs
 - Pre-partitioned devices (for platforms that expose partitions)
+- Auto-partition mode (virtual partition devices created on-demand)
 
 Device selection can then use DRA attributes to target either full GPUs or
 partitions.
 
 ## Device identity and naming
 
-- Canonical device name: `gpu-<card>-<renderD>` (e.g., `gpu-0-128`)
+- Full GPU / partition canonical name: `gpu-<cardIndex>-<renderIndex>`
+  (e.g., `gpu-0-128`)
+- Auto-partition canonical name: `gpu-<gpuIndex>-<computeMode>-<memoryMode>`
+  (e.g., `gpu-0-cpx-nps4`)
 
 ## Device types (full GPU vs partition)
 
@@ -202,6 +206,164 @@ selectors:
       expression: 'device.attributes["gpu.amd.com"].numaNode == 0'
 ```
 
+## Auto-partition mode (virtual partition devices) [Beta]
+
+When auto-partition is enabled (the `AutoPartition` feature gate, set via
+`--feature-gates=AutoPartition=true` or `FEATURE_GATES=AutoPartition=true`), the
+driver advertises virtual partition devices for every valid compute+memory
+partition combination on each partitionable GPU. Non-partitionable GPUs are
+still advertised as normal full GPU devices.
+
+This mode requires Kubernetes 1.36+ with DRA beta features enabled.
+
+> **Do not run the Device Config Manager (DCM) on nodes where auto-partition is
+> enabled.** In auto-partition mode the DRA driver is the sole owner of GPU
+> partitioning: it decides the partition layout dynamically at claim-prepare time
+> and reconfigures the hardware via `amd-smi`. DCM is a second partitioning
+> authority that sets a fixed layout out-of-band. Running both against the same
+> GPUs makes them fight over the hardware — the DRA driver will repartition a GPU
+> that DCM configured (and vice-versa), producing incorrect layouts, failed
+> reloads, and workloads landing on the wrong partition. Pick one: use DCM for
+> statically pre-partitioned nodes, or auto-partition for dynamic partitioning —
+> never both on the same node.
+
+### How it works
+
+1. On startup the driver discovers physical GPUs.
+2. For each GPU that supports compute partitioning, it generates one virtual
+   device per valid compute+memory combination:
+   - `spx-nps1` -- full GPU (1 partition)
+   - `dpx-nps2` -- dual partition (2 partitions)
+   - `cpx-nps1` -- 8-way compute partition, single memory domain
+   - `cpx-nps4` -- 8-way compute partition, 4-way memory domain
+3. When a ResourceClaim is allocated and prepared, the driver calls `amd-smi`
+   to set the requested compute and memory partition modes on the physical GPU.
+4. Per-GPU shared counters (mutex) prevent conflicting partition modes from
+   being allocated on the same GPU simultaneously.
+5. Device taints (`NoExecute`) are applied to devices whose memory mode
+   conflicts with the currently active memory mode on the node. Taints are
+   removed when all allocations are released.
+
+### Auto-partition device naming
+
+Virtual devices are named `gpu-<gpuIndex>-<computeMode>-<memoryMode>`, for
+example `gpu-0-cpx-nps4` or `gpu-1-spx-nps1`.
+
+### Device types in auto-partition mode
+
+The `type` attribute on auto-partition devices uses the same values as normal
+devices to maintain compatibility with existing selectors:
+- `type = amdgpu` for SPX mode (full GPU, 1 partition)
+- `type = amdgpu-partition` for DPX/CPX modes (partitioned)
+
+### Attributes for an auto-partition device
+
+- `type` (string): `amdgpu` or `amdgpu-partition` (see above)
+- `computePartition` (string): compute partition mode -- one of `spx`, `dpx`,
+  `cpx`
+- `memoryPartition` (string): memory partition mode -- one of `nps1`, `nps2`,
+  `nps4`
+- `gpuIndex` (int): physical GPU index on the node (0-based, sorted by PCI
+  address)
+- `pciAddr` (string): PCI bus address of the physical GPU
+- `productName` (string): product name of the physical GPU
+- `deviceID` (string): PCI device ID of the physical GPU (e.g., `0x740f`)
+- `driverVersion` (semver): kernel driver version (normalized to semver)
+- `driverVersionFull` (string): full kernel driver version string
+- `numaNode` (int): NUMA node the GPU is attached to
+- Topology attributes: `resource.kubernetes.io/pciBusID` and
+  `resource.kubernetes.io/pcieRoot` (when derivable)
+
+### Capacity values for auto-partition devices
+
+- `partitions` (quantity): number of partitions this configuration creates
+  (1 for SPX, 2 for DPX, 8 for CPX). This is a consumable capacity --
+  multiple allocations can share the same partition configuration up to this
+  count. A default request of 1 is applied when no explicit request is made.
+- `memory` (quantity, bytes): per-partition VRAM (total GPU VRAM divided by
+  partition count)
+- `computeUnits` (quantity): per-partition CUs
+- `simdUnits` (quantity): per-partition SIMD units
+
+### Shared counters
+
+Each partitionable GPU has a shared counter set named `gpu-<gpuIndex>-mutex`
+with a single counter `partition-mode` of capacity 1. Every virtual partition
+device for that GPU consumes this counter, so the scheduler ensures only one
+partition configuration can be active per GPU at a time.
+
+### Memory partition taints
+
+When the first partition allocation on a node sets the memory mode (e.g.,
+`nps4`), all virtual partition devices with a different memory mode receive a
+`NoExecute` taint with key `gpu.amd.com/memory-partition-conflict`. This
+prevents the scheduler from allocating incompatible memory modes. When all
+partition allocations are released, taints are removed and any memory mode
+becomes available again.
+
+### Enabling auto-partition via Helm
+
+Enable the `AutoPartition` feature gate in your Helm values:
+
+```yaml
+featureGates:
+  AutoPartition: true
+```
+
+Or via command line:
+```bash
+helm install amd-gpu-driver ./helm-charts-k8s \
+  --set featureGates.AutoPartition=true
+```
+
+### Selecting auto-partition devices in claims
+
+Request a specific partition configuration using `computePartition` and
+`memoryPartition` attribute selectors:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: cpx-partition
+spec:
+  devices:
+    requests:
+    - name: gpu
+      deviceClassName: gpu.amd.com
+      selectors:
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].computePartition == "cpx"'
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].memoryPartition == "nps4"'
+```
+
+Request a full GPU (SPX mode):
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: full-gpu
+spec:
+  devices:
+    requests:
+    - name: gpu
+      deviceClassName: gpu.amd.com
+      selectors:
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].computePartition == "spx"'
+```
+
+### Migrating from the device plugin
+
+If your workloads currently request partitioned GPUs from the AMD GPU device
+plugin using extended resource names such as `amd.com/cpx_nps4`, see
+[Migrating partitioned-GPU workloads from the device plugin to DRA](device-plugin-to-dra-partitions.md)
+for the mapping to DRA ResourceClaims. The DRA driver does not advertise
+per-partition extended resource names; partition configurations are selected via
+claim attributes instead.
+
 ## Current capabilities and notes
 
 - Discovery: the driver walks the relevant sysfs paths to find AMD GPUs and
@@ -212,6 +374,10 @@ selectors:
   their own identity and capacities. Partitions share the same `pciBusID`
   as their parent GPU, enabling same-parent and different-parent constraint
   patterns.
+- Auto-partition mode: when enabled, the driver advertises virtual partition
+  devices for all valid compute+memory combinations and dynamically partitions
+  GPUs at claim-prepare time via `amd-smi`. Shared counters and device taints
+  enforce partition mode exclusivity. Requires Kubernetes 1.36+.
 - Topology hinting: `resource.kubernetes.io/pcieRoot` and
   `resource.kubernetes.io/pciBusID` standard attributes enable topology-aware
   scheduling.

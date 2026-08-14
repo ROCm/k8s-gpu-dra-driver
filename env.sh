@@ -28,6 +28,10 @@
 : ${GOLANG_VERSION:=1.26.5}
 : ${BUILDIMAGE_TAG:=v1.1}
 
+# AMD SMI (theRock) — prebuilt libamd_smi is vendored under third_party/amd_smi.
+# Refresh with `make update-amdsmi` after bumping this URL (see scripts/update-amdsmi.sh).
+: ${ROCM_TARBALL_URL:=https://rocm.prereleases.amd.com/tarball-multi-arch/therock-dist-linux-multiarch-10.0.0rc2.tar.gz}
+
 # Container/image defaults
 : ${DRIVER_IMAGE_REGISTRY:=docker.io/rocm}
 : ${DRIVER_IMAGE_NAME:="${DRIVER_NAME}"}
@@ -39,7 +43,7 @@
 
 # Kind defaults
 : ${KIND_K8S_REPO:=https://github.com/kubernetes/kubernetes.git}
-: ${KIND_K8S_TAG:=v1.34.2}
+: ${KIND_K8S_TAG:=v1.36.0}
 : ${BUILD_KIND_IMAGE:=false}
 : ${KIND_CLUSTER_NAME:=${DRIVER_NAME}-cluster}
 
