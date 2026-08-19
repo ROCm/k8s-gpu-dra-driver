@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang/glog"
 )
@@ -177,17 +178,54 @@ func readPartitionMode(path string) (string, error) {
 	return strings.ToLower(strings.TrimSpace(string(data))), nil
 }
 
-// GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
+// discoveryAttempts and discoveryBackoff bound the wait for a GPU whose sysfs entries are
+// still appearing. Discovery runs once at startup, so a device skipped here stays missing
+// until the plugin restarts.
+var (
+	discoveryAttempts = 5
+	discoveryBackoff  = 200 * time.Millisecond
+)
+
+// SetDiscoveryRetry overrides the retry bounds. Used by tests to avoid waiting out the
+// real backoff for a device that is meant to stay incomplete.
+func SetDiscoveryRetry(attempts int, backoff time.Duration) (restore func()) {
+	prevAttempts, prevBackoff := discoveryAttempts, discoveryBackoff
+	discoveryAttempts, discoveryBackoff = attempts, backoff
+	return func() { discoveryAttempts, discoveryBackoff = prevAttempts, prevBackoff }
+}
+
+// GetAMDGPUs returns the AMD GPUs on the node, keyed by part of the PCI address. A device
+// bound to amdgpu whose DRM or KFD entries have not appeared yet is retried a few times,
+// since discovery runs once and would otherwise leave the GPU missing for the lifetime of
+// the process. A device still incomplete after that is skipped as before.
 func GetAMDGPUs() map[string]map[string]interface{} {
+	for attempt := 1; ; attempt++ {
+		devices, skipped := discoverAMDGPUs()
+		if skipped == 0 {
+			return devices
+		}
+		if attempt >= discoveryAttempts {
+			glog.Warningf("%d device(s) still had incomplete sysfs entries after %d attempts; they are not published until the plugin restarts", skipped, attempt)
+			return devices
+		}
+		glog.Infof("%d device(s) have incomplete sysfs entries; retrying discovery (%d/%d)", skipped, attempt, discoveryAttempts)
+		time.Sleep(discoveryBackoff)
+	}
+}
+
+// discoverAMDGPUs runs one discovery pass, returning the devices it published and how many
+// it skipped for a condition that may still resolve.
+func discoverAMDGPUs() (map[string]map[string]interface{}, int) {
 	if _, err := os.Stat(AMDGPUDriversPath); err != nil {
 		glog.Warningf("amdgpu driver unavailable: %s", err)
-		return make(map[string]map[string]interface{})
+		return make(map[string]map[string]interface{}), 0
 	}
 
 	//ex: /sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0
 	matches, _ := filepath.Glob(filepath.Join(AMDGPUDriversPath, "pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*"))
 
 	devices := make(map[string]map[string]interface{})
+	skipped := 0
 
 	// Get comprehensive topology information once instead of multiple calls
 	topologyInfo := GetTopologyInfo()
@@ -206,6 +244,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		computePartitionType, err := readPartitionMode(computePartitionFile)
 		if err != nil {
 			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			skipped++
 			continue
 		}
 
@@ -213,6 +252,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		memoryPartitionType, err := readPartitionMode(memoryPartitionFile)
 		if err != nil {
 			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			skipped++
 			continue
 		}
 
@@ -221,10 +261,12 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			numaNode, err = strconv.Atoi(numaNodeStr)
 			if err != nil {
 				glog.Warningf("Failed to convert 'numa_node' value to int: %s", err)
+				skipped++
 				continue
 			}
 		} else {
 			glog.Warningf("Failed to read 'numa_node' file at %s: %s", numaNodeFile, err)
+			skipped++
 			continue
 		}
 
@@ -235,6 +277,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
 		if !ok {
 			glog.Warningf("Skipping device %s: no valid card and renderD drm entries", pciAddr)
+			skipped++
 			continue
 		}
 		if devID == "" {
@@ -244,6 +287,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			// usable whole, so only the partitioned case is dropped.
 			if computePartitionType != "" && computePartitionType != "spx" {
 				glog.Warningf("Skipping device %s (card%d renderD%d): compute mode %q but no KFD compute identity yet, so its partitions cannot be matched", pciAddr, card, renderD, computePartitionType)
+				skipped++
 				continue
 			}
 			glog.Warningf("device %s (card%d renderD%d) has no KFD compute identity (empty unique id); publishing it as a full GPU anyway", pciAddr, card, renderD)
@@ -309,6 +353,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
 		if !ok || devID == "" {
 			glog.Warningf("Skipping platform device %s: unresolved GPU identity", filepath.Base(path))
+			skipped++
 			continue
 		}
 		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
@@ -316,6 +361,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		parent, err := uniquePhysicalParent(devID, physicalDevices)
 		if err != nil {
 			glog.Warningf("Skipping platform device %s: %s", filepath.Base(path), err)
+			skipped++
 			continue
 		}
 		parentPciAddr = parent["pciAddr"].(string)
@@ -359,7 +405,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		devices[filepath.Base(path)] = deviceInfo
 	}
 	glog.Infof("Devices map: %v", devices)
-	return devices
+	return devices, skipped
 }
 
 // GetDeviceID reads the PCI device ID from sysfs for the given DRM card

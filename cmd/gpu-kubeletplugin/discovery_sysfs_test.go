@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/stretchr/testify/require"
@@ -139,6 +140,7 @@ func TestEnumerateAttachesPartitionsToPhysicalParent(t *testing.T) {
 // the previous GPU's card, render, or kfd identity. This is the carry-over this PR
 // removes, checked through discovery rather than the helper alone.
 func TestEnumerateSkipsIncompleteIdentityWithoutBorrowing(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)() // the device stays incomplete; no need to wait out the backoff
 	fakeSysfs(t, []fakeGPU{
 		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "spx", memoryMode: "nps1", bus: 0x19, dev: 0},
 	})
@@ -177,6 +179,7 @@ func TestEnumerateRejectsUnknownPartitionMode(t *testing.T) {
 // An unreadable partition file must not read as "no partitioning support": that would
 // publish a partitioned GPU as one whole allocatable device.
 func TestEnumerateSkipsDeviceWithUnreadablePartitionFile(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)() // the device stays incomplete; no need to wait out the backoff
 	fakeSysfs(t, []fakeGPU{
 		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "cpx", memoryMode: "nps1", bus: 0x19, dev: 0},
 	})
@@ -194,6 +197,7 @@ func TestEnumerateSkipsDeviceWithUnreadablePartitionFile(t *testing.T) {
 // its partitions are skipped for the same missing id, so it would advertise part of a
 // partitioned GPU as if it were the whole topology.
 func TestEnumerateSkipsPartitionedGPUWithoutKFDIdentity(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)() // the identity never appears in this test
 	for _, mode := range []string{"dpx", "tpx"} {
 		t.Run(mode, func(t *testing.T) {
 			fakeSysfs(t, []fakeGPU{
@@ -207,4 +211,41 @@ func TestEnumerateSkipsPartitionedGPUWithoutKFDIdentity(t *testing.T) {
 			require.Empty(t, devices, "no partial topology may be published for %s", mode)
 		})
 	}
+}
+
+// A GPU bound to amdgpu whose DRM entries appear a moment after the plugin starts must
+// end up published. Discovery runs once, so without a retry it would stay missing until
+// the process restarts even though the hardware is fine.
+func TestEnumerateRetriesUntilDRMEntriesAppear(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(20, 20*time.Millisecond)()
+	fakeSysfs(t, []fakeGPU{
+		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "spx", memoryMode: "nps1", bus: 0x19, dev: 0},
+	})
+
+	// Take the drm entries away, then put them back while discovery is retrying.
+	drm := filepath.Join(amdgpu.AMDGPUDriversPath, "pci:amdgpu", "0000:19:00.0", "drm")
+	require.NoError(t, os.RemoveAll(drm))
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = os.MkdirAll(filepath.Join(drm, "card0"), 0o755)
+		_ = os.MkdirAll(filepath.Join(drm, "renderD128"), 0o755)
+	}()
+
+	devices, err := enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	require.Contains(t, devices, "gpu-0-128", "the GPU must be published once its entries appear")
+}
+
+// Without the retry the same GPU is lost, which is what makes the retry load-bearing
+// rather than a delay that happens to be harmless.
+func TestEnumerateWithoutRetryLosesLateDRMEntries(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)()
+	fakeSysfs(t, []fakeGPU{
+		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "spx", memoryMode: "nps1", bus: 0x19, dev: 0},
+	})
+	require.NoError(t, os.RemoveAll(filepath.Join(amdgpu.AMDGPUDriversPath, "pci:amdgpu", "0000:19:00.0", "drm")))
+
+	devices, err := enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	require.Empty(t, devices, "a single attempt cannot see entries that appear later")
 }
