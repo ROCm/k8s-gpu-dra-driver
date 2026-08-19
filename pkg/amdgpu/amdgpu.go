@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -132,6 +133,50 @@ func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (
 	return card, renderD, nodeId, devID, haveCard && haveRender && !conflict
 }
 
+// uniquePhysicalParent returns the one physical GPU sharing devID. Zero matches means
+// the parent has not been discovered, and more than one means two GPUs reported the same
+// kfd id, so neither can be attributed. Both are errors rather than a first-match guess,
+// since map iteration order would otherwise decide which parent a partition inherits.
+func uniquePhysicalParent(devID string, physical map[string]map[string]interface{}) (map[string]interface{}, error) {
+	var found map[string]interface{}
+	var addrs []string
+	for _, device := range physical {
+		if device["kfdID"] != devID {
+			continue
+		}
+		addr, _ := device["pciAddr"].(string)
+		addrs = append(addrs, addr)
+		found = device
+	}
+	switch len(addrs) {
+	case 0:
+		return nil, fmt.Errorf("no physical GPU reports kfd id %q", devID)
+	case 1:
+		return found, nil
+	default:
+		sort.Strings(addrs)
+		return nil, fmt.Errorf("kfd id %q is reported by %d physical GPUs (%s)", devID, len(addrs), strings.Join(addrs, ", "))
+	}
+}
+
+// pciAddrOf returns the PCI address encoded in a sysfs device path.
+func pciAddrOf(devicePath string) string { return filepath.Base(devicePath) }
+
+// readPartitionMode reads a current_*_partition file. A missing file means the device
+// does not support partitioning, which is a whole GPU. Any other error is returned
+// rather than reported as an empty mode, because an empty mode reads downstream as
+// "no partitioning" and would publish a partitioned GPU as one whole device.
+func readPartitionMode(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("unable to read %s: %w", path, err)
+	}
+	return strings.ToLower(strings.TrimSpace(string(data))), nil
+}
+
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
 func GetAMDGPUs() map[string]map[string]interface{} {
 	if _, err := os.Stat(AMDGPUDriversPath); err != nil {
@@ -155,21 +200,20 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		memoryPartitionFile := filepath.Join(path, "current_memory_partition")
 		numaNodeFile := filepath.Join(path, "numa_node")
 
-		computePartitionType, memoryPartitionType := "", ""
 		var numaNode int
 
 		// Read the compute partition
-		if data, err := os.ReadFile(computePartitionFile); err == nil {
-			computePartitionType = strings.ToLower(strings.TrimSpace(string(data)))
-		} else {
-			glog.Warningf("Failed to read 'current_compute_partition' file at %s: %s", computePartitionFile, err)
+		computePartitionType, err := readPartitionMode(computePartitionFile)
+		if err != nil {
+			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			continue
 		}
 
 		// Read the memory partition
-		if data, err := os.ReadFile(memoryPartitionFile); err == nil {
-			memoryPartitionType = strings.ToLower(strings.TrimSpace(string(data)))
-		} else {
-			glog.Warningf("Failed to read 'current_memory_partition' file at %s: %s", memoryPartitionFile, err)
+		memoryPartitionType, err := readPartitionMode(memoryPartitionFile)
+		if err != nil {
+			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			continue
 		}
 
 		if data, err := os.ReadFile(numaNodeFile); err == nil {
@@ -194,7 +238,14 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			continue
 		}
 		if devID == "" {
-			// The platform path skips this state, so surface it rather than hiding a possibly unusable GPU.
+			// Partitions find their parent by this id, and the platform loop skips a
+			// partition without one, so publishing this device alone would advertise
+			// part of a partitioned GPU. A device that is not partitioned is still
+			// usable whole, so only the partitioned case is dropped.
+			if computePartitionType != "" && computePartitionType != "spx" {
+				glog.Warningf("Skipping device %s (card%d renderD%d): compute mode %q but no KFD compute identity yet, so its partitions cannot be matched", pciAddr, card, renderD, computePartitionType)
+				continue
+			}
 			glog.Warningf("device %s (card%d renderD%d) has no KFD compute identity (empty unique id); publishing it as a full GPU anyway", pciAddr, card, renderD)
 		}
 
@@ -262,19 +313,17 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		}
 		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
 		// and device ID from the parent GPU that shares this kfd (unique) ID.
-		for _, device := range physicalDevices {
-			if device["kfdID"] == devID {
-				parentPciAddr = device["pciAddr"].(string)
-				numaNode = device["numaNode"].(int)
-				productName = device["productName"].(string)
-				sysfsDeviceID = device["deviceID"].(string)
-				if device["computePartitionType"].(string) != "" && device["memoryPartitionType"].(string) != "" {
-					computePartitionType = device["computePartitionType"].(string)
-					memoryPartitionType = device["memoryPartitionType"].(string)
-					break
-				}
-			}
+		parent, err := uniquePhysicalParent(devID, physicalDevices)
+		if err != nil {
+			glog.Warningf("Skipping platform device %s: %s", filepath.Base(path), err)
+			continue
 		}
+		parentPciAddr = parent["pciAddr"].(string)
+		numaNode = parent["numaNode"].(int)
+		productName = parent["productName"].(string)
+		sysfsDeviceID = parent["deviceID"].(string)
+		computePartitionType = parent["computePartitionType"].(string)
+		memoryPartitionType = parent["memoryPartitionType"].(string)
 		// This is needed because some of the visible renderD are actually not valid
 		// Their validity depends on topology information from KFD
 
