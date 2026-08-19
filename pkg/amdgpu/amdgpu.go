@@ -34,7 +34,7 @@ import (
 
 // GetDriverVersion reads the AMDGPU driver version
 func GetDriverVersion() string {
-	matches, _ := filepath.Glob("/sys/class/drm/card*/device/driver/module/version")
+	matches, _ := filepath.Glob(filepath.Join(DRMClassPath, "card*/device/driver/module/version"))
 	if len(matches) == 0 {
 		glog.Warningf("No AMD GPU cards found for driver version reading; driverVersion attribute will be omitted")
 		return ""
@@ -134,13 +134,13 @@ func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (
 
 // GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
 func GetAMDGPUs() map[string]map[string]interface{} {
-	if _, err := os.Stat("/sys/module/amdgpu/drivers/"); err != nil {
+	if _, err := os.Stat(AMDGPUDriversPath); err != nil {
 		glog.Warningf("amdgpu driver unavailable: %s", err)
 		return make(map[string]map[string]interface{})
 	}
 
 	//ex: /sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0
-	matches, _ := filepath.Glob("/sys/module/amdgpu/drivers/pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*")
+	matches, _ := filepath.Glob(filepath.Join(AMDGPUDriversPath, "pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*"))
 
 	devices := make(map[string]map[string]interface{})
 
@@ -200,7 +200,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 
 		// Get product name
 		productName := ""
-		productNamePath := fmt.Sprintf("/sys/class/drm/card%d/device/product_name", card)
+		productNamePath := filepath.Join(DRMClassPath, fmt.Sprintf("card%d/device/product_name", card))
 		if b, err := os.ReadFile(productNamePath); err != nil {
 			glog.Warningf("Failed to read product name from %s: %s", productNamePath, err)
 		} else {
@@ -243,7 +243,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 
 	// certain products have additional devices (such as MI300's partitions)
 	//ex: /sys/devices/platform/amdgpu_xcp_30
-	platformMatches, _ := filepath.Glob("/sys/devices/platform/amdgpu_xcp_*")
+	platformMatches, _ := filepath.Glob(filepath.Join(PlatformDevicesPath, "amdgpu_xcp_*"))
 
 	for _, path := range platformMatches {
 		glog.Info(path)
@@ -316,7 +316,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 // GetDeviceID reads the PCI device ID from sysfs for the given DRM card
 // Returns the device ID string (e.g., "0x740f") or empty string on failure
 func GetDeviceID(cardName string) string {
-	sysfsDevicePath := "/sys/class/drm/" + cardName + "/device/device"
+	sysfsDevicePath := filepath.Join(DRMClassPath, cardName, "device/device")
 	b, err := os.ReadFile(sysfsDevicePath)
 	if err != nil {
 		glog.Warningf("Failed to read device ID from %s: %s", sysfsDevicePath, err)
@@ -327,7 +327,7 @@ func GetDeviceID(cardName string) string {
 
 // AMDGPU check if a particular card is an AMD GPU by checking the device's vendor ID
 func AMDGPU(cardName string) bool {
-	sysfsVendorPath := "/sys/class/drm/" + cardName + "/device/vendor"
+	sysfsVendorPath := filepath.Join(DRMClassPath, cardName, "device/vendor")
 	b, err := os.ReadFile(sysfsVendorPath)
 	if err == nil {
 		vid := strings.TrimSpace(string(b))
@@ -416,7 +416,7 @@ var topoDomainRe = regexp.MustCompile(`domain\s(\d+)`)
 // GetTopologyInfo returns comprehensive topology information for all render devices
 // This combines the functionality of GetDevIdsFromTopology and GetNodeIdsFromTopology
 func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
-	topoRoot := "/sys/class/kfd/kfd"
+	topoRoot := KFDTopologyPath
 	if len(topoRootParam) == 1 {
 		topoRoot = topoRootParam[0]
 	}
