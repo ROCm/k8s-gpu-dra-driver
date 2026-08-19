@@ -178,8 +178,28 @@ func testDeviceState(t *testing.T, cache *cdiapi.Cache, cm checkpointmanager.Che
 		pluginPath:        t.TempDir(),
 		bootID:            "test-boot",
 	}
-	require.NoError(t, s.writeEpoch("test-boot"))
 	return s
+}
+
+// bindEpoch records an epoch for the checkpoint currently on disk, the way a real
+// checkpoint write does, so reconcile sees an epoch that describes it.
+func bindEpoch(t *testing.T, s *DeviceState) {
+	t.Helper()
+	cp := newCheckpoint()
+	require.NoError(t, s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	require.NoError(t, s.writeEpoch(cp.Checksum))
+}
+
+// bindEpochForBoot records an epoch describing the current checkpoint but under another
+// boot, which is the confirmed-reboot case.
+func bindEpochForBoot(t *testing.T, s *DeviceState, bootID string) {
+	t.Helper()
+	cp := newCheckpoint()
+	require.NoError(t, s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	saved := s.bootID
+	s.bootID = bootID
+	require.NoError(t, s.writeEpoch(cp.Checksum))
+	s.bootID = saved
 }
 
 // kfdDevices is a well-formed single-device claim naming gpu-0-128. Its node points at
@@ -238,6 +258,7 @@ func TestReconcileCDISpecs(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	before, err := os.ReadDir(cdiRoot)
 	require.NoError(t, err)
@@ -255,24 +276,38 @@ func TestReconcileCDISpecs(t *testing.T) {
 }
 
 func TestValidatePreparedDevices(t *testing.T) {
-	edits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
-	valid := PreparedDevices{{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: edits}}
+	node := func() []*cdispec.DeviceNode {
+		return []*cdispec.DeviceNode{{Path: "/dev/kfd", HostPath: "/dev/kfd", Type: "c", Major: 1, Minor: 3}}
+	}
+	editsWith := func(mutate func(*cdispec.ContainerEdits)) *cdiapi.ContainerEdits {
+		e := &cdispec.ContainerEdits{DeviceNodes: node()}
+		if mutate != nil {
+			mutate(e)
+		}
+		return &cdiapi.ContainerEdits{ContainerEdits: e}
+	}
+
+	valid := PreparedDevices{{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: editsWith(nil)}}
 	require.NoError(t, validatePreparedDevices("uid", valid))
 
-	nilNode := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{DeviceNodes: []*cdispec.DeviceNode{nil}}}
-	nilHook := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Hooks: []*cdispec.Hook{nil}}}
-	nilMount := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Mounts: []*cdispec.Mount{nil}}}
-	nilNet := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{NetDevices: []*cdispec.LinuxNetDevice{nil}}}
-
+	// Each bad case keeps an otherwise usable edit set, so it fails on its own defect
+	// rather than on a shared missing field.
 	bad := map[string]PreparedDevices{
 		"empty":               {},
 		"nil device":          {nil},
-		"no device name":      {{Device: drapbv1.Device{}, ContainerEdits: edits}},
+		"no device name":      {{Device: drapbv1.Device{}, ContainerEdits: editsWith(nil)}},
 		"nil container edits": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}}},
-		"nil deviceNode":      {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilNode}},
-		"nil hook":            {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilHook}},
-		"nil mount":           {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilMount}},
-		"nil netDevice":       {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: nilNet}},
+		"hollow edits":        {{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: &cdiapi.ContainerEdits{}}},
+		"no device nodes": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}}},
+		"nil deviceNode": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: editsWith(func(e *cdispec.ContainerEdits) { e.DeviceNodes = append(e.DeviceNodes, nil) })}},
+		"nil hook": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: editsWith(func(e *cdispec.ContainerEdits) { e.Hooks = []*cdispec.Hook{nil} })}},
+		"nil mount": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: editsWith(func(e *cdispec.ContainerEdits) { e.Mounts = []*cdispec.Mount{nil} })}},
+		"nil netDevice": {{Device: drapbv1.Device{DeviceName: "gpu-0-128"},
+			ContainerEdits: editsWith(func(e *cdispec.ContainerEdits) { e.NetDevices = []*cdispec.LinuxNetDevice{nil} })}},
 	}
 	for name, pds := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -291,6 +326,7 @@ func TestPrepareRepairsMissingCheckpointedSpec(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	before, err := os.ReadDir(cdiRoot)
 	require.NoError(t, err)
@@ -315,6 +351,7 @@ func TestReconcileSkipsMalformedCheckpointEntry(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -335,6 +372,7 @@ func TestPrepareRejectsMalformedCheckpointEntry(t *testing.T) {
 		{Device: drapbv1.Device{DeviceName: ""}, ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}},
 	}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID(claimUID)}}
 	_, err := s.Prepare(claim)
@@ -352,6 +390,7 @@ func TestReconcileRejectsHollowContainerEdits(t *testing.T) {
 		{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: &cdiapi.ContainerEdits{}},
 	}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -365,11 +404,11 @@ func TestReconcileRejectsHollowContainerEdits(t *testing.T) {
 func TestReconcileDiscardsCheckpointFromDifferentBoot(t *testing.T) {
 	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 	s := testDeviceState(t, cache, cm, "gpu-0-128")
-	require.NoError(t, s.writeEpoch("boot-previous")) // stored epoch now differs from s.bootID
 
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpochForBoot(t, s, "boot-previous") // same checkpoint, earlier boot
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -391,6 +430,7 @@ func TestReconcileSkipsDeviceNotAllocatable(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -410,6 +450,7 @@ func TestReconcileRejectsNestedNullDeviceNode(t *testing.T) {
 		{Device: drapbv1.Device{DeviceName: "gpu-0-128"}, ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{DeviceNodes: []*cdispec.DeviceNode{nil}}}},
 	}
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.NoError(t, s.reconcileCDISpecs()) // must not panic
 
@@ -436,6 +477,7 @@ func TestReconcileRebuildsWithoutConfirmedRebootWhenNodesMatch(t *testing.T) {
 		checkpoint := newCheckpoint()
 		checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
 		require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+		bindEpoch(t, s)
 
 		require.NoError(t, s.reconcileCDISpecs())
 
@@ -457,10 +499,10 @@ func TestReconcileRebuildsWithoutConfirmedRebootWhenNodesMatch(t *testing.T) {
 			pluginPath:        t.TempDir(),
 			bootID:            "", // procfs unreadable
 		}
-		require.NoError(t, s.writeEpoch("")) // stored epoch also empty
 		checkpoint := newCheckpoint()
 		checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
 		require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+		bindEpoch(t, s)
 
 		require.NoError(t, s.reconcileCDISpecs())
 
@@ -481,6 +523,7 @@ func TestReconcileQuarantinesBadClaimButRebuildsGood(t *testing.T) {
 	checkpoint.V1.PreparedClaims["good"] = kfdDevices()
 	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil} // malformed -> skipped
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -503,6 +546,7 @@ func TestReconcileFailsLoudOnCDIWriteError(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	// Force WriteSpec to fail deterministically and independently of file permissions
 	// (which root ignores) by planting a directory where the spec file must be written.
@@ -529,8 +573,7 @@ func TestReconcileDiscardDeletesStaleSpecs(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
-
-	require.NoError(t, s.writeEpoch("boot-previous")) // force a cross-boot discard
+	bindEpochForBoot(t, s, "boot-previous") // force a cross-boot discard
 
 	require.NoError(t, s.reconcileCDISpecs())
 
@@ -561,6 +604,7 @@ func TestReconcileFailsStartupOnDeviceNodeRenumber(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = stale
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.Error(t, s.reconcileCDISpecs(), "a same-boot renumber must fail startup, not discard")
 
@@ -590,6 +634,7 @@ func TestReconcileFailsStartupOnMissingDeviceNode(t *testing.T) {
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["claim-uid-1"] = gone
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
 
 	require.Error(t, s.reconcileCDISpecs(), "a missing node without a confirmed reboot must fail startup")
 
@@ -600,4 +645,66 @@ func TestReconcileFailsStartupOnMissingDeviceNode(t *testing.T) {
 	reloaded := newCheckpoint()
 	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
 	require.NotEmpty(t, reloaded.V1.PreparedClaims, "startup must fail without discarding the checkpoint")
+}
+
+// A reboot only authorizes a discard when nothing wrote the checkpoint after the epoch
+// was recorded. If an older binary prepared claims in between, the epoch describes a
+// different checkpoint, and discarding would drop claims kubelet may now hold.
+func TestReconcileKeepsCheckpointWrittenAfterTheEpoch(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm, "gpu-0-128")
+
+	// Epoch recorded under an earlier boot, for an empty checkpoint.
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()))
+	bindEpochForBoot(t, s, "boot-previous")
+
+	// Another binary then prepares a claim, so the checkpoint no longer matches.
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["claim-uid-1"] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	reloaded := newCheckpoint()
+	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+	require.Contains(t, reloaded.V1.PreparedClaims, "claim-uid-1",
+		"a claim prepared after the epoch was recorded must not be discarded on a boot change")
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.NotEmpty(t, after, "its CDI spec must be rebuilt rather than deleted")
+}
+
+// Unprepare is reached again on every teardown, so a malformed checkpoint entry must be
+// rejected there rather than dereferenced.
+func TestUnprepareRejectsMalformedEntryWithoutPanic(t *testing.T) {
+	_, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm)
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil}
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
+
+	var err error
+	require.NotPanics(t, func() { err = s.Unprepare("bad") })
+	require.Error(t, err, "a malformed entry must fail unprepare, not be dereferenced")
+}
+
+// Reporting success for a device that is no longer in the inventory would tell kubelet
+// the host state was restored when it cannot have been.
+func TestUnprepareRejectsDeviceMissingFromInventory(t *testing.T) {
+	_, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm) // nothing allocatable
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims["c"] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+	bindEpoch(t, s)
+
+	require.Error(t, s.Unprepare("c"))
+
+	reloaded := newCheckpoint()
+	require.NoError(t, cm.GetCheckpoint(DriverPluginCheckpointFile, reloaded))
+	require.Contains(t, reloaded.V1.PreparedClaims, "c", "a failed unprepare must not drop the claim")
 }
