@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -238,6 +239,11 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		devices[filepath.Base(path)] = deviceInfo
 	}
 
+	// Snapshot the physical GPUs before the platform loop starts appending to devices, so a
+	// partition matches its parent and not an XCP sibling an earlier iteration added.
+	physicalDevices := make(map[string]map[string]interface{}, len(devices))
+	maps.Copy(physicalDevices, devices)
+
 	// certain products have additional devices (such as MI300's partitions)
 	//ex: /sys/devices/platform/amdgpu_xcp_30
 	platformMatches, _ := filepath.Glob("/sys/devices/platform/amdgpu_xcp_*")
@@ -259,7 +265,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		}
 		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
 		// and device ID from the parent GPU that shares this kfd (unique) ID.
-		for _, device := range devices {
+		for _, device := range physicalDevices {
 			if device["kfdID"] == devID {
 				parentPciAddr = device["pciAddr"].(string)
 				numaNode = device["numaNode"].(int)
