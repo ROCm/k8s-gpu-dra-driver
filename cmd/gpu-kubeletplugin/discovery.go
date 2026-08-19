@@ -103,17 +103,12 @@ func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice)
 	return nil
 }
 
-// isKnownComputePartition reports whether t is a compute-partition mode this driver
-// models. spx is a full GPU and is handled separately. A type outside this set means the
-// driver cannot model the device's partitioning, so discovery skips it rather than
-// publishing a device with an unhandled profile; a new AMD mode has to be added here.
-func isKnownComputePartition(t string) bool {
-	switch t {
-	case consts.ComputePartitionDPX, consts.ComputePartitionQPX, consts.ComputePartitionCPX:
-		return true
-	default:
-		return false
-	}
+// isComputePartition reports whether t names a partition rather than a whole GPU: an empty
+// type means no partitioning support and spx is the single-partition mode. The mode only
+// feeds the published profile string, so matching a fixed set of modes here would drop
+// valid partitions for any mode not listed, such as tpx on MI300A.
+func isComputePartition(t string) bool {
+	return t != "" && t != consts.ComputePartitionSPX
 }
 
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
@@ -135,7 +130,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		// Extract common topology information
 		simdUnits, computeUnits := extractTopologyInfo(gpuInfoMap)
 
-		if computePartitionType == consts.ComputePartitionSPX || computePartitionType == "" {
+		if !isComputePartition(computePartitionType) {
 			// This is a full AMD GPU (either explicitly "spx" or no partition support)
 			partitionProfile := ""
 			if computePartitionType != "" && memoryPartitionType != "" {
@@ -169,7 +164,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 			klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
-		} else if isKnownComputePartition(computePartitionType) {
+		} else {
 			// This is a partition - create both parent GPU info and partition info.
 			// A well-formed profile needs both halves; an empty memory type would produce
 			// a truncated "dpx_" profile, so skip an incomplete one rather than publish it.
@@ -211,8 +206,6 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 			klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
-		} else {
-			klog.Warningf("Skipping device %s: unsupported compute partition type %q", pciAddr, computePartitionType)
 		}
 	}
 

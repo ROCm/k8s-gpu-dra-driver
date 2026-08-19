@@ -46,23 +46,24 @@ func TestAddAllocatableDeviceRejectsCollision(t *testing.T) {
 	}
 }
 
-// Only the compute-partition modes the driver models are treated as partitions; spx is a
-// full GPU and anything else is skipped rather than published with an unhandled profile.
-func TestIsKnownComputePartition(t *testing.T) {
+// Every mode other than spx and the empty type is a partition. tpx in particular has to
+// be one: it is a real mode on MI300A, and matching against a fixed set of modes would
+// drop those partitions from the published devices entirely.
+func TestIsComputePartition(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
 		want bool
 	}{
 		{"dpx", true},
+		{"tpx", true}, // valid on MI300A
 		{"qpx", true},
 		{"cpx", true},
-		{"spx", false}, // spx is a full GPU, classified separately
-		{"", false},
-		{"tpx", false},     // a mode this driver does not model
-		{"garbage", false}, // an unreadable or unexpected value
+		{"spx", false}, // the single-partition mode, classified as a full GPU
+		{"", false},    // no partitioning support
+		{"zpx", true},  // a mode added after this driver was written stays a partition
 	} {
-		if got := isKnownComputePartition(tc.in); got != tc.want {
-			t.Errorf("isKnownComputePartition(%q) = %v, want %v", tc.in, got, tc.want)
+		if got := isComputePartition(tc.in); got != tc.want {
+			t.Errorf("isComputePartition(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }
