@@ -158,3 +158,53 @@ func TestEnumerateSkipsIncompleteIdentityWithoutBorrowing(t *testing.T) {
 	_, ok := devices["gpu-0-128"]
 	require.True(t, ok, "the complete GPU keeps its own identity")
 }
+
+// A mode the driver does not know must stop discovery rather than be published as a
+// partition, since nothing downstream can interpret its allocation semantics.
+func TestEnumerateRejectsUnknownPartitionMode(t *testing.T) {
+	for _, mode := range []string{"zpx", "invalid", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			fakeSysfs(t, []fakeGPU{
+				{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: mode, memoryMode: "nps1", bus: 0x19, dev: 0},
+			})
+			_, err := enumerateAllPossibleDevices()
+			require.Error(t, err, "%q must not be published as a partition", mode)
+			require.Contains(t, err.Error(), mode)
+		})
+	}
+}
+
+// An unreadable partition file must not read as "no partitioning support": that would
+// publish a partitioned GPU as one whole allocatable device.
+func TestEnumerateSkipsDeviceWithUnreadablePartitionFile(t *testing.T) {
+	fakeSysfs(t, []fakeGPU{
+		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "cpx", memoryMode: "nps1", bus: 0x19, dev: 0},
+	})
+	// Replace the file with a directory so the read fails as EISDIR for any user.
+	p := filepath.Join(amdgpu.AMDGPUDriversPath, "pci:amdgpu", "0000:19:00.0", "current_compute_partition")
+	require.NoError(t, os.Remove(p))
+	require.NoError(t, os.MkdirAll(p, 0o755))
+
+	devices, err := enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	require.Empty(t, devices, "an unreadable partition mode must not become a whole GPU")
+}
+
+// A GPU in a partition mode whose KFD identity is not ready yet must not be published:
+// its partitions are skipped for the same missing id, so it would advertise part of a
+// partitioned GPU as if it were the whole topology.
+func TestEnumerateSkipsPartitionedGPUWithoutKFDIdentity(t *testing.T) {
+	for _, mode := range []string{"dpx", "tpx"} {
+		t.Run(mode, func(t *testing.T) {
+			fakeSysfs(t, []fakeGPU{
+				{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: mode, memoryMode: "nps1", bus: 0x19, dev: 0},
+			})
+			// Drop the topology node so the kfd identity cannot resolve.
+			require.NoError(t, os.RemoveAll(filepath.Join(amdgpu.KFDTopologyPath, "topology")))
+
+			devices, err := enumerateAllPossibleDevices()
+			require.NoError(t, err)
+			require.Empty(t, devices, "no partial topology may be published for %s", mode)
+		})
+	}
+}
