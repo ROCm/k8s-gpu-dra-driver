@@ -194,10 +194,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			continue
 		}
 		if devID == "" {
-			// An empty KFD unique id (no topology entry, or a topology entry with no
-			// unique id) means the device has no compute identity. The platform-partition
-			// path skips this state; the physical path still publishes it, so surface it
-			// rather than hiding a possibly non-usable GPU.
+			// The platform path skips this state, so surface it rather than hiding a possibly unusable GPU.
 			glog.Warningf("device %s (card%d renderD%d) has no KFD compute identity (empty unique id); publishing it as a full GPU anyway", pciAddr, card, renderD)
 		}
 
@@ -239,8 +236,8 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		devices[filepath.Base(path)] = deviceInfo
 	}
 
-	// Snapshot the physical GPUs before the platform loop starts appending to devices, so a
-	// partition matches its parent and not an XCP sibling an earlier iteration added.
+	// The platform loop appends to devices, so search a snapshot of the physical GPUs: a
+	// partition must match its parent, never an XCP sibling an earlier iteration added.
 	physicalDevices := make(map[string]map[string]interface{}, len(devices))
 	maps.Copy(physicalDevices, devices)
 

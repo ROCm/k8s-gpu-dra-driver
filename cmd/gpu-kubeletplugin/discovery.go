@@ -75,10 +75,8 @@ func getMemoryBytes(gpuInfoMap map[string]interface{}, deviceType, pciAddr strin
 
 func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttribute, deviceattribute.DeviceAttribute, string, error) {
 	pciAddr := gpuInfoMap["pciAddr"].(string)
-	// The PCIe root and bus-id attributes are optional NUMA/topology hints; the caller
-	// keeps going without them. The device's own BDF is known regardless, so return it
-	// even on error rather than an empty string that would leave a partition's parent
-	// PCIAddress blank.
+	// The attributes are optional hints and the caller continues without them, but the BDF is
+	// always known, so return it even on error; an empty one blanks a partition's parent.
 	pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciAddr)
 	if err != nil {
 		return pcieRootAttr, deviceattribute.DeviceAttribute{}, pciAddr, fmt.Errorf("Failed to get PCIe root attribute for device %s: %v", pciAddr, err)
@@ -103,10 +101,9 @@ func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice)
 	return nil
 }
 
-// isComputePartition reports whether t names a partition rather than a whole GPU: an empty
-// type means no partitioning support and spx is the single-partition mode. The mode only
-// feeds the published profile string, so matching a fixed set of modes here would drop
-// valid partitions for any mode not listed, such as tpx on MI300A.
+// isComputePartition reports whether t names a partition rather than a whole GPU. An empty
+// type means no partitioning support, and spx is the single-partition mode. Every other
+// mode is a partition, including ones newer than this driver, such as tpx.
 func isComputePartition(t string) bool {
 	return t != "" && t != consts.ComputePartitionSPX
 }
@@ -166,8 +163,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
 		} else {
 			// This is a partition - create both parent GPU info and partition info.
-			// A well-formed profile needs both halves; an empty memory type would produce
-			// a truncated "dpx_" profile, so skip an incomplete one rather than publish it.
+			// An empty memory type gives a truncated "dpx_" profile, so skip it instead.
 			if memoryPartitionType == "" {
 				klog.Warningf("Skipping partition for device %s: compute type %q has no memory partition type", pciAddr, computePartitionType)
 				continue

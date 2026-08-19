@@ -46,9 +46,8 @@ func TestAddAllocatableDeviceRejectsCollision(t *testing.T) {
 	}
 }
 
-// Every mode other than spx and the empty type is a partition. tpx in particular has to
-// be one: it is a real mode on MI300A, and matching against a fixed set of modes would
-// drop those partitions from the published devices entirely.
+// Every mode other than spx and the empty type is a partition. tpx matters most: it is real
+// on MI300A, so treating it as unknown drops those partitions entirely.
 func TestIsComputePartition(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
