@@ -88,6 +88,7 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	alldevices := make(AllocatableDevices)
+	vfioIndex := 0
 	allAMDGPUs := amdgpu.GetAMDGPUs()
 
 	for pciAddr, gpuInfoMap := range allAMDGPUs {
@@ -137,6 +138,31 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 			klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 				device.CanonicalName(), computePartitionType, memoryPartitionType)
+
+			if featuregates.Enabled(featuregates.VFIOPassthrough) {
+				iommuGroup, _ := amdgpu.GetIOMMUGroup(pciAddr)
+				vfioSibling := &AmdGpuVFIOInfo{
+					PCIAddress:      pciAddr,
+					DeviceID:        amdGpuInfo.DeviceID,
+					VendorID:        consts.AMDVendorID,
+					ProductName:     amdGpuInfo.ProductName,
+					NumaNode:        amdGpuInfo.NumaNode,
+					IsVF:            false,
+					Index:           vfioIndex,
+					IOMMUGroup:      iommuGroup,
+					pciBusIDAttr:    pciBusIDAttr,
+					pcieRootAttr:    pcieRootAttr,
+					ParentPFAddress: pciAddr,
+					TotalVFs:        amdgpu.ReadSRIOVTotalVFs(pciAddr),
+					MemoryBytes:     amdGpuInfo.MemoryBytes,
+					ComputeUnits:    amdGpuInfo.ComputeUnits,
+					SimdUnits:       amdGpuInfo.SimdUnits,
+				}
+				vfioDev := &AllocatableDevice{Vfio: vfioSibling}
+				alldevices[vfioDev.CanonicalName()] = vfioDev
+				klog.Infof("Found VFIO sibling for compute GPU: %s (PCI: %s, IOMMU: %s)", vfioDev.CanonicalName(), pciAddr, iommuGroup)
+				vfioIndex++
+			}
 		} else if computePartitionType != "" {
 			// This is a partition - create both parent GPU info and partition info
 
@@ -181,8 +207,6 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	// Discover VFIO passthrough devices:
 	// - PFs already bound to vfio-pci by the GPU Operator (pf-passthrough mode)
 	// - GIM SR-IOV VFs (vf-passthrough mode)
-	vfioIndex := 0
-
 	if featuregates.Enabled(featuregates.VFIOPassthrough) {
 		pfMap, err := amdgpu.GetPFMapping()
 		if err != nil {
@@ -229,6 +253,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		if err != nil {
 			klog.V(2).Infof("No VFIO VF devices found: %v", err)
 		} else {
+			pfCapCache := make(map[string][3]uint64)
 			vfKeys := make([]string, 0, len(vfMap))
 			for k := range vfMap {
 				vfKeys = append(vfKeys, k)
@@ -244,6 +269,18 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 					}
 					pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
 					currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
+					var memPerVF uint64
+					var cuPerVF, simdPerVF int
+					if vf.NumVFs > 0 {
+						cap, ok := pfCapCache[vf.ParentPCIAddress]
+						if !ok {
+							cap = amdgpu.ReadPFCapacity(vf.ParentPCIAddress)
+							pfCapCache[vf.ParentPCIAddress] = cap
+						}
+						memPerVF = cap[0] / uint64(vf.NumVFs)
+						cuPerVF = int(cap[1]) / vf.NumVFs
+						simdPerVF = int(cap[2]) / vf.NumVFs
+					}
 					device := &AmdGpuVFIOInfo{
 						PCIAddress:         vf.PCIAddress,
 						DeviceID:           vf.DeviceID,
@@ -256,9 +293,17 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 						pciBusIDAttr:       pciBusIDAttr,
 						pcieRootAttr:       pcieRootAttr,
 						preConfigureDriver: currentDriver,
+						ParentPFAddress:    vf.ParentPCIAddress,
+						TotalVFs:           vf.TotalVFs,
+						NumVFs:             vf.NumVFs,
+						MemoryBytes:        memPerVF,
+						ComputeUnits:       cuPerVF,
+						SimdUnits:          simdPerVF,
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
-					klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
+					klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s, mode: %s, mem: %dMi, CU: %d)",
+						device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup,
+						device.partitionMode(), memPerVF/(1024*1024), cuPerVF)
 					vfioIndex++
 				}
 			}

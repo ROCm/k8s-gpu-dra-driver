@@ -177,6 +177,34 @@ spec:
 The driver binds the allocated VF to `vfio-pci` during Prepare and unbinds
 on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 
+**Dual-entry advertising:**
+
+When `VFIOPassthrough` is enabled, each compute GPU also appears as a
+`type=vfio` device in the ResourceSlice. You can claim a VFIO GPU directly
+by selecting `type=vfio` without using a `VfioDeviceConfig`:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-vfio-direct
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.amd.com
+        selectors:
+        - cel:
+            expression: 'device.attributes["gpu.amd.com"].type == "vfio"'
+```
+
+This is the simpler path for VFIO allocation. The `VfioDeviceConfig` approach
+(shown above) is still supported for on-demand conversion of compute GPUs.
+
+When either the compute or VFIO entry is allocated, the other is temporarily
+removed from the ResourceSlice. It returns when the claim is released.
+
 ### Key values
 
 | Value | Default | Description |

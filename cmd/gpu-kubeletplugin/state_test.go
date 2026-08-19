@@ -143,6 +143,122 @@ func TestUnprepareDevices_PreDiscoveredVfioNotRestored(t *testing.T) {
 	assert.Nil(t, allocDev.AmdGpu, "should not gain an AmdGpu entry")
 }
 
+func TestRemoveAndRestoreSiblingDevices(t *testing.T) {
+	pciAddr := "0000:0a:00.0"
+	computeDev := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pciAddr, cardIndex: 0, renderIndex: 128}}
+	vfioDev := &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress:  pciAddr,
+		IsVF:        false,
+		Index:       0,
+		MemoryBytes: 206158430208,
+	}}
+
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128":  computeDev,
+			"gpu-vfio-0": vfioDev,
+		},
+		siblingCache: make(AllocatableDevices),
+	}
+	state.buildPCIIndex()
+
+	state.RemoveSiblingDevices("gpu-0-128", computeDev)
+	assert.Contains(t, state.allocatable, "gpu-0-128")
+	assert.NotContains(t, state.allocatable, "gpu-vfio-0")
+	assert.Contains(t, state.siblingCache, "gpu-vfio-0")
+
+	state.RestoreSiblingDevices(computeDev)
+	assert.Contains(t, state.allocatable, "gpu-0-128")
+	assert.Contains(t, state.allocatable, "gpu-vfio-0")
+	assert.NotContains(t, state.siblingCache, "gpu-vfio-0")
+}
+
+func TestSiblingCachePreservesCapacity(t *testing.T) {
+	pciAddr := "0000:0a:00.0"
+	computeDev := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pciAddr, cardIndex: 0, renderIndex: 128}}
+	vfioDev := &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress:   pciAddr,
+		IsVF:         false,
+		Index:        0,
+		MemoryBytes:  206158430208,
+		ComputeUnits: 304,
+		SimdUnits:    1216,
+	}}
+
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128":  computeDev,
+			"gpu-vfio-0": vfioDev,
+		},
+		siblingCache: make(AllocatableDevices),
+	}
+	state.buildPCIIndex()
+
+	state.RemoveSiblingDevices("gpu-0-128", computeDev)
+	state.RestoreSiblingDevices(computeDev)
+
+	restored := state.allocatable["gpu-vfio-0"]
+	assert.Equal(t, uint64(206158430208), restored.Vfio.MemoryBytes)
+	assert.Equal(t, 304, restored.Vfio.ComputeUnits)
+	assert.Equal(t, 1216, restored.Vfio.SimdUnits)
+}
+
+func TestRemoveSiblingDevices_NoSiblings(t *testing.T) {
+	dev := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}}
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": dev,
+		},
+		siblingCache: make(AllocatableDevices),
+	}
+	state.buildPCIIndex()
+
+	assert.NotPanics(t, func() {
+		state.RemoveSiblingDevices("gpu-0-128", dev)
+	})
+	assert.Contains(t, state.allocatable, "gpu-0-128")
+	assert.Empty(t, state.siblingCache)
+}
+
+func TestRestoreSiblingDevices_EmptyCache(t *testing.T) {
+	dev := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}}
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": dev,
+		},
+		siblingCache: make(AllocatableDevices),
+	}
+	state.buildPCIIndex()
+
+	assert.NotPanics(t, func() {
+		state.RestoreSiblingDevices(dev)
+	})
+	assert.Contains(t, state.allocatable, "gpu-0-128")
+}
+
+func TestBuildPCIIndex(t *testing.T) {
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128":  {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
+			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", IsVF: false, Index: 0}},
+			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0b:00.0", IsVF: true, Index: 1}},
+			"gpu-1-129":  {AmdPartition: &AmdPartitionInfo{Parent: &AmdGpuInfo{PCIAddress: "0000:0c:00.0"}, cardIndex: 1, renderIndex: 129}},
+		},
+		siblingCache: make(AllocatableDevices),
+	}
+	state.buildPCIIndex()
+
+	assert.Len(t, state.byPCIAddress["0000:0a:00.0"], 2, "compute GPU and VFIO PF share PCI address")
+	assert.Contains(t, state.byPCIAddress["0000:0a:00.0"], "gpu-0-128")
+	assert.Contains(t, state.byPCIAddress["0000:0a:00.0"], "gpu-vfio-0")
+
+	_, hasVF := state.byPCIAddress["0000:0b:00.0"]
+	assert.False(t, hasVF, "VFIO VF should not be indexed (returns empty PCI address)")
+
+	_, hasPartition := state.byPCIAddress["0000:0c:00.0"]
+	assert.False(t, hasPartition, "AmdPartition should not be indexed")
+}
+
 func TestPreparedDevicesGetDevices(t *testing.T) {
 	tests := map[string]struct {
 		preparedDevices PreparedDevices

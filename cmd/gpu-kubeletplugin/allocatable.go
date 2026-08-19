@@ -74,6 +74,22 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 	return ""
 }
 
+// GetSiblingLookupPCIAddress returns the PCI address for finding sibling
+// devices (compute and VFIO on the same physical GPU). GIM VFs return ""
+// because they have different PCI addresses from the compute PF.
+func (d *AllocatableDevice) GetSiblingLookupPCIAddress() string {
+	switch d.Type() {
+	case consts.AmdGpuDeviceType:
+		return d.AmdGpu.PCIAddress
+	case consts.VfioDeviceType:
+		if d.Vfio.IsVF {
+			return ""
+		}
+		return d.Vfio.PCIAddress
+	}
+	return ""
+}
+
 // GetDevice returns the DRA Device representation for Kubernetes
 func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {
