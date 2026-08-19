@@ -383,7 +383,7 @@ func TestReconcileDiscardsCheckpointFromDifferentBoot(t *testing.T) {
 }
 
 // A checkpointed device that is no longer in the allocatable inventory (removed or
-// skipped by discovery this boot) must be quarantined, not rebuilt from the checkpoint.
+// skipped by discovery this boot) must be skipped, not rebuilt from the checkpoint.
 func TestReconcileSkipsDeviceNotAllocatable(t *testing.T) {
 	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
 	s := testDeviceState(t, cache, cm) // gpu-0-128 is deliberately absent from allocatable
@@ -471,7 +471,7 @@ func TestReconcileRebuildsWithoutConfirmedRebootWhenNodesMatch(t *testing.T) {
 }
 
 // A checkpoint holding one good and one bad claim must rebuild the good claim's spec
-// and quarantine the bad one, proving the reconcile loop is selective rather than
+// and skip the bad one, proving the reconcile loop is selective rather than
 // all-or-nothing (and not vacuously passing because nothing is ever written).
 func TestReconcileQuarantinesBadClaimButRebuildsGood(t *testing.T) {
 	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
@@ -479,7 +479,7 @@ func TestReconcileQuarantinesBadClaimButRebuildsGood(t *testing.T) {
 
 	checkpoint := newCheckpoint()
 	checkpoint.V1.PreparedClaims["good"] = kfdDevices()
-	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil} // malformed -> quarantined
+	checkpoint.V1.PreparedClaims["bad"] = PreparedDevices{nil} // malformed -> skipped
 	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
 
 	require.NoError(t, s.reconcileCDISpecs())

@@ -95,13 +95,13 @@ type DeviceState struct {
 // checksum and an older binary that does not know about it stays rollback-safe.
 const bootEpochFile = "boot-epoch"
 
-// readBootID returns the current boot identifier from procfs. It changes on every
-// node reboot. An unreadable value is returned empty, which the reconcile guard
-// treats as untrusted and fails closed onto re-preparation.
+// readBootID returns the current boot identifier from procfs. It changes on every node
+// reboot. An unreadable value is returned empty, which cannot confirm a reboot, so the
+// checkpoint is kept and verified against the host rather than discarded.
 func readBootID() string {
 	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
-		klog.Warningf("unable to read boot id (%v); checkpoint recovery will fail closed", err)
+		klog.Warningf("unable to read boot id (%v); a reboot cannot be confirmed, so the checkpoint will be verified instead of discarded", err)
 		return ""
 	}
 	return strings.TrimSpace(string(data))
@@ -122,6 +122,12 @@ func (s *DeviceState) readStoredEpoch() string {
 }
 
 func (s *DeviceState) writeEpoch(id string) error {
+	if id == "" {
+		// Recording an empty epoch would destroy the only value a later reboot can be
+		// detected against, so keep whatever is already stored.
+		klog.Warning("boot id unavailable; leaving the recorded boot epoch unchanged")
+		return nil
+	}
 	if err := os.WriteFile(s.epochPath(), []byte(id), 0600); err != nil {
 		return fmt.Errorf("unable to record boot epoch: %w", err)
 	}
@@ -331,8 +337,9 @@ func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
 // than replayed, since a reboot also clears kubelet's prepared state. Otherwise the
 // specs are rebuilt when the device nodes still match, and startup fails when they do
 // not, because deleting them while kubelet still holds the claim would strand it. A
-// corrupt or no-longer-allocatable entry is quarantined; a CDI write error fails
-// startup, because the kubelet may not re-Prepare an already-prepared claim.
+// corrupt or no-longer-allocatable entry is skipped, leaving it as unusable as it
+// already was; a CDI write error fails startup, because the kubelet may not re-Prepare
+// an already-prepared claim.
 func (s *DeviceState) reconcileCDISpecs() error {
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
@@ -371,8 +378,12 @@ func (s *DeviceState) reconcileCDISpecs() error {
 
 	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
 		if err := s.validateCheckpointedClaim(claimUID, preparedDevices); err != nil {
-			// Corrupt or no-longer-allocatable entry: quarantine it and keep going,
-			// rather than crash the plugin on a single bad claim.
+			// Skipped, not fatal. Failing startup here would take the whole node's GPUs
+			// down for one bad entry, and an on-demand VFIO conversion reaches this
+			// legitimately: the device comes back under its VFIO name, so the
+			// checkpointed name is no longer allocatable. Recovering that claim needs
+			// the type-aware, stable identity tracked in #83 and #86; until then the
+			// claim stays unusable and this only avoids making it worse.
 			klog.Warningf("skipping unrecoverable checkpoint entry for claim %s: %v", claimUID, err)
 			continue
 		}
