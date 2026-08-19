@@ -46,23 +46,32 @@ func TestAddAllocatableDeviceRejectsCollision(t *testing.T) {
 	}
 }
 
-// Every mode other than spx and the empty type is a partition. tpx matters most: it is real
-// on MI300A, so treating it as unknown drops those partitions entirely.
-func TestIsComputePartition(t *testing.T) {
+// Each of the modes AMD defines is classified, and anything else is an error rather than
+// a guess: publishing a mode the driver cannot interpret would turn unknown hardware
+// state into an allocatable device, and skipping it would lose the GPU silently.
+func TestClassifyComputePartition(t *testing.T) {
 	for _, tc := range []struct {
-		in   string
-		want bool
+		in        string
+		partition bool
+		wantErr   bool
 	}{
-		{"dpx", true},
-		{"tpx", true}, // valid on MI300A
-		{"qpx", true},
-		{"cpx", true},
-		{"spx", false}, // the single-partition mode, classified as a full GPU
-		{"", false},    // no partitioning support
-		{"zpx", true},  // a mode added after this driver was written stays a partition
+		{in: "dpx", partition: true},
+		{in: "tpx", partition: true}, // valid on MI300A
+		{in: "qpx", partition: true},
+		{in: "cpx", partition: true},
+		{in: "spx"}, // the single-partition mode is a whole GPU
+		{in: ""},    // no partitioning support
+		{in: "invalid", wantErr: true},
+		{in: "unknown", wantErr: true},
+		{in: "zpx", wantErr: true},
 	} {
-		if got := isComputePartition(tc.in); got != tc.want {
-			t.Errorf("isComputePartition(%q) = %v, want %v", tc.in, got, tc.want)
+		got, err := classifyComputePartition(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("classifyComputePartition(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+			continue
+		}
+		if got != tc.partition {
+			t.Errorf("classifyComputePartition(%q) = %v, want %v", tc.in, got, tc.partition)
 		}
 	}
 }

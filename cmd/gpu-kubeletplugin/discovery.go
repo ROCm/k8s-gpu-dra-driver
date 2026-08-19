@@ -101,11 +101,20 @@ func addAllocatableDevice(devices AllocatableDevices, device *AllocatableDevice)
 	return nil
 }
 
-// isComputePartition reports whether t names a partition rather than a whole GPU. An empty
-// type means no partitioning support, and spx is the single-partition mode. Every other
-// mode is a partition, including ones newer than this driver, such as tpx.
-func isComputePartition(t string) bool {
-	return t != "" && t != consts.ComputePartitionSPX
+// classifyComputePartition reports whether t names a partition rather than a whole GPU.
+// An empty type means no partitioning support and spx is the single-partition mode, so
+// both are whole GPUs. A mode this driver does not know is an error: publishing it would
+// turn hardware state the driver cannot interpret into a schedulable device.
+func classifyComputePartition(t string) (bool, error) {
+	switch t {
+	case "", consts.ComputePartitionSPX:
+		return false, nil
+	case consts.ComputePartitionDPX, consts.ComputePartitionTPX,
+		consts.ComputePartitionQPX, consts.ComputePartitionCPX:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported compute partition mode %q", t)
+	}
 }
 
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
@@ -127,7 +136,12 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		// Extract common topology information
 		simdUnits, computeUnits := extractTopologyInfo(gpuInfoMap)
 
-		if !isComputePartition(computePartitionType) {
+		isPartition, err := classifyComputePartition(computePartitionType)
+		if err != nil {
+			return nil, fmt.Errorf("device %s: %w", pciAddr, err)
+		}
+
+		if !isPartition {
 			// This is a full AMD GPU (either explicitly "spx" or no partition support)
 			partitionProfile := ""
 			if computePartitionType != "" && memoryPartitionType != "" {

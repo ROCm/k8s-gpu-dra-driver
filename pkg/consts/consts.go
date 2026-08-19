@@ -54,6 +54,7 @@ const (
 const (
 	ComputePartitionSPX = "spx"
 	ComputePartitionDPX = "dpx"
+	ComputePartitionTPX = "tpx"
 	ComputePartitionQPX = "qpx"
 	ComputePartitionCPX = "cpx"
 )
