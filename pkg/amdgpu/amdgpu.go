@@ -199,8 +199,16 @@ func SetDiscoveryRetry(attempts int, backoff time.Duration) (restore func()) {
 // since discovery runs once and would otherwise leave the GPU missing for the lifetime of
 // the process. A device still incomplete after that is skipped as before.
 func GetAMDGPUs() map[string]map[string]interface{} {
+	seen := 0
 	for attempt := 1; ; attempt++ {
 		devices, skipped := discoverAMDGPUs()
+		// Fewer devices than a previous attempt saw means the tree changed underneath
+		// this pass, so it is no more complete than the one that skipped something.
+		if len(devices) < seen {
+			glog.Warningf("discovery saw %d device(s) after a previous attempt saw %d; treating the pass as incomplete", len(devices), seen)
+			skipped++
+		}
+		seen = max(seen, len(devices))
 		if skipped == 0 {
 			return devices
 		}
@@ -217,8 +225,10 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 // it skipped for a condition that may still resolve.
 func discoverAMDGPUs() (map[string]map[string]interface{}, int) {
 	if _, err := os.Stat(AMDGPUDriversPath); err != nil {
+		// Retryable: the module may be reloading. On a node with no AMD GPU at all
+		// this costs one bounded backoff at startup and still returns empty.
 		glog.Warningf("amdgpu driver unavailable: %s", err)
-		return make(map[string]map[string]interface{}), 0
+		return make(map[string]map[string]interface{}), 1
 	}
 
 	//ex: /sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0
@@ -252,6 +262,15 @@ func discoverAMDGPUs() (map[string]map[string]interface{}, int) {
 		memoryPartitionType, err := readPartitionMode(memoryPartitionFile)
 		if err != nil {
 			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			skipped++
+			continue
+		}
+
+		// The two files appear and disappear together on a partitioned GPU. Exactly one
+		// of them means the read caught the tree mid-change, and reading it as "no
+		// partitioning" would publish a partitioned GPU whole.
+		if (computePartitionType == "") != (memoryPartitionType == "") {
+			glog.Warningf("Skipping device %s: compute partition %q and memory partition %q are not both present", pciAddrOf(path), computePartitionType, memoryPartitionType)
 			skipped++
 			continue
 		}

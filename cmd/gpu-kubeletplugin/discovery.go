@@ -117,6 +117,19 @@ func classifyComputePartition(t string) (bool, error) {
 	}
 }
 
+// classifyMemoryPartition rejects a memory mode the driver cannot interpret. The kernel
+// reports UNKNOWN when it cannot read the mode, and pairing that with a known compute
+// mode would publish a profile like "dpx_unknown" for the scheduler to match on.
+func classifyMemoryPartition(t string) error {
+	switch t {
+	case consts.MemoryPartitionNPS1, consts.MemoryPartitionNPS2, consts.MemoryPartitionNPS3,
+		consts.MemoryPartitionNPS4, consts.MemoryPartitionNPS6, consts.MemoryPartitionNPS8:
+		return nil
+	default:
+		return fmt.Errorf("unsupported memory partition mode %q", t)
+	}
+}
+
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	alldevices := make(AllocatableDevices)
 	allAMDGPUs := amdgpu.GetAMDGPUs()
@@ -178,9 +191,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		} else {
 			// This is a partition - create both parent GPU info and partition info.
 			// An empty memory type gives a truncated "dpx_" profile, so skip it instead.
-			if memoryPartitionType == "" {
-				klog.Warningf("Skipping partition for device %s: compute type %q has no memory partition type", pciAddr, computePartitionType)
-				continue
+			if err := classifyMemoryPartition(memoryPartitionType); err != nil {
+				return nil, fmt.Errorf("device %s: %w", pciAddr, err)
 			}
 
 			// Create parent GPU info

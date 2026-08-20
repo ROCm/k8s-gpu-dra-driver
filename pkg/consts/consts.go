@@ -59,5 +59,15 @@ const (
 	ComputePartitionCPX = "cpx"
 )
 
+// Memory partition modes
+const (
+	MemoryPartitionNPS1 = "nps1"
+	MemoryPartitionNPS2 = "nps2"
+	MemoryPartitionNPS3 = "nps3"
+	MemoryPartitionNPS4 = "nps4"
+	MemoryPartitionNPS6 = "nps6"
+	MemoryPartitionNPS8 = "nps8"
+)
+
 // Default partition profile for non-partitioned GPUs
 const DefaultPartitionProfile = "spx_nps1"

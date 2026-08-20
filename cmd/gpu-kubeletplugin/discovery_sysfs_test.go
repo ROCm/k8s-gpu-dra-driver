@@ -249,3 +249,57 @@ func TestEnumerateWithoutRetryLosesLateDRMEntries(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, devices, "a single attempt cannot see entries that appear later")
 }
+
+// Only one of the two partition files present is a partial read of a changing tree, not
+// a GPU without partitioning support, so it must be retried rather than published whole.
+func TestEnumerateRetriesOnHalfPresentPartitionState(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)()
+	for _, missing := range []string{"current_memory_partition", "current_compute_partition"} {
+		t.Run("missing "+missing, func(t *testing.T) {
+			fakeSysfs(t, []fakeGPU{
+				{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "dpx", memoryMode: "nps1", bus: 0x19, dev: 0},
+			})
+			require.NoError(t, os.Remove(filepath.Join(amdgpu.AMDGPUDriversPath, "pci:amdgpu", "0000:19:00.0", missing)))
+
+			devices, err := enumerateAllPossibleDevices()
+			require.NoError(t, err)
+			require.Empty(t, devices, "a half-present partition state must not be published")
+		})
+	}
+}
+
+// A memory mode the driver cannot interpret must not be paired with a known compute mode
+// into a profile the scheduler can select on.
+func TestEnumerateRejectsUnknownMemoryMode(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)()
+	for _, mode := range []string{"unknown", "garbage"} {
+		t.Run(mode, func(t *testing.T) {
+			fakeSysfs(t, []fakeGPU{
+				{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "dpx", memoryMode: mode, bus: 0x19, dev: 0},
+			})
+			_, err := enumerateAllPossibleDevices()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), mode)
+		})
+	}
+}
+
+// The amdgpu sysfs root disappearing during a driver reload must stay retryable instead
+// of reading as a completed discovery that happens to have found nothing.
+func TestEnumerateDoesNotAcceptAVanishedDriverRoot(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(20, 20*time.Millisecond)()
+	fakeSysfs(t, []fakeGPU{
+		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "spx", memoryMode: "nps1", bus: 0x19, dev: 0},
+	})
+	root := amdgpu.AMDGPUDriversPath
+	stash := root + ".away"
+	require.NoError(t, os.Rename(root, stash))
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = os.Rename(stash, root)
+	}()
+
+	devices, err := enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	require.Contains(t, devices, "gpu-0-128", "the GPU must be found once the driver root is back")
+}
