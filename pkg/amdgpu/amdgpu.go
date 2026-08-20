@@ -194,29 +194,75 @@ func SetDiscoveryRetry(attempts int, backoff time.Duration) (restore func()) {
 	return func() { discoveryAttempts, discoveryBackoff = prevAttempts, prevBackoff }
 }
 
+// readStablePartitionPair returns the two partition modes only if they held still while
+// being read. They come from separate files, so a repartition in between yields a pair
+// that never existed on the hardware, such as spx from before the change with nps4 from
+// after it. read is a parameter so a test can change a mode between the two passes.
+func readStablePartitionPair(read func(string) (string, error), computeFile, memoryFile string) (string, string, error) {
+	compute, err := read(computeFile)
+	if err != nil {
+		return "", "", err
+	}
+	memory, err := read(memoryFile)
+	if err != nil {
+		return "", "", err
+	}
+
+	recheckCompute, err := read(computeFile)
+	if err != nil {
+		return "", "", err
+	}
+	recheckMemory, err := read(memoryFile)
+	if err != nil {
+		return "", "", err
+	}
+	if recheckCompute != compute || recheckMemory != memory {
+		return "", "", fmt.Errorf("partition mode changed during discovery (compute %q->%q, memory %q->%q)",
+			compute, recheckCompute, memory, recheckMemory)
+	}
+	return compute, memory, nil
+}
+
+// discoveryFingerprint identifies which devices a pass found rather than how many. Two
+// passes can report the same count with one GPU replaced by another, or with the same
+// GPUs under different card, render or partition mappings.
+func discoveryFingerprint(devices map[string]map[string]interface{}) string {
+	names := make([]string, 0, len(devices))
+	for name := range devices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	for _, name := range names {
+		d := devices[name]
+		fmt.Fprintf(&b, "%s|%v|%v|%v|%v|%v|%v|%v;", name, d["pciAddr"], d["card"], d["renderD"],
+			d["kfdID"], d["nodeId"], d["computePartitionType"], d["memoryPartitionType"])
+	}
+	return b.String()
+}
+
 // GetAMDGPUs returns the AMD GPUs on the node, keyed by part of the PCI address. A device
 // bound to amdgpu whose DRM or KFD entries have not appeared yet is retried a few times,
 // since discovery runs once and would otherwise leave the GPU missing for the lifetime of
-// the process. A device still incomplete after that is skipped as before.
+// the process. Publishing waits for two consecutive passes that skip nothing and describe
+// the same devices, which costs one backoff at startup and is what rules out a pass taken
+// across a driver reload or a repartition. A pass still unsettled after that is published
+// as before, since a plugin that never starts is worse than one that starts incomplete.
 func GetAMDGPUs() map[string]map[string]interface{} {
-	seen := 0
+	previous, havePrevious := "", false
 	for attempt := 1; ; attempt++ {
 		devices, skipped := discoverAMDGPUs()
-		// Fewer devices than a previous attempt saw means the tree changed underneath
-		// this pass, so it is no more complete than the one that skipped something.
-		if len(devices) < seen {
-			glog.Warningf("discovery saw %d device(s) after a previous attempt saw %d; treating the pass as incomplete", len(devices), seen)
-			skipped++
-		}
-		seen = max(seen, len(devices))
-		if skipped == 0 {
+		current := discoveryFingerprint(devices)
+		if skipped == 0 && havePrevious && current == previous {
 			return devices
 		}
+		previous, havePrevious = current, true
 		if attempt >= discoveryAttempts {
-			glog.Warningf("%d device(s) still had incomplete sysfs entries after %d attempts; they are not published until the plugin restarts", skipped, attempt)
+			glog.Warningf("discovery had not settled after %d attempts (%d device(s) incomplete); publishing %d device(s) until the plugin restarts", attempt, skipped, len(devices))
 			return devices
 		}
-		glog.Infof("%d device(s) have incomplete sysfs entries; retrying discovery (%d/%d)", skipped, attempt, discoveryAttempts)
+		glog.Infof("discovery not settled (%d device(s) incomplete); retrying (%d/%d)", skipped, attempt, discoveryAttempts)
 		time.Sleep(discoveryBackoff)
 	}
 }
@@ -250,16 +296,7 @@ func discoverAMDGPUs() (map[string]map[string]interface{}, int) {
 
 		var numaNode int
 
-		// Read the compute partition
-		computePartitionType, err := readPartitionMode(computePartitionFile)
-		if err != nil {
-			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
-			skipped++
-			continue
-		}
-
-		// Read the memory partition
-		memoryPartitionType, err := readPartitionMode(memoryPartitionFile)
+		computePartitionType, memoryPartitionType, err := readStablePartitionPair(readPartitionMode, computePartitionFile, memoryPartitionFile)
 		if err != nil {
 			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
 			skipped++
