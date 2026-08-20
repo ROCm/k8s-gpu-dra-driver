@@ -154,6 +154,14 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			return nil, fmt.Errorf("device %s: %w", pciAddr, err)
 		}
 
+		// Both paths concatenate this into the profile, so neither may carry a mode the
+		// driver cannot interpret. Empty means the kernel exposes no memory partitioning.
+		if memoryPartitionType != "" {
+			if err := classifyMemoryPartition(memoryPartitionType); err != nil {
+				return nil, fmt.Errorf("device %s: %w", pciAddr, err)
+			}
+		}
+
 		if !isPartition {
 			// This is a full AMD GPU (either explicitly "spx" or no partition support)
 			partitionProfile := ""
@@ -191,8 +199,8 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		} else {
 			// This is a partition - create both parent GPU info and partition info.
 			// An empty memory type gives a truncated "dpx_" profile, so skip it instead.
-			if err := classifyMemoryPartition(memoryPartitionType); err != nil {
-				return nil, fmt.Errorf("device %s: %w", pciAddr, err)
+			if memoryPartitionType == "" {
+				return nil, fmt.Errorf("device %s: compute partition %q has no memory partition mode", pciAddr, computePartitionType)
 			}
 
 			// Create parent GPU info

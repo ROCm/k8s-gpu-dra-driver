@@ -284,6 +284,35 @@ func TestEnumerateRejectsUnknownMemoryMode(t *testing.T) {
 	}
 }
 
+// The whole-GPU path concatenates the memory mode into the profile as well, so a mode the
+// driver cannot interpret has to be rejected there too rather than published as spx_<mode>.
+func TestEnumerateRejectsUnknownMemoryModeOnWholeGPU(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)()
+	for _, mode := range []string{"unknown", "garbage", "nps5"} {
+		t.Run(mode, func(t *testing.T) {
+			fakeSysfs(t, []fakeGPU{
+				{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "spx", memoryMode: mode, bus: 0x19, dev: 0},
+			})
+			_, err := enumerateAllPossibleDevices()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), mode)
+		})
+	}
+}
+
+// A GPU with no partitioning support reports neither mode, and an empty memory mode is the
+// kernel saying so rather than a value to validate. It must still be published.
+func TestEnumeratePublishesGPUWithoutPartitionSupport(t *testing.T) {
+	defer amdgpu.SetDiscoveryRetry(1, 0)()
+	fakeSysfs(t, []fakeGPU{
+		{pciAddr: "0000:19:00.0", card: 0, render: 128, computeMode: "", memoryMode: "", bus: 0x19, dev: 0},
+	})
+
+	devices, err := enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	require.Len(t, devices, 1, "a GPU that does not support partitioning must still be published")
+}
+
 // The amdgpu sysfs root disappearing during a driver reload must stay retryable instead
 // of reading as a completed discovery that happens to have found nothing.
 func TestEnumerateDoesNotAcceptAVanishedDriverRoot(t *testing.T) {
