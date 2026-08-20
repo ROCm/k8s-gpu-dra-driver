@@ -388,6 +388,30 @@ func TestReconcileSkipsDeviceNotAllocatable(t *testing.T) {
 	require.Empty(t, after, "a device absent from the current inventory must not be rebuilt")
 }
 
+// Absence from the inventory is not proof the claim is dead: discovery can still be
+// incomplete, and an on-demand VFIO conversion returns the device under another name.
+// A spec that is already on disk keeps working, so reconcile must leave it alone.
+func TestReconcileKeepsExistingSpecWhenDeviceAbsentFromInventory(t *testing.T) {
+	cdiRoot, cache, cm := newCacheAndCheckpointer(t)
+	s := testDeviceState(t, cache, cm) // gpu-0-128 is deliberately absent from allocatable
+
+	const claimUID = "claim-uid-1"
+	require.NoError(t, s.cdi.CreateClaimSpecFile(claimUID, kfdDevices()))
+	before, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.NotEmpty(t, before, "the spec under test has to exist before reconcile runs")
+
+	checkpoint := newCheckpoint()
+	checkpoint.V1.PreparedClaims[claimUID] = kfdDevices()
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint))
+
+	require.NoError(t, s.reconcileCDISpecs())
+
+	after, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	require.Len(t, after, len(before), "an absent device must not cost the claim a spec that still resolves")
+}
+
 // A checkpoint with a nested nil device node passes the wrapper checks; reconcile
 // must reject it rather than dereference it into a startup panic.
 func TestReconcileRejectsNestedNullDeviceNode(t *testing.T) {

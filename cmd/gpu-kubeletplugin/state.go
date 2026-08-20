@@ -210,6 +210,13 @@ func (s *DeviceState) validateCheckpointedClaim(claimUID string, preparedDevices
 	if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
 		return err
 	}
+	return s.claimDevicesAllocatable(claimUID, preparedDevices)
+}
+
+// claimDevicesAllocatable reports whether discovery currently offers every device the
+// claim was prepared with. Absence is not proof the claim is dead: discovery can be
+// incomplete, and an on-demand VFIO conversion returns the device under another name.
+func (s *DeviceState) claimDevicesAllocatable(claimUID string, preparedDevices PreparedDevices) error {
 	for _, pd := range preparedDevices {
 		if _, ok := s.allocatable[pd.DeviceName]; !ok {
 			return fmt.Errorf("checkpointed device %s for claim %s is not currently allocatable", pd.DeviceName, claimUID)
@@ -280,13 +287,11 @@ func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
 
 // reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
 // plugin restart, which can clear the (often tmpfs) spec directory while the
-// checkpoint survives. A checkpoint from a confirmed different boot is discarded rather
-// than replayed, since a reboot also clears kubelet's prepared state. Otherwise the
-// specs are rebuilt when the device nodes still match, and startup fails when they do
-// not, because deleting them while kubelet still holds the claim would strand it. A
-// corrupt or no-longer-allocatable entry is skipped, leaving it as unusable as it
-// already was; a CDI write error fails startup, because the kubelet may not re-Prepare
-// an already-prepared claim.
+// checkpoint survives. Startup fails when a checkpointed device node no longer resolves,
+// because deleting state kubelet still holds prepared would strand the claim. A malformed
+// entry loses its stale spec; one whose device is merely absent from the inventory keeps
+// it, since absence can be incomplete discovery or an on-demand VFIO rename. A CDI write
+// error fails startup, because the kubelet may not re-Prepare an already-prepared claim.
 func (s *DeviceState) reconcileCDISpecs() error {
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
@@ -305,20 +310,19 @@ func (s *DeviceState) reconcileCDISpecs() error {
 	}
 
 	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
-		if err := s.validateCheckpointedClaim(claimUID, preparedDevices); err != nil {
-			// Skipped, not fatal. Failing startup here would take the whole node's GPUs
-			// down for one bad entry, and an on-demand VFIO conversion reaches this
-			// legitimately: the device comes back under its VFIO name, so the
-			// checkpointed name is no longer allocatable. Recovering that claim needs
-			// the type-aware, stable identity tracked in #83 and #86; until then the
-			// claim stays unusable and this only avoids making it worse.
-			klog.Warningf("skipping unrecoverable checkpoint entry for claim %s: %v", claimUID, err)
-			// Leaving the old spec behind on a persistent spec directory would let the
-			// runtime keep resolving the claim to device nodes that may now belong to
-			// another GPU, so remove it rather than only declining to rebuild it.
+		if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+			// Content this malformed can never be rebuilt into a spec, so drop the
+			// authorization the old one still grants.
+			klog.Warningf("removing the spec for malformed checkpoint entry %s: %v", claimUID, err)
 			if rmErr := s.cdi.DeleteClaimSpecFile(claimUID); rmErr != nil {
-				return fmt.Errorf("unable to remove the spec for unrecoverable claim %s: %w", claimUID, rmErr)
+				return fmt.Errorf("unable to remove the spec for malformed claim %s: %w", claimUID, rmErr)
 			}
+			continue
+		}
+		if err := s.claimDevicesAllocatable(claimUID, preparedDevices); err != nil {
+			// deviceNodesCurrent already proved the nodes resolve, so an existing spec is
+			// no less valid than before this start; an on-demand VFIO device lands here.
+			klog.Warningf("leaving the spec for claim %s in place: %v", claimUID, err)
 			continue
 		}
 		if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
