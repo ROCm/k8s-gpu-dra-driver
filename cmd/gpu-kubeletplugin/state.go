@@ -33,13 +33,11 @@ limitations under the License.
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -53,7 +51,6 @@ import (
 	klog "k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
-	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager/checksum"
 
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
@@ -88,116 +85,6 @@ type DeviceState struct {
 	checkpointManager    checkpointmanager.CheckpointManager
 	vfioManager          *VfioPciManager
 	claimVfioConversions map[string]*AmdGpuInfo
-	pluginPath           string
-	bootID               string
-}
-
-// bootEpochFile records the boot the checkpoint's claims were prepared under. It
-// lives next to the checkpoint but outside it, so it does not change the checkpoint
-// checksum and an older binary that does not know about it stays rollback-safe.
-const bootEpochFile = "boot-epoch"
-
-// readBootID returns the current boot identifier from procfs. It changes on every node
-// reboot. An unreadable value is returned empty, which cannot confirm a reboot, so the
-// checkpoint is kept and verified against the host rather than discarded.
-func readBootID() string {
-	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		klog.Warningf("unable to read boot id (%v); a reboot cannot be confirmed, so the checkpoint will be verified instead of discarded", err)
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func (s *DeviceState) epochPath() string {
-	return filepath.Join(s.pluginPath, bootEpochFile)
-}
-
-// epochRecord ties a boot id to the checkpoint it was written for. The checksum is what
-// separates "we rebooted and nothing has written the checkpoint since" from "some other
-// binary wrote it after this was recorded", and only the first is safe to discard.
-type epochRecord struct {
-	BootID     string            `json:"bootID"`
-	Checkpoint checksum.Checksum `json:"checkpoint"`
-}
-
-// readStoredEpoch returns the recorded epoch and whether it can be trusted. Absent,
-// unreadable, and unparsable are all untrusted, which keeps the checkpoint rather than
-// discarding it. The pre-record format was a bare boot id, so it also reads as untrusted.
-func (s *DeviceState) readStoredEpoch() (epochRecord, bool) {
-	data, err := os.ReadFile(s.epochPath())
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			klog.Warningf("unable to read the boot epoch (%v); treating it as unknown", err)
-		}
-		return epochRecord{}, false
-	}
-	var rec epochRecord
-	if err := json.Unmarshal(data, &rec); err != nil || rec.BootID == "" {
-		klog.Warningf("boot epoch at %s is not a usable record; treating it as unknown", s.epochPath())
-		return epochRecord{}, false
-	}
-	return rec, true
-}
-
-// writeEpoch records the boot and checkpoint the plugin is running against. It replaces
-// the file atomically, since a half-written record would read as a different boot and
-// authorize discarding claims.
-func (s *DeviceState) writeEpoch(ck checksum.Checksum) error {
-	if s.bootID == "" {
-		// Recording an empty boot id would lose the only value a later reboot can be
-		// detected against, so keep whatever is already stored.
-		klog.Warning("boot id unavailable; leaving the recorded boot epoch unchanged")
-		return nil
-	}
-	data, err := json.Marshal(epochRecord{BootID: s.bootID, Checkpoint: ck})
-	if err != nil {
-		return fmt.Errorf("unable to encode boot epoch: %w", err)
-	}
-	tmp := s.epochPath() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("unable to record boot epoch: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return fmt.Errorf("unable to record boot epoch: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("unable to record boot epoch: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("unable to record boot epoch: %w", err)
-	}
-	return os.Rename(tmp, s.epochPath())
-}
-
-// saveCheckpoint writes the checkpoint and the epoch describing it together, so the two
-// never drift apart. CreateCheckpoint fills in the checksum recorded here.
-func (s *DeviceState) saveCheckpoint(cp *Checkpoint) error {
-	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, cp); err != nil {
-		return err
-	}
-	return s.writeEpoch(cp.Checksum)
-}
-
-// discardCheckpoint removes any CDI spec files for the given claims and then replaces
-// the on-disk checkpoint with an empty one. Used when the recorded boot epoch no longer
-// matches: the checkpointed device nodes may now point at different hardware, so the
-// specs must not survive on a persistent spec directory where the container runtime
-// could still resolve a claim against them. RemoveSpec tolerates an already-absent
-// file, which is the common tmpfs case.
-func (s *DeviceState) discardCheckpoint(claims PreparedClaims) error {
-	for claimUID := range claims {
-		if err := s.cdi.DeleteClaimSpecFile(claimUID); err != nil {
-			return fmt.Errorf("unable to remove stale CDI spec for claim %s: %w", claimUID, err)
-		}
-	}
-	if err := s.saveCheckpoint(newCheckpoint()); err != nil {
-		return fmt.Errorf("unable to discard stale checkpoint: %w", err)
-	}
-	return nil
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -241,8 +128,6 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		allocatable:       allocatable,
 		vfioManager:       vfioMgr,
 		checkpointManager: checkpointManager,
-		pluginPath:        config.DriverPluginPath(),
-		bootID:            readBootID(),
 	}
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
@@ -255,20 +140,11 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 			if err := state.reconcileCDISpecs(); err != nil {
 				return nil, fmt.Errorf("unable to reconcile CDI spec files from checkpoint: %v", err)
 			}
-			// Rebind the epoch to whatever the checkpoint is now, after reconcile has
-			// read the previous one and possibly discarded.
-			current := newCheckpoint()
-			if err := state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, current); err != nil {
-				return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
-			}
-			if err := state.writeEpoch(current.Checksum); err != nil {
-				return nil, err
-			}
 			return state, nil
 		}
 	}
 
-	if err := state.saveCheckpoint(newCheckpoint()); err != nil {
+	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
@@ -359,14 +235,13 @@ func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedD
 	return nil
 }
 
-// deviceNodesCurrent reports whether every checkpointed device node still resolves to
-// the major/minor it was prepared with. The boot epoch catches a reboot; this catches a
-// same-boot change that moves a node's numbers without changing the boot id, for example
-// /dev/kfd's dynamically allocated major after a KFD reload, or a node whose path no
-// longer exists. It does NOT catch a node that keeps the same numbers but now backs a
-// different physical GPU (the DRM card/render minors are stable per path), which needs
-// the stable identity tracked in #83. Malformed entries (nil device, nil wrapper, nil
-// node) are left to validateCheckpointedClaim; this skips them.
+// deviceNodesCurrent reports whether every checkpointed device node still resolves on the
+// host. It is the only check that the checkpoint still describes this machine, so a node
+// that cannot be stat'd, changed type, or moved to different numbers fails it. CDI lets a
+// node carry only a path, with the host path defaulting to Path and the numbers resolved
+// by the runtime, and the VFIO path emits exactly that, so those are verified by path
+// rather than skipped. It does NOT catch a node that keeps its numbers but now backs a
+// different GPU, which needs the stable identity tracked in #83.
 func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
 	for _, preparedDevices := range claims {
 		for _, pd := range preparedDevices {
@@ -374,12 +249,27 @@ func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
 				continue
 			}
 			for _, n := range pd.ContainerEdits.ContainerEdits.DeviceNodes {
-				if n == nil || n.HostPath == "" || (n.Major == 0 && n.Minor == 0) {
+				if n == nil {
 					continue
 				}
-				major, minor, _, _, err := getDeviceAttrs(n.HostPath)
-				if err != nil || major != n.Major || minor != n.Minor {
-					klog.Warningf("checkpointed device node %s resolves to %d:%d now, recorded %d:%d (err=%v); the checkpoint is stale", n.HostPath, major, minor, n.Major, n.Minor, err)
+				hostPath := n.HostPath
+				if hostPath == "" {
+					hostPath = n.Path
+				}
+				if hostPath == "" {
+					continue
+				}
+				major, minor, devType, _, err := getDeviceAttrs(hostPath)
+				if err != nil {
+					klog.Warningf("checkpointed device node %s no longer resolves (%v); the checkpoint is stale", hostPath, err)
+					return false
+				}
+				if n.Type != "" && n.Type != devType {
+					klog.Warningf("checkpointed device node %s is type %q now, recorded %q; the checkpoint is stale", hostPath, devType, n.Type)
+					return false
+				}
+				if (n.Major != 0 || n.Minor != 0) && (major != n.Major || minor != n.Minor) {
+					klog.Warningf("checkpointed device node %s resolves to %d:%d now, recorded %d:%d; the checkpoint is stale", hostPath, major, minor, n.Major, n.Minor)
 					return false
 				}
 			}
@@ -406,39 +296,12 @@ func (s *DeviceState) reconcileCDISpecs() error {
 		return fmt.Errorf("checkpoint has no v1 payload")
 	}
 
-	// Discarding the checkpoint deletes the CDI spec files that kubelet's cached CDI IDs
-	// resolve against. That is only safe when kubelet has also dropped its prepared-claim
-	// state, which happens across a real reboot. A reboot changes the boot id, so only a
-	// recorded epoch that is present and differs from the current boot proves one. A
-	// missing or unreadable epoch does not: the first restart after this field was added
-	// has none, and a plugin-only upgrade keeps the same kubelet running. In those cases
-	// kubelet still considers the claims prepared and will not call Prepare again, so
-	// discarding here would strand them with no spec to resolve. Cross-boot and
-	// cross-reload device identity still need the stable name tracked in #83.
-	stored, trusted := s.readStoredEpoch()
-	switch {
-	case !trusted || s.bootID == "":
-		// Nothing to compare against, so the checkpoint is kept and verified below.
-	case stored.Checkpoint != checkpoint.Checksum:
-		// The checkpoint was written after this epoch was recorded, so it describes
-		// claims some other binary prepared. A reboot cannot be attributed to them, and
-		// discarding would drop claims kubelet may hold from that later Prepare.
-		klog.Warningf("boot epoch describes checkpoint %d but the checkpoint is now %d; keeping it and verifying instead of discarding", stored.Checkpoint, checkpoint.Checksum)
-	case stored.BootID != s.bootID:
-		klog.Warningf("checkpoint boot epoch %q differs from current boot %q; discarding %d checkpointed claim(s) without replay", stored.BootID, s.bootID, len(checkpoint.V1.PreparedClaims))
-		return s.discardCheckpoint(checkpoint.V1.PreparedClaims)
-	}
-
-	// Same boot, or a boot that cannot be confirmed. kubelet has not necessarily
-	// restarted, so its prepared claims must be preserved. A same-boot driver reload can
-	// still renumber a device node (for example /dev/kfd's major) without changing the
-	// boot id: rebuild the specs when every checkpointed node still resolves to its
-	// recorded numbers, and fail startup when one does not, rather than discarding and
-	// registering healthy while kubelet keeps the claim. Rebuilding a spec that points at
-	// the wrong numbers, or silently dropping a claim kubelet still holds, are both worse
-	// than refusing to start and letting an operator drain or restart kubelet.
+	// Nothing here removes checkpointed state. kubelet does not call Prepare again for a
+	// claim it still considers prepared, so dropping one would strand it, and telling
+	// this boot apart from the one the claims were prepared in needs the stable identity
+	// in #83. Rebuild what still matches the host and refuse to start otherwise.
 	if !s.deviceNodesCurrent(checkpoint.V1.PreparedClaims) {
-		return fmt.Errorf("checkpointed device nodes no longer match the host and the boot epoch (stored %q, current %q) does not confirm a reboot; refusing to discard %d claim(s) kubelet may still consider prepared", stored.BootID, s.bootID, len(checkpoint.V1.PreparedClaims))
+		return fmt.Errorf("checkpointed device nodes no longer match the host; refusing to serve %d claim(s) kubelet may still consider prepared", len(checkpoint.V1.PreparedClaims))
 	}
 
 	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
@@ -507,7 +370,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	}
 
 	preparedClaims[claimUID] = preparedDevices
-	if err := s.saveCheckpoint(checkpoint); err != nil {
+	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
@@ -547,7 +410,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	}
 
 	delete(preparedClaims, claimUID)
-	if err := s.saveCheckpoint(checkpoint); err != nil {
+	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
