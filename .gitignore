@@ -2,6 +2,11 @@
 .config
 helm-charts-k8s/*.tgz
 
+# Automated CVE-fix workflow scratch (see .github/workflows/cve-fix.md)
+.cve-scan/
+.trivycache/
+cve-unfixable.json
+
 # Binaries built to the repo root. Anchor with a leading slash so the
 # cmd/ source directories of the same name are not ignored.
 /gpu-kubeletplugin
