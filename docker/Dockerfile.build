@@ -15,7 +15,7 @@
 # docker/Dockerfile.devel
 # Minimal dev image for Makefile targets (build, lint, generate, etc.)
 
-ARG GOLANG_VERSION=1.26.5
+ARG GOLANG_VERSION=1.26.7
 FROM golang:${GOLANG_VERSION}-bookworm
 
 # Basic build tooling; keep it small
