@@ -29,7 +29,7 @@
 : ${BUILDIMAGE_TAG:=v1.1}
 
 # AMD SMI (theRock) — prebuilt libamd_smi is vendored under third_party/amd_smi.
-# Refresh with `make update-amdsmi` after bumping this URL (see scripts/update-amdsmi.sh).
+# Refresh with `make rocm-tarball-fetch` after bumping this URL (see scripts/update-amdsmi.sh).
 : ${ROCM_TARBALL_URL:=https://rocm.prereleases.amd.com/tarball-multi-arch/therock-dist-linux-multiarch-10.0.0rc2.tar.gz}
 
 # Container/image defaults

@@ -19,7 +19,7 @@
 # version encoded in ROCM_TARBALL_URL differs from third_party/amd_smi/lib/.version.
 #
 # ROCM_TARBALL_URL is read from env.sh (sourced via common.sh). Override it there
-# (or export it) to move to a different ROCm release, then run `make update-amdsmi`.
+# (or export it) to move to a different ROCm release, then run `make rocm-tarball-fetch`.
 
 set -euo pipefail
 
