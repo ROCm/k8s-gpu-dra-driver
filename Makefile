@@ -53,7 +53,7 @@ CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := assert-fmt vet lint ineffassign copyrights
-MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate update-amdsmi $(CHECK_TARGETS)
+MAKE_TARGETS := build check vendor fmt test examples cmds coverage generate rocm-tarball-fetch $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -67,12 +67,12 @@ GOOS ?= linux
 # ---------------------------------------------------------------------------
 # The prebuilt libamd_smi.so, its required rocm_sysdeps netlink libraries, and
 # amdsmi.h are committed under third_party/amd_smi and linked directly by the cgo
-# bindings in pkg/amdsmi. `update-amdsmi` refreshes them from the ROCm theRock
+# bindings in pkg/amdsmi. `rocm-tarball-fetch` refreshes them from the ROCm theRock
 # tarball (ROCM_TARBALL_URL, defined in env.sh); it is version-guarded and a
 # no-op unless that URL points at a different ROCm release. See
 # third_party/amd_smi/README.md.
-.PHONY: update-amdsmi
-update-amdsmi:
+.PHONY: rocm-tarball-fetch
+rocm-tarball-fetch:
 	@bash $(CURDIR)/scripts/update-amdsmi.sh
 
 ifneq ($(PREFIX),)

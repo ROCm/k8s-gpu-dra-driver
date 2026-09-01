@@ -24,7 +24,7 @@ Current version: **ROCm 10.0.0 RC2** (`libamd_smi.so.27`).
 To update to a new ROCm release, bump `ROCM_TARBALL_URL` in `env.sh`, then run:
 
 ```sh
-make update-amdsmi        # or: make docker-update-amdsmi
+make rocm-tarball-fetch        # or: make docker-rocm-tarball-fetch
 ```
 
 The refresh is version-guarded: it is a no-op unless the version parsed from `ROCM_TARBALL_URL`
