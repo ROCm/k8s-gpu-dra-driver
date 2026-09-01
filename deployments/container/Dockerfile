@@ -34,7 +34,7 @@ FROM golang:${GOLANG_VERSION} as build
 WORKDIR /build
 COPY . .
 
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=1
 RUN mkdir /artifacts && \
     make PREFIX=/artifacts cmds
 
@@ -53,9 +53,17 @@ LABEL description="See summary"
 
 COPY LICENSE LICENSE
 
-RUN microdnf clean all && \
-    microdnf update -y && \
+RUN microdnf update -y && \
+    microdnf install -y libdrm kmod && \
     microdnf clean all
+
+# Copy the vendored AMD SMI library (third_party/amd_smi, sourced from the ROCm
+# theRock tarball) for runtime linking, along with the rocm_sysdeps netlink
+# libraries it DT_NEEDEDs.
+COPY --from=build /build/third_party/amd_smi/lib/libamd_smi.so* /usr/lib64/
+COPY --from=build /build/third_party/amd_smi/lib/librocm_sysdeps_*.so* /usr/lib64/
 
 COPY --from=build /artifacts/gpu-kubeletplugin /usr/bin/gpu-kubeletplugin
 COPY --from=build /artifacts/webhook           /usr/bin/webhook
+
+ENV LD_LIBRARY_PATH=/usr/lib64

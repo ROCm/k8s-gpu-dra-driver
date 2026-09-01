@@ -5,12 +5,14 @@ This guide walks you through creating a local kind cluster, installing the AMD G
 ## Prerequisites:
 
 - Kubernetes 1.34+ cluster with DRA APIs (resource.k8s.io/v1) enabled
+  - For auto-partition mode (section F), Kubernetes 1.36+ is required
 - kind v0.17.0+ (or an existing compatible cluster)
 - kubectl v1.34+
 - Helm v3+
 - At least one node with AMD GPUs; partition-capable devices recommended
-  - For the partition examples (sections D/E), GPUs must be pre-partitioned on the node(s). This driver does not dynamically partition GPUs yet.
+  - For the partition examples (sections D/E), GPUs must be pre-partitioned on the node(s)
     See: https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dcm/applying-partition-profiles.html
+  - For auto-partition mode (section F), the driver handles partitioning dynamically
 - Docker installed (only if building/loading a local driver image)
 
 See the [Installation & Developer Guide](https://github.com/ROCm/k8s-gpu-dra-driver/blob/main/docs/installation.md) for tools and cluster requirements for building the driver.
@@ -239,10 +241,11 @@ Sample ResourceClaim Status:
 
 ### D. Partitions: two from the same parent GPU
 
-> Note: These partition examples require that your GPUs are already partitioned on the host. The AMD GPU DRA driver does not currently perform dynamic partitioning.
+> Note: These partition examples require that your GPUs are already partitioned on the host.
 > Refer to the AMD GPU Operator documentation for applying partition profiles:
 > https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dcm/applying-partition-profiles.html
 > If partitions are not present, the claims will not match any devices and may remain Pending.
+> For dynamic partitioning, see section F (Auto-Partition Mode).
 
 Clean up resources from any previous examples.
 
@@ -256,8 +259,9 @@ Check the allocation results: both devices should be partitions (`type: amdgpu-p
 
 ### E. Partitions: two from distinct parent GPUs
 
-> Note: As above, ensure GPUs are pre-partitioned before running this example. Dynamic partitioning is not supported by this driver yet.
+> Note: As above, ensure GPUs are pre-partitioned before running this example.
 > See partitioning guide: https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dcm/applying-partition-profiles.html
+> For dynamic partitioning, see section F (Auto-Partition Mode).
 
 ```bash
 kubectl apply -f example/example-partitions-distinct-parents.yaml
@@ -268,5 +272,70 @@ kubectl get resourceclaims -n gpu-test two-partitions-distinct-parents -oyaml
 Check the allocation results: both devices are partitions with different `resource.kubernetes.io/pciBusID` values.
 
 ---
+
+### F. Auto-Partition Mode: dynamic GPU partitioning [Beta]
+
+> **Beta Feature:** Auto-partition mode is currently a beta feature and may
+> change in future releases. It requires Kubernetes 1.36+ where
+> DRAPartitionableDevices, DRAConsumableCapacity, and DRADeviceTaints are
+> beta and enabled by default.
+
+Auto-partition mode lets users request specific compute+memory partition types
+(e.g., CPX-NPS4, DPX-NPS2) via ResourceClaims. The driver dynamically
+reconfigures GPU hardware at pod start time -- no pre-partitioning needed.
+
+**Enable auto-partition mode:**
+
+```bash
+helm install gpu-dra-driver helm-charts-k8s/ \
+  --set featureGates.AutoPartition=true \
+  --namespace gpu-dra-driver --create-namespace
+```
+
+**Verify virtual devices are advertised:**
+
+```bash
+kubectl get resourceslices -o yaml
+```
+
+You should see two ResourceSlices per node: one with virtual devices
+(e.g., `gpu-0-spx-nps1`, `gpu-0-cpx-nps4`) and one with shared counter
+sets (e.g., `gpu-0-mutex`).
+
+**Request a CPX-NPS4 partition:**
+
+```bash
+kubectl apply -f example/auto-partition-cpx-nps4.yaml
+
+kubectl get resourceclaims -n gpu-test
+kubectl get pods -n gpu-test
+```
+
+Expect the claim to be `allocated,reserved` and the pod Running. The driver
+logs will show the GPU being partitioned to CPX mode with NPS4 memory.
+
+**Request a full GPU (SPX):**
+
+```bash
+kubectl apply -f example/auto-partition-spx.yaml
+
+kubectl get resourceclaims -n gpu-test
+kubectl get pods -n gpu-test
+```
+
+**Conflict behavior:** If a GPU is already allocated with one compute mode
+(e.g., CPX), requesting a different mode (e.g., SPX) on the same GPU will
+be blocked by the shared counter mutex. The claim will remain Pending until
+the conflicting allocation is released. Different memory modes are blocked
+via device taints.
+
+---
+
+Troubleshooting tips:
+
+- Ensure your cluster is Kubernetes 1.34+ and DRA APIs are not disabled. The examples use `resource.k8s.io/v1`.
+- For auto-partition mode, Kubernetes 1.36+ is required.
+- If the example pods fail to pull images, pre-pull or change the image to one accessible in your environment.
+- If using kind and a locally built image, ensure it is loaded into the cluster nodes (see step 1).
 
 For troubleshooting tips, known limitations, and how to report issues, see the [Troubleshooting Guide](troubleshooting.md).
