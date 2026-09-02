@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 
@@ -101,6 +102,8 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 }
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
+const VFSlotCounterName = "vf-slots"
+
 type AmdGpuVFIOInfo struct {
 	PCIAddress         string
 	DeviceID           string
@@ -113,11 +116,80 @@ type AmdGpuVFIOInfo struct {
 	pciBusIDAttr       deviceattribute.DeviceAttribute
 	pcieRootAttr       deviceattribute.DeviceAttribute
 	preConfigureDriver string
+	ParentPFAddress    string
+	TotalVFs           int
+	NumVFs             int
+	MemoryBytes        uint64
+	ComputeUnits       int
+	SimdUnits          int
+}
+
+func (d *AmdGpuVFIOInfo) partitionMode() string {
+	switch d.NumVFs {
+	case 1:
+		return "spx"
+	case 2:
+		return "dpx"
+	case 3:
+		return "tpx"
+	case 4:
+		return "qpx"
+	case 8:
+		return "cpx"
+	default:
+		return ""
+	}
 }
 
 // CanonicalName returns the canonical name for this VFIO device
 func (d *AmdGpuVFIOInfo) CanonicalName() string {
 	return fmt.Sprintf("gpu-vfio-%d", d.Index)
+}
+
+func pciAddrToDNSLabel(addr string) string {
+	return strings.NewReplacer(":", "-", ".", "-").Replace(addr)
+}
+
+// GetSharedCounterSetName returns the KEP-4815 counter set name for the parent
+// PF of this VFIO device. Returns "" if this device has no SR-IOV capability.
+func (d *AmdGpuVFIOInfo) GetSharedCounterSetName() string {
+	if d.TotalVFs == 0 || d.ParentPFAddress == "" {
+		return ""
+	}
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(d.ParentPFAddress))
+}
+
+// GetSharedCounterSet returns the KEP-4815 CounterSet for the parent PF.
+func (d *AmdGpuVFIOInfo) GetSharedCounterSet() *resourceapi.CounterSet {
+	name := d.GetSharedCounterSetName()
+	if name == "" {
+		return nil
+	}
+	return &resourceapi.CounterSet{
+		Name: name,
+		Counters: map[string]resourceapi.Counter{
+			VFSlotCounterName: {Value: *resource.NewQuantity(int64(d.TotalVFs), resource.BinarySI)},
+		},
+	}
+}
+
+// GetConsumesCounters returns the KEP-4815 counter consumption for this device.
+// VFs consume 1 vf-slot; PFs consume all vf-slots (mutually exclusive with VFs).
+func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	name := d.GetSharedCounterSetName()
+	if name == "" {
+		return nil
+	}
+	consumed := int64(1)
+	if !d.IsVF {
+		consumed = int64(d.TotalVFs)
+	}
+	return []resourceapi.DeviceCounterConsumption{{
+		CounterSet: name,
+		Counters: map[string]resourceapi.Counter{
+			VFSlotCounterName: {Value: *resource.NewQuantity(consumed, resource.BinarySI)},
+		},
+	}}
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU
@@ -144,10 +216,27 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
-	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+	if mode := d.partitionMode(); mode != "" {
+		attributes["partitionProfile"] = resourceapi.DeviceAttribute{StringValue: ptr.To(mode)}
 	}
+	dev := resourceapi.Device{
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: d.GetConsumesCounters(),
+	}
+	if d.MemoryBytes > 0 || d.ComputeUnits > 0 || d.SimdUnits > 0 {
+		dev.Capacity = map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{}
+		if d.MemoryBytes > 0 {
+			dev.Capacity["memory"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)}
+		}
+		if d.ComputeUnits > 0 {
+			dev.Capacity["computeUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)}
+		}
+		if d.SimdUnits > 0 {
+			dev.Capacity["simdUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)}
+		}
+	}
+	return dev
 }
 
 // CanonicalName returns the canonical name for this partition

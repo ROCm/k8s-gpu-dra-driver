@@ -143,6 +143,30 @@ type VFInfo struct {
 	ProductName string
 	// NumaNode is the NUMA node affinity.
 	NumaNode int
+	TotalVFs int
+	NumVFs   int
+}
+
+func readSysfsInt(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var val int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &val); err != nil {
+		return 0
+	}
+	return val
+}
+
+// ReadSRIOVTotalVFs reads the maximum number of SR-IOV VFs supported by a PF.
+func ReadSRIOVTotalVFs(pfPCIAddress string) int {
+	return readSysfsInt(filepath.Join(PCIDevicePath, pfPCIAddress, "sriov_totalvfs"))
+}
+
+// ReadSRIOVNumVFs reads the number of SR-IOV VFs currently active on a PF.
+func ReadSRIOVNumVFs(pfPCIAddress string) int {
+	return readSysfsInt(filepath.Join(PCIDevicePath, pfPCIAddress, "sriov_numvfs"))
 }
 
 // GetVFMapping scans for AMD GPU Virtual Functions created by the GIM SR-IOV
@@ -189,6 +213,8 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 		}
 
 		pfProductName := readProductName(pfAddr)
+		pfTotalVFs := ReadSRIOVTotalVFs(pfAddr)
+		pfNumVFs := ReadSRIOVNumVFs(pfAddr)
 
 		for _, vfPath := range vfPaths {
 			vfTarget, err := os.Readlink(vfPath)
@@ -226,6 +252,8 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 				IOMMUGroup:       iommuGroup,
 				ProductName:      pfProductName,
 				NumaNode:         numaNode,
+				TotalVFs:         pfTotalVFs,
+				NumVFs:           pfNumVFs,
 			}
 			vfMap[iommuGroup] = append(vfMap[iommuGroup], vfInfo)
 			glog.Infof("VFIO VF: PF %s -> VF %s IOMMU group: %s", pfAddr, vfAddr, iommuGroup)
@@ -313,6 +341,34 @@ func readSysfsFile(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// ReadPFCapacity reads the total memory for a GIM-managed PF from sysfs.
+// Returns [memoryBytes, cuCount, simdCount]. CU and SIMD counts are inferred
+// from the PF device ID since GIM does not expose topology files.
+func ReadPFCapacity(pfAddr string) [3]uint64 {
+	var mem uint64
+	memStr, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "mem_info_vram_total"))
+	if memStr != "" {
+		fmt.Sscanf(memStr, "%d", &mem)
+	}
+	deviceID, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "device"))
+	cu, simd := gpuCapacityByDeviceID(deviceID)
+	return [3]uint64{mem, uint64(cu), uint64(simd)}
+}
+
+// gpuCapacityByDeviceID returns (cuCount, simdCount) for known AMD GPU PF device IDs.
+func gpuCapacityByDeviceID(deviceID string) (int, int) {
+	switch deviceID {
+	case "0x75a3": // MI355X PF — 8 XCCs, 32 CU/XCC, 4 SIMD/CU
+		return 256, 1024
+	case "0x740f": // MI300X PF — 8 XCCs, 32 CU/XCC, 4 SIMD/CU
+		return 304, 1216
+	case "0x74a0": // MI325X PF — 8 XCCs, 38 CU/XCC, 4 SIMD/CU
+		return 304, 1216
+	default:
+		return 0, 0
+	}
 }
 
 // readProductName reads the product_name from sysfs for a PCI device.

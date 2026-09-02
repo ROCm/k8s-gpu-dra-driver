@@ -224,8 +224,13 @@ selectors:
 
 ## VFIO passthrough devices
 
-When the `VFIOPassthrough` feature gate is enabled, the driver discovers GIM
-SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
+When the `VFIOPassthrough` feature gate is enabled, the driver advertises VFIO
+passthrough devices with `type = vfio`. These come from two sources:
+
+1. **Dual-entry siblings** — each compute GPU (`type=amdgpu`) also appears as a
+   VFIO device (`type=vfio`) for PF passthrough.
+2. **GIM SR-IOV VFs** — VFs created by the GIM driver appear as VFIO devices
+   with `isVF=true`.
 
 ### Attributes for a VFIO device
 
@@ -239,9 +244,24 @@ SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
 | `productName` | string | GPU product name (e.g., `Instinct_MI300X`) |
 | `deviceID` | string | PCI device ID (e.g., `0x740f`) |
 | `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
+| `partitionProfile` | string | Compute partition mode (e.g., `cpx`, `qpx`, `tpx`, `dpx`, `spx`). Only present on GIM VFs with a recognized partition mode. Not set on dual-entry PF siblings. |
 
 Standard topology attributes (`resource.kubernetes.io/pciBusID`,
 `resource.kubernetes.io/pcieRoot`) are also published when available.
+
+### Capacity for VFIO devices
+
+GIM VFs publish per-VF capacity computed as the PF's total capacity divided
+equally by the number of active VFs:
+
+- `memory` (quantity, bytes): PF VRAM / NumVFs
+- `computeUnits` (quantity): PF CUs / NumVFs
+- `simdUnits` (quantity): PF SIMDs / NumVFs
+
+Dual-entry PF siblings publish the full PF capacity. Pre-bound PF-passthrough
+devices (already on `vfio-pci` at discovery) have no capacity data.
+
+The capacity map is omitted entirely when all three values are zero.
 
 ### Selecting VFIO devices
 
@@ -252,6 +272,39 @@ selectors:
       device.driver == 'gpu.amd.com' &&
       device.attributes['gpu.amd.com'].type == 'vfio'
 ```
+
+### Dual-entry advertising and sibling exclusion
+
+When `VFIOPassthrough` is enabled, each compute GPU appears in the ResourceSlice
+as both a compute device (`type=amdgpu`) and a VFIO device (`type=vfio`). The
+scheduler allocates whichever type the claim requests.
+
+Sibling exclusion is bidirectional: allocating either type removes the other
+from the ResourceSlice until the claim is released. For example, allocating a
+GPU as `type=vfio` makes the corresponding `type=amdgpu` entry unavailable, and
+vice versa.
+
+Pre-bound PF-passthrough devices (GPUs already bound to `vfio-pci` at discovery
+time, e.g., by the GPU Operator) are different. They appear as VFIO-only
+devices with no compute sibling, no SharedCounters, and no sibling exclusion.
+
+### KEP-4815 SharedCounters for PF/VF mutual exclusion
+
+For GPUs with SR-IOV capability (`TotalVFs > 0`), the driver publishes a
+`SharedCounterSet` per PF to prevent over-subscription of VFs and enforce
+mutual exclusion between PF and VF allocation.
+
+- **Counter set name:** `pf-<pci-addr>-counter-set` (PCI address in DNS label
+  form, e.g., `pf-0000-0a-00-0-counter-set`)
+- **Counter:** `vf-slots` with value equal to `TotalVFs`
+- **VF consumption:** each VF consumes 1 `vf-slot`
+- **PF consumption:** the PF consumes `TotalVFs` slots (the entire budget)
+
+This means allocating the PF as a VFIO device exhausts all slots, preventing
+any VF from being allocated on the same physical GPU. Conversely, if all VF
+slots are consumed by VF allocations, the PF cannot be allocated.
+
+Non-SR-IOV GPUs (`TotalVFs = 0`) do not publish counter sets.
 
 ---
 

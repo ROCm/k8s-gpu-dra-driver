@@ -85,6 +85,8 @@ type DeviceState struct {
 	checkpointManager    checkpointmanager.CheckpointManager
 	vfioManager          *VfioPciManager
 	claimVfioConversions map[string]*AmdGpuInfo
+	byPCIAddress         map[string][]string
+	siblingCache         map[string]*AllocatableDevice
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -128,7 +130,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		allocatable:       allocatable,
 		vfioManager:       vfioMgr,
 		checkpointManager: checkpointManager,
+		siblingCache:      make(map[string]*AllocatableDevice),
 	}
+	state.buildPCIIndex()
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
@@ -149,7 +153,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
-func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
+func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, bool, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -157,60 +161,88 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return nil, false, fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), nil
+		return preparedClaims[claimUID].GetDevices(), false, nil
 	}
 
 	preparedDevices, err := s.prepareDevices(claim)
 	if err != nil {
-		return nil, fmt.Errorf("prepare failed: %v", err)
+		return nil, false, fmt.Errorf("prepare failed: %v", err)
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
+		return nil, false, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
+	}
+
+	siblingChanged := false
+	for _, pd := range preparedDevices {
+		if allocDev, exists := s.allocatable[pd.DeviceName]; exists {
+			if allocDev.GetSiblingLookupPCIAddress() != "" {
+				s.RemoveSiblingDevices(pd.DeviceName, allocDev)
+				siblingChanged = true
+			}
+		}
 	}
 
 	preparedClaims[claimUID] = preparedDevices
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		for _, pd := range preparedDevices {
+			if allocDev, exists := s.allocatable[pd.DeviceName]; exists {
+				if allocDev.GetSiblingLookupPCIAddress() != "" {
+					s.RestoreSiblingDevices(allocDev)
+				}
+			}
+		}
+		return nil, false, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
-	return preparedClaims[claimUID].GetDevices(), nil
+	return preparedClaims[claimUID].GetDevices(), siblingChanged, nil
 }
 
-func (s *DeviceState) Unprepare(claimUID string) error {
+func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
 	s.Lock()
 	defer s.Unlock()
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return false, fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] == nil {
-		return nil
+		return false, nil
 	}
 
-	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
-		return fmt.Errorf("unprepare failed: %v", err)
+	devices := preparedClaims[claimUID]
+	if err := s.unprepareDevices(claimUID, devices); err != nil {
+		return false, fmt.Errorf("unprepare failed: %v", err)
+	}
+
+	siblingChanged := false
+	for _, pd := range devices {
+		if allocDev, exists := s.allocatable[pd.DeviceName]; exists {
+			if allocDev.GetSiblingLookupPCIAddress() != "" {
+				s.RestoreSiblingDevices(allocDev)
+				siblingChanged = true
+			}
+		}
 	}
 
 	err := s.cdi.DeleteClaimSpecFile(claimUID)
 	if err != nil {
-		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
+		return siblingChanged, fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
 	}
 
 	delete(preparedClaims, claimUID)
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return siblingChanged, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
-	return nil
+	return siblingChanged, nil
 }
 
 func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
@@ -405,6 +437,49 @@ func (s *DeviceState) restoreFromVfio(deviceName string) {
 		klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
 	}
 	delete(s.claimVfioConversions, deviceName)
+}
+
+func (s *DeviceState) buildPCIIndex() {
+	s.byPCIAddress = make(map[string][]string)
+	for name, dev := range s.allocatable {
+		pci := dev.GetSiblingLookupPCIAddress()
+		if pci != "" {
+			s.byPCIAddress[pci] = append(s.byPCIAddress[pci], name)
+		}
+	}
+}
+
+func (s *DeviceState) RemoveSiblingDevices(devName string, device *AllocatableDevice) {
+	pci := device.GetSiblingLookupPCIAddress()
+	if pci == "" {
+		return
+	}
+	for _, name := range s.byPCIAddress[pci] {
+		if name == devName {
+			continue
+		}
+		if sibling, exists := s.allocatable[name]; exists {
+			s.siblingCache[name] = sibling
+			delete(s.allocatable, name)
+			klog.Infof("Removed sibling %s (type %s) for prepared device %s", name, sibling.Type(), devName)
+		}
+	}
+}
+
+func (s *DeviceState) RestoreSiblingDevices(device *AllocatableDevice) {
+	pci := device.GetSiblingLookupPCIAddress()
+	if pci == "" {
+		return
+	}
+	for name, cached := range s.siblingCache {
+		cachedPCI := cached.GetSiblingLookupPCIAddress()
+		if cachedPCI == pci {
+			s.allocatable[name] = cached
+			delete(s.siblingCache, name)
+			klog.Infof("Restored sibling %s (type %s) after unprepare", name, cached.Type())
+		}
+	}
+	s.buildPCIIndex()
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.

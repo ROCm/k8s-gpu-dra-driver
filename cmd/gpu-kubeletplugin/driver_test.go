@@ -20,6 +20,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	resourceapi "k8s.io/api/resource/v1"
 )
 
@@ -29,6 +31,71 @@ func deviceNames(devices []resourceapi.Device) []string {
 		names[i] = d.Name
 	}
 	return names
+}
+
+func TestCollectVFIOCounterSets(t *testing.T) {
+	t.Run("deduplicates VFs from same PF", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
+				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{Index: 1, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
+				"gpu-0-128":  {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
+			},
+		}}
+		sets := d.collectVFIOCounterSets()
+		assert.Len(t, sets, 1)
+		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
+	})
+
+	t.Run("multiple PFs produce multiple sets sorted by address", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0b:00.0"}},
+				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{Index: 1, IsVF: false, TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}},
+			},
+		}}
+		sets := d.collectVFIOCounterSets()
+		assert.Len(t, sets, 2)
+		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
+		assert.Equal(t, "pf-0000-0b-00-0-counter-set", sets[1].Name)
+	})
+
+	t.Run("no VFIO devices returns empty", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-0-128": {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
+			},
+		}}
+		sets := d.collectVFIOCounterSets()
+		assert.Empty(t, sets)
+	})
+}
+
+func TestBuildDriverResourcesWithCounters(t *testing.T) {
+	t.Run("with counters has 2 slices", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: false, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0", IOMMUGroup: "42", PCIAddress: "0000:0a:00.0"}},
+			},
+		}}
+		res := d.buildDriverResources("test-node")
+		pool := res.Pools["test-node"]
+		assert.Len(t, pool.Slices, 2, "should have SharedCounters slice + Devices slice")
+		assert.NotEmpty(t, pool.Slices[0].SharedCounters)
+		assert.NotEmpty(t, pool.Slices[1].Devices)
+	})
+
+	t.Run("without counters has 1 slice", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-0-128": {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
+			},
+		}}
+		res := d.buildDriverResources("test-node")
+		pool := res.Pools["test-node"]
+		assert.Len(t, pool.Slices, 1, "should have only Devices slice")
+		assert.NotEmpty(t, pool.Slices[0].Devices)
+	})
 }
 
 func TestResourceSliceDevicesAreSortedByName(t *testing.T) {

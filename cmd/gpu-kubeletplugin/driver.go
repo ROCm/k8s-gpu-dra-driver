@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sort"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -60,10 +61,12 @@ type driver struct {
 	state       *DeviceState
 	healthcheck *healthcheck
 	cancelCtx   func(error)
+	nodeName    string
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	driver := &driver{
+		nodeName:  config.flags.nodeName,
 		client:    config.coreclient,
 		cancelCtx: config.cancelMainCtx,
 	}
@@ -94,18 +97,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.helper = helper
 
-	devices := resourceSliceDevices(state.allocatable)
-	resources := resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {
-				Slices: []resourceslice.Slice{
-					{
-						Devices: devices,
-					},
-				},
-			},
-		},
-	}
+	resources := driver.buildDriverResources(config.flags.nodeName)
 
 	if resourcesJSON, err := json.MarshalIndent(resources, "", "  "); err != nil {
 		klog.Warningf("Failed to marshal ResourceSlice to JSON: %v", err)
@@ -141,6 +133,59 @@ func resourceSliceDevices(allocatable AllocatableDevices) []resourceapi.Device {
 	return devices
 }
 
+func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
+	devices := resourceSliceDevices(d.state.allocatable)
+	counterSets := d.collectVFIOCounterSets()
+
+	if len(counterSets) == 0 {
+		return resourceslice.DriverResources{
+			Pools: map[string]resourceslice.Pool{
+				nodeName: {
+					Slices: []resourceslice.Slice{
+						{Devices: devices},
+					},
+				},
+			},
+		}
+	}
+	return resourceslice.DriverResources{
+		Pools: map[string]resourceslice.Pool{
+			nodeName: {
+				Slices: []resourceslice.Slice{
+					{SharedCounters: counterSets},
+					{Devices: devices},
+				},
+			},
+		},
+	}
+}
+
+func (d *driver) collectVFIOCounterSets() []resourceapi.CounterSet {
+	counterSetsByPF := make(map[string]*resourceapi.CounterSet)
+	for _, device := range d.state.allocatable {
+		if device.Vfio == nil {
+			continue
+		}
+		cs := device.Vfio.GetSharedCounterSet()
+		if cs == nil {
+			continue
+		}
+		if _, seen := counterSetsByPF[device.Vfio.ParentPFAddress]; !seen {
+			counterSetsByPF[device.Vfio.ParentPFAddress] = cs
+		}
+	}
+	pfAddrs := make([]string, 0, len(counterSetsByPF))
+	for addr := range counterSetsByPF {
+		pfAddrs = append(pfAddrs, addr)
+	}
+	sort.Strings(pfAddrs)
+	var result []resourceapi.CounterSet
+	for _, addr := range pfAddrs {
+		result = append(result, *counterSetsByPF[addr])
+	}
+	return result
+}
+
 func (d *driver) Shutdown(logger klog.Logger) error {
 	if d.healthcheck != nil {
 		d.healthcheck.Stop(logger)
@@ -160,12 +205,15 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 	return result, nil
 }
 
-func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
-	preparedPBs, err := d.state.Prepare(claim)
+func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	preparedPBs, siblingChanged, err := d.state.Prepare(claim)
 	if err != nil {
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
 		}
+	}
+	if siblingChanged {
+		d.republishResources(ctx)
 	}
 	var prepared []kubeletplugin.Device
 	for _, preparedPB := range preparedPBs {
@@ -209,12 +257,26 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletpl
 	return result, nil
 }
 
-func (d *driver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.NamespacedObject) error {
-	if err := d.state.Unprepare(string(claim.UID)); err != nil {
+func (d *driver) unprepareResourceClaim(ctx context.Context, claim kubeletplugin.NamespacedObject) error {
+	siblingChanged, err := d.state.Unprepare(string(claim.UID))
+	if err != nil {
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claim.UID, err)
 	}
-
+	if siblingChanged {
+		d.republishResources(ctx)
+	}
 	return nil
+}
+
+func (d *driver) republishResources(ctx context.Context) {
+	d.state.Lock()
+	resources := d.buildDriverResources(d.nodeName)
+	d.state.Unlock()
+	if err := d.helper.PublishResources(ctx, resources); err != nil {
+		klog.Warningf("Failed to republish resources after sibling change: %v", err)
+	} else {
+		klog.Infof("Republished ResourceSlice after sibling change")
+	}
 }
 
 func (d *driver) HandleError(ctx context.Context, err error, msg string) {
