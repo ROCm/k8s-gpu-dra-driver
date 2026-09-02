@@ -1,6 +1,6 @@
 name: DRA Build
 
-# Builds DRA driver container image.
+# Builds DRA driver container image and Helm chart.
 # Job graph: resolve → build → publish → validate → results
 # Triggers: nightly (cron), PR (path-filtered), pre-release (workflow_dispatch)
 
@@ -10,11 +10,13 @@ on:
 
   pull_request:
     branches:
-      - '**'
+      - develop
+      - 'release-*'
     paths:
       - '.github/workflows/rocm-build.yml'
       - 'deployments/**'
       - 'docker/**'
+      - 'helm-charts-k8s/**'
       - 'scripts/**'
       - 'Makefile'
       - 'env.sh'
@@ -82,7 +84,7 @@ jobs:
           NIGHTLY_CDN_BASE="https://nightly.repo.amd.com/rocm/core/tarball"
           DRA_VERSION=$(grep -m1 'VERSION:=' env.sh | sed 's/.*VERSION:=\([^}]*\)}.*/\1/')
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-8)
-          PR_FALLBACK_URL=$(grep -m1 'ROCM_TARBALL_URL ?=' Makefile | awk '{print $NF}' || true)
+          PR_FALLBACK_URL=$(grep -m1 'ROCM_TARBALL_URL' env.sh | sed 's/.*ROCM_TARBALL_URL:=\([^}]*\)}.*/\1/' || true)
 
           case "${GITHUB_EVENT_NAME}" in
 
@@ -168,9 +170,9 @@ jobs:
             echo "Build already succeeded for tag \`${{ steps.resolve.outputs.image_tag }}\` at SHA \`${GITHUB_SHA}\`. No rebuild needed."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Builds DRA driver container image.
+  # Builds DRA driver container image (parallel with build-helm).
   build:
-    name: Build
+    name: Build image
     needs: resolve
     if: needs.resolve.outputs.build_needed == 'true'
     runs-on: ubuntu-24.04
@@ -198,35 +200,79 @@ jobs:
           echo "Disk after cleanup:"
           df -h /
 
-      - name: Build DRA driver image
+      - name: Fetch ROCm tarball
         env:
           ROCM_TARBALL_URL: ${{ needs.resolve.outputs.rocm_tarball_url }}
+        run: make rocm-tarball-fetch
+
+      - name: Build DRA driver image
+        env:
           DRIVER_IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
         run: make build
+
+      - name: Archive DRA driver image
+        env:
+          DRIVER_IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: make archive
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dra-image-${{ needs.resolve.outputs.image_tag }}
           retention-days: 1
-          path: k8s-gpu-dra-driver-*.tar.gz
+          path: build/k8s-gpu-dra-driver-*.tar.gz
 
 
-  # Downloads build artifact, renames with dra-version + identifier, uploads to S3 and Docker Hub.
+  # Packages the Helm chart (runs in parallel with the container build).
+  build-helm:
+    name: Build Helm chart
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package Helm chart
+        env:
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          CHART_BASE=$(sed -n 's/^version:[[:space:]]*//p' helm-charts-k8s/Chart.yaml)
+          CHART_VERSION="${CHART_BASE}-${IMAGE_TAG}"
+          echo "Packaging chart version: ${CHART_VERSION}"
+          make helm CHART_VERSION="${CHART_VERSION}"
+
+      - name: Upload Helm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dra-helm-${{ needs.resolve.outputs.image_tag }}
+          retention-days: 1
+          path: helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-*.tgz
+
+
+  # Downloads build artifacts, renames with dra-version + identifier, uploads to S3 and Docker Hub.
   publish:
     name: Publish
-    needs: [resolve, build]
-    if: always() && needs.resolve.outputs.build_needed == 'true' && github.event_name != 'pull_request' && needs.build.result == 'success'
+    needs: [resolve, build, build-helm]
+    if: always() && needs.resolve.outputs.build_needed == 'true' && github.event_name != 'pull_request' && needs.build.result == 'success' && needs.build-helm.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Download build artifact
+      - name: Download container image artifact
         uses: actions/download-artifact@v4
         with:
           name: dra-image-${{ needs.resolve.outputs.image_tag }}
           path: artifacts
 
-      - name: Rename artifact with dra-version + identifier
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dra-helm-${{ needs.resolve.outputs.image_tag }}
+          path: artifacts
+
+      - name: Rename container artifact with dra-version + identifier
         env:
           IMAGE_TAG:   ${{ needs.resolve.outputs.image_tag }}
           DRA_VERSION: ${{ needs.resolve.outputs.dra_version }}
@@ -257,23 +303,25 @@ jobs:
           role-to-assume: ${{ secrets.ROCK_CI_S3_SECRET }}
           aws-region: us-east-1
 
-      - name: Upload artifact to S3
+      - name: Upload artifacts to S3
         id: s3-upload
         env:
           S3_PREFIX: ${{ needs.resolve.outputs.s3_prefix }}
         run: |
           set -euo pipefail
-          FILE=$(ls artifacts/k8s-gpu-dra-driver-*.tar.gz)
-          echo "Uploading: ${FILE} → s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")"
-          aws s3 cp "${FILE}" "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")" --no-progress
-          echo "Uploaded to s3://${S3_BUCKET}/${S3_PREFIX}/"
+          echo "Uploading all artifacts to s3://${S3_BUCKET}/${S3_PREFIX}/"
+          for FILE in artifacts/*.tar.gz artifacts/*.tgz; do
+            [ -f "${FILE}" ] || continue
+            echo "  ${FILE} → s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")"
+            aws s3 cp "${FILE}" "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")" --no-progress
+          done
           aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" --human-readable || true
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push image to amdpsdo registry
         id: registry-push
