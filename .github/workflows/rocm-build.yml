@@ -73,6 +73,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Configure AWS credentials for dispatch counter
+        if: github.event_name == 'workflow_dispatch'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROCK_CI_S3_SECRET }}
+          aws-region: us-east-1
+
       - name: Resolve trigger inputs
         id: resolve
         env:
@@ -123,7 +130,13 @@ jobs:
               BASENAME=$(basename "${TARBALL_URL}" .tar.gz 2>/dev/null || true)
               IMAGE_TAG="${INPUT_IMAGE_TAG:-${BASENAME:+${BASENAME#therock-dist-linux-multiarch-}}}"
               IMAGE_TAG="${IMAGE_TAG:-${DRA_VERSION}}"
-              SUFFIX="${GITHUB_RUN_NUMBER}"
+              # Next sequential build number: list existing S3 prefixes, find highest N, use N+1
+              if ! LISTING=$(aws s3 ls "s3://${S3_BUCKET}/k8s-gpu-dra-driver/pre-release/" 2>&1); then
+                echo "::error::Failed to query S3 for build counter: ${LISTING}"
+                exit 1
+              fi
+              LAST_N=$(echo "${LISTING}" | grep -oP "${DRA_VERSION}-\K\d+" | sort -n | tail -1 || true)
+              SUFFIX=$(( ${LAST_N:-0} + 1 ))
               S3_PREFIX="k8s-gpu-dra-driver/pre-release/${DRA_VERSION}-${SUFFIX}"
               SCENARIO="pre-release"
               ;;
@@ -205,12 +218,7 @@ jobs:
           ROCM_TARBALL_URL: ${{ needs.resolve.outputs.rocm_tarball_url }}
         run: make rocm-tarball-fetch
 
-      - name: Build DRA driver image
-        env:
-          DRIVER_IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
-        run: make build
-
-      - name: Archive DRA driver image
+      - name: Build and archive DRA driver image
         env:
           DRIVER_IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
         run: make archive
