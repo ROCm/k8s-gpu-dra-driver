@@ -44,10 +44,11 @@ const (
 
 // Device type constants for ResourceSlice attributes
 const (
-	AmdGpuDeviceType       = "amdgpu"
-	AmdPartitionDeviceType = "amdgpu-partition"
-	VfioDeviceType         = "vfio"
-	UnknownDeviceType      = "unknown"
+	AmdGpuDeviceType             = "amdgpu"
+	AmdPartitionDeviceType       = "amdgpu-partition"
+	SyntheticPartitionDeviceType = "amdgpu-synthetic-partition"
+	VfioDeviceType               = "vfio"
+	UnknownDeviceType            = "unknown"
 )
 
 // Compute partition modes
@@ -58,5 +59,40 @@ const (
 	ComputePartitionCPX = "cpx"
 )
 
+// Memory partition modes
+const (
+	MemoryPartitionNPS1 = "nps1"
+	MemoryPartitionNPS2 = "nps2"
+	MemoryPartitionNPS4 = "nps4"
+)
+
 // Default partition profile for non-partitioned GPUs
 const DefaultPartitionProfile = "spx_nps1"
+
+// PartitionConfig defines a valid compute+memory combination
+type PartitionConfig struct {
+	Compute        string
+	Memory         string
+	PartitionCount int
+}
+
+// ValidPartitionConfigs is the compatibility matrix of compute+memory combinations
+var ValidPartitionConfigs = []PartitionConfig{
+	{ComputePartitionSPX, MemoryPartitionNPS1, 1},
+	{ComputePartitionDPX, MemoryPartitionNPS1, 2},
+	{ComputePartitionDPX, MemoryPartitionNPS2, 2},
+	{ComputePartitionQPX, MemoryPartitionNPS1, 4},
+	{ComputePartitionCPX, MemoryPartitionNPS1, 8},
+	{ComputePartitionCPX, MemoryPartitionNPS4, 8},
+}
+
+// PartitionCountMap maps compute partition mode to the number of partitions it creates
+var PartitionCountMap = map[string]int{
+	ComputePartitionSPX: 1,
+	ComputePartitionDPX: 2,
+	ComputePartitionQPX: 4,
+	ComputePartitionCPX: 8,
+}
+
+// MemoryPartitionTaintKey is the taint key used for memory partition conflicts
+const MemoryPartitionTaintKey = "gpu.amd.com/memory-partition-conflict"

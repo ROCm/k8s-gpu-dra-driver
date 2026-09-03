@@ -1,0 +1,427 @@
+name: DRA Build
+
+# Builds DRA driver container image and Helm chart.
+# Job graph: resolve → build → publish → validate → results
+# Triggers: nightly (cron), PR (path-filtered), pre-release (workflow_dispatch)
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+
+  pull_request:
+    branches:
+      - develop
+      - 'release-*'
+    paths:
+      - '.github/workflows/rocm-build.yml'
+      - 'deployments/**'
+      - 'docker/**'
+      - 'helm-charts-k8s/**'
+      - 'scripts/**'
+      - 'Makefile'
+      - 'env.sh'
+      - 'go.mod'
+      - 'go.sum'
+
+  workflow_dispatch:
+    inputs:
+      rocm_tarball_url:
+        description: 'ROCm tarball URL (leave blank to auto-detect)'
+        required: false
+        type: string
+        default: ''
+      image_tag:
+        description: 'Docker image tag (e.g. v0.1.0-20260831). Auto-derived if blank.'
+        required: false
+        type: string
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild even if already built for this SHA + image tag'
+        required: false
+        type: boolean
+        default: false
+
+
+concurrency:
+  group: ${{ github.event_name == 'schedule' && 'dra-nightly' || github.event_name == 'pull_request' && format('dra-pr-{0}', github.event.pull_request.number) || format('dra-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'schedule' || github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write   # OIDC → AWS
+  actions:  write   # GHA artifact upload/download
+
+env:
+  S3_BUCKET: ${{ vars.THEROCK_BUCKET_NAME }}
+
+jobs:
+
+  # Detects trigger mode and resolves image tag, S3 prefix, and DRA version.
+  # Reads VERSION from env.sh to stay in sync with the project.
+  resolve:
+    name: Resolve image tag
+    runs-on: ubuntu-24.04
+    outputs:
+      rocm_tarball_url: ${{ steps.resolve.outputs.rocm_tarball_url }}
+      image_tag:        ${{ steps.resolve.outputs.image_tag }}
+      s3_prefix:        ${{ steps.resolve.outputs.s3_prefix }}
+      dra_version:      ${{ steps.resolve.outputs.dra_version }}
+      suffix:           ${{ steps.resolve.outputs.suffix }}
+      scenario:         ${{ steps.resolve.outputs.scenario }}
+      build_needed:     ${{ steps.dedup.outputs.cache-hit != 'true' || inputs.force_rebuild == true }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials for dispatch counter
+        if: github.event_name == 'workflow_dispatch'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROCK_CI_S3_SECRET }}
+          aws-region: us-east-1
+
+      - name: Resolve trigger inputs
+        id: resolve
+        env:
+          INPUT_URL:       ${{ inputs.rocm_tarball_url }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          NIGHTLY_CDN_BASE="https://nightly.repo.amd.com/rocm/core/tarball"
+          DRA_VERSION=$(grep -m1 'VERSION:=' env.sh | sed 's/.*VERSION:=\([^}]*\)}.*/\1/')
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-8)
+          PR_FALLBACK_URL=$(grep -m1 'ROCM_TARBALL_URL' env.sh | sed 's/.*ROCM_TARBALL_URL:=\([^}]*\)}.*/\1/' || true)
+
+          case "${GITHUB_EVENT_NAME}" in
+
+            schedule)
+              # Pick the latest nightly tarball from the CDN index by date suffix
+              TARBALL_NAME=$(
+                curl -fsSL "${NIGHTLY_CDN_BASE}/" 2>/dev/null \
+                  | grep -oP 'therock-dist-linux-multiarch-\d+\.\d+\.\d+a\d{8}\.tar\.gz' \
+                  | sed 's/.*a\([0-9]\{8\}\)\.tar\.gz/\1 &/' \
+                  | sort -rn \
+                  | awk 'NR==1{print $2}'
+              )
+              if [ -z "${TARBALL_NAME}" ]; then
+                echo "::error::Could not detect latest nightly tarball from CDN index"
+                exit 1
+              fi
+              TARBALL_URL="${NIGHTLY_CDN_BASE}/${TARBALL_NAME}"
+              IMAGE_TAG=$(echo "${TARBALL_NAME}" \
+                | sed 's/therock-dist-linux-multiarch-//;s/\.tar\.gz//')
+              DATE=$(echo "${IMAGE_TAG}" | grep -oP '(?<=a)\d{8}')
+              SUFFIX="${IMAGE_TAG}"
+              S3_PREFIX="k8s-gpu-dra-driver/nightly/${DATE}"
+              SCENARIO="nightly"
+              ;;
+
+            pull_request)
+              TARBALL_URL="${INPUT_URL:-${PR_FALLBACK_URL}}"
+              IMAGE_TAG="${DRA_VERSION}"
+              SUFFIX="${SHORT_SHA}"
+              S3_PREFIX=""
+              SCENARIO="pull_request"
+              ;;
+
+            workflow_dispatch)
+              TARBALL_URL="${INPUT_URL:-${PR_FALLBACK_URL}}"
+              BASENAME=$(basename "${TARBALL_URL}" .tar.gz 2>/dev/null || true)
+              IMAGE_TAG="${INPUT_IMAGE_TAG:-${BASENAME:+${BASENAME#therock-dist-linux-multiarch-}}}"
+              IMAGE_TAG="${IMAGE_TAG:-${DRA_VERSION}}"
+              # Next sequential build number: list existing S3 prefixes, find highest N, use N+1
+              if ! LISTING=$(aws s3 ls "s3://${S3_BUCKET}/k8s-gpu-dra-driver/pre-release/" 2>&1); then
+                echo "::error::Failed to query S3 for build counter: ${LISTING}"
+                exit 1
+              fi
+              LAST_N=$(echo "${LISTING}" | grep -oP "${DRA_VERSION}-\K\d+" | sort -n | tail -1 || true)
+              SUFFIX=$(( ${LAST_N:-0} + 1 ))
+              S3_PREFIX="k8s-gpu-dra-driver/pre-release/${DRA_VERSION}-${SUFFIX}"
+              SCENARIO="pre-release"
+              ;;
+
+            *)
+              echo "::error::Unknown event: ${GITHUB_EVENT_NAME}"
+              exit 1
+              ;;
+          esac
+
+          for var in TARBALL_URL IMAGE_TAG DRA_VERSION; do
+            [ -z "${!var}" ] && echo "::error::${var} is empty" && exit 1
+          done
+
+          echo "rocm_tarball_url=${TARBALL_URL:-}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}"            >> "$GITHUB_OUTPUT"
+          echo "s3_prefix=${S3_PREFIX}"            >> "$GITHUB_OUTPUT"
+          echo "dra_version=${DRA_VERSION}"        >> "$GITHUB_OUTPUT"
+          echo "suffix=${SUFFIX}"                  >> "$GITHUB_OUTPUT"
+          echo "scenario=${SCENARIO}"              >> "$GITHUB_OUTPUT"
+
+          echo "ROCm tarball : ${TARBALL_URL:-<none>}"
+          echo "Image tag    : ${IMAGE_TAG}"
+          echo "Suffix       : ${SUFFIX}"
+          echo "Scenario     : ${SCENARIO}"
+          echo "S3 prefix    : ${S3_PREFIX}"
+          echo "DRA version  : ${DRA_VERSION}"
+
+      - name: Check dedup cache
+        id: dedup
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          key: dedup-dra-${{ steps.resolve.outputs.image_tag }}-${{ github.sha }}
+          path: .dedup-marker
+          lookup-only: true
+
+      - name: Dedup summary
+        if: steps.dedup.outputs.cache-hit == 'true' && inputs.force_rebuild != true
+        run: |
+          {
+            echo "## DRA Build — Skipped"
+            echo "Build already succeeded for tag \`${{ steps.resolve.outputs.image_tag }}\` at SHA \`${GITHUB_SHA}\`. No rebuild needed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Builds DRA driver container image (parallel with build-helm).
+  build:
+    name: Build image
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free up runner disk space
+        run: |
+          echo "Disk before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo rm -rf \
+            /usr/share/swift /usr/local/share/powershell /usr/lib/mono \
+            /usr/local/julia* /opt/az /usr/share/google-cloud-sdk \
+            /usr/lib/jvm /usr/local/share/chromium /usr/share/miniconda || true
+          sudo apt-get remove -y 'llvm-*' 'clang-*' 'mono-*' \
+            azure-cli google-cloud-cli 2>/dev/null || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
+          sudo docker image prune --all --force || true
+          echo "Disk after cleanup:"
+          df -h /
+
+      - name: Fetch ROCm tarball
+        env:
+          ROCM_TARBALL_URL: ${{ needs.resolve.outputs.rocm_tarball_url }}
+        run: make rocm-tarball-fetch
+
+      - name: Build and archive DRA driver image
+        env:
+          DRIVER_IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: make archive
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dra-image-${{ needs.resolve.outputs.image_tag }}
+          retention-days: 1
+          path: build/k8s-gpu-dra-driver-*.tar.gz
+
+
+  # Packages the Helm chart (runs in parallel with the container build).
+  build-helm:
+    name: Build Helm chart
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package Helm chart
+        env:
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          CHART_BASE=$(sed -n 's/^version:[[:space:]]*//p' helm-charts-k8s/Chart.yaml)
+          CHART_VERSION="${CHART_BASE}-${IMAGE_TAG}"
+          echo "Packaging chart version: ${CHART_VERSION}"
+          make helm CHART_VERSION="${CHART_VERSION}"
+
+      - name: Upload Helm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dra-helm-${{ needs.resolve.outputs.image_tag }}
+          retention-days: 1
+          path: helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-*.tgz
+
+
+  # Downloads build artifacts, renames with dra-version + identifier, uploads to S3 and Docker Hub.
+  publish:
+    name: Publish
+    needs: [resolve, build, build-helm]
+    if: always() && needs.resolve.outputs.build_needed == 'true' && github.event_name != 'pull_request' && needs.build.result == 'success' && needs.build-helm.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Download container image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dra-image-${{ needs.resolve.outputs.image_tag }}
+          path: artifacts
+
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dra-helm-${{ needs.resolve.outputs.image_tag }}
+          path: artifacts
+
+      - name: Rename container artifact with dra-version + identifier
+        env:
+          IMAGE_TAG:   ${{ needs.resolve.outputs.image_tag }}
+          DRA_VERSION: ${{ needs.resolve.outputs.dra_version }}
+          SUFFIX:      ${{ needs.resolve.outputs.suffix }}
+        run: |
+          set -euo pipefail
+          mv "artifacts/k8s-gpu-dra-driver-${IMAGE_TAG}.tar.gz" \
+             "artifacts/k8s-gpu-dra-driver-${DRA_VERSION}-${SUFFIX}.tar.gz"
+          echo "Renamed artifact:"
+          ls -lh artifacts/
+
+      - name: Validate upload prerequisites
+        env:
+          HAS_ARN: ${{ secrets.ROCK_CI_S3_SECRET != '' }}
+        run: |
+          if [ "${HAS_ARN}" != "true" ]; then
+            echo "::error::ROCK_CI_S3_SECRET secret is not set"
+            exit 1
+          fi
+          if [ -z "${S3_BUCKET}" ]; then
+            echo "::error::THEROCK_BUCKET_NAME variable is not set"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROCK_CI_S3_SECRET }}
+          aws-region: us-east-1
+
+      - name: Upload artifacts to S3
+        id: s3-upload
+        env:
+          S3_PREFIX: ${{ needs.resolve.outputs.s3_prefix }}
+        run: |
+          set -euo pipefail
+          echo "Uploading all artifacts to s3://${S3_BUCKET}/${S3_PREFIX}/"
+          for FILE in artifacts/*.tar.gz artifacts/*.tgz; do
+            [ -f "${FILE}" ] || continue
+            echo "  ${FILE} → s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")"
+            aws s3 cp "${FILE}" "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "${FILE}")" --no-progress
+          done
+          aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" --human-readable || true
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image to amdpsdo registry
+        id: registry-push
+        env:
+          IMAGE_TAG:   ${{ needs.resolve.outputs.image_tag }}
+          DRA_VERSION: ${{ needs.resolve.outputs.dra_version }}
+          SUFFIX:      ${{ needs.resolve.outputs.suffix }}
+        run: |
+          set -euo pipefail
+          PUSH_TAG="${DRA_VERSION}-${SUFFIX}"
+
+          docker load < "artifacts/k8s-gpu-dra-driver-${PUSH_TAG}.tar.gz"
+          docker tag "docker.io/rocm/k8s-gpu-dra-driver:${IMAGE_TAG}" \
+                     "docker.io/amdpsdo/k8s-gpu-dra-driver:${PUSH_TAG}"
+          docker push "docker.io/amdpsdo/k8s-gpu-dra-driver:${PUSH_TAG}"
+          echo "Pushed docker.io/amdpsdo/k8s-gpu-dra-driver:${PUSH_TAG}"
+
+      - name: Create dedup marker
+        if: ${{ always() && steps.s3-upload.outcome == 'success' && steps.registry-push.outcome == 'success' }}
+        run: mkdir -p .dedup-marker && echo "ok" > .dedup-marker/ok
+      - name: Save dedup marker to cache
+        uses: actions/cache/save@v4
+        if: ${{ always() && steps.s3-upload.outcome == 'success' && steps.registry-push.outcome == 'success' }}
+        continue-on-error: true
+        with:
+          key: dedup-dra-${{ needs.resolve.outputs.image_tag }}-${{ github.sha }}
+          path: .dedup-marker
+
+      - name: Generate build summary
+        if: always()
+        env:
+          IMAGE_TAG:        ${{ needs.resolve.outputs.image_tag }}
+          ROCM_TARBALL_URL: ${{ needs.resolve.outputs.rocm_tarball_url }}
+          S3_PREFIX:        ${{ needs.resolve.outputs.s3_prefix }}
+          BUILD_RESULT:     ${{ needs.build.result }}
+          S3_RESULT:        ${{ steps.s3-upload.outcome }}
+          REGISTRY_RESULT:  ${{ steps.registry-push.outcome }}
+        run: |
+          {
+            echo "## DRA Build — \`${IMAGE_TAG}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Trigger | \`${{ github.event_name }}\` |"
+            echo "| ROCm tarball | \`${ROCM_TARBALL_URL:-none}\` |"
+            echo "| Image tag | \`${IMAGE_TAG}\` |"
+            echo "| Artifact suffix | \`${{ needs.resolve.outputs.suffix }}\` |"
+            echo "| Build | ${BUILD_RESULT} |"
+            echo "| S3 upload | ${S3_RESULT:-failure} |"
+            echo "| Registry push | ${REGISTRY_RESULT:-skipped} |"
+            echo "| S3 prefix | \`s3://${S3_BUCKET}/${S3_PREFIX}/\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Calls the orchestrator in common-infra-operator to run validation.
+  # Synchronous — this workflow waits for validation to complete.
+  validate:
+    name: Validate
+    needs: [resolve, build, publish]
+    if: always() && needs.resolve.outputs.build_needed == 'true' && needs.build.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    uses: ROCm/common-infra-operator/.github/workflows/rocm-orchestrator.yml@main
+    with:
+      component: dra
+      scenario: ${{ needs.resolve.outputs.scenario }}
+      s3_prefix: ${{ needs.resolve.outputs.s3_prefix }}
+
+  results:
+    name: Validation results
+    needs: [resolve, validate]
+    if: always() && needs.validate.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Post validation summary
+        env:
+          VALIDATE_JOB:    ${{ needs.validate.result }}
+          VALIDATE_OUTPUT: ${{ needs.validate.outputs.result }}
+        run: |
+          if [ "${VALIDATE_JOB}" = "success" ] && [ "${VALIDATE_OUTPUT}" = "pass" ]; then
+            STATUS="PASSED"
+          elif [ "${VALIDATE_JOB}" = "success" ]; then
+            STATUS="FAILED — ${VALIDATE_OUTPUT}"
+          elif [ "${VALIDATE_JOB}" = "cancelled" ]; then
+            STATUS="CANCELLED — orchestrator was cancelled before completing"
+          else
+            STATUS="ERROR — orchestrator job failed (timeout, crash, or misconfiguration)"
+          fi
+
+          {
+            echo "## Validation — \`${{ needs.resolve.outputs.scenario }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Status | ${STATUS} |"
+            echo "| Orchestrator job | ${VALIDATE_JOB} |"
+            echo "| Orchestrator output | ${VALIDATE_OUTPUT:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
