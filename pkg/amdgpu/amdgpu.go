@@ -22,18 +22,21 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang/glog"
 )
 
 // GetDriverVersion reads the AMDGPU driver version
 func GetDriverVersion() string {
-	matches, _ := filepath.Glob("/sys/class/drm/card*/device/driver/module/version")
+	matches, _ := filepath.Glob(filepath.Join(DRMClassPath, "card*/device/driver/module/version"))
 	if len(matches) == 0 {
 		glog.Warningf("No AMD GPU cards found for driver version reading; driverVersion attribute will be omitted")
 		return ""
@@ -71,19 +74,214 @@ func SemverDriverVersion(version string) string {
 	return strings.Join(parts[:3], ".")
 }
 
-// GetAMDGPUs return a map of AMD GPU on a node identified by the part of the pci address
+// parseDRMIndex returns the numeric index of a DRM node name (for example 128
+// from "renderD128"). ok is false when the prefix is missing or the suffix is
+// not a plain decimal, so a malformed name is skipped instead of read as index 0.
+func parseDRMIndex(name, prefix string) (int, bool) {
+	suffix, found := strings.CutPrefix(name, prefix)
+	if !found || suffix == "" {
+		return 0, false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// resolveDRMIdentity reads a GPU's card index, render minor, KFD node ID, and
+// unique (kfd) ID from its drm entries, starting fresh on every call so a device
+// never inherits the previous one's identity. ok is true only when both a card
+// and a render node resolve to a valid index; otherwise the caller skips the
+// device instead of publishing it with a borrowed or default identity.
+func resolveDRMIdentity(devPaths []string, topologyInfo map[int]*TopologyInfo) (card, renderD, nodeId int, devID string, ok bool) {
+	haveCard, haveRender, conflict := false, false, false
+	for _, devPath := range devPaths {
+		name := filepath.Base(devPath)
+		switch {
+		case strings.HasPrefix(name, "card"):
+			n, valid := parseDRMIndex(name, "card")
+			if !valid {
+				continue
+			}
+			if haveCard && n != card {
+				conflict = true
+			}
+			card, haveCard = n, true
+		case strings.HasPrefix(name, "renderD"):
+			n, valid := parseDRMIndex(name, "renderD")
+			if !valid {
+				continue
+			}
+			if haveRender && n != renderD {
+				conflict = true
+			}
+			renderD, haveRender = n, true
+			// Keep nodeId/devID tied to the current renderD; a render node without
+			// topology contributes no identity rather than a previous one's.
+			if info, exists := topologyInfo[n]; exists {
+				devID, nodeId = info.UniqueID, info.NodeID
+			} else {
+				devID, nodeId = "", 0
+			}
+		}
+	}
+	return card, renderD, nodeId, devID, haveCard && haveRender && !conflict
+}
+
+// uniquePhysicalParent returns the one physical GPU sharing devID. Zero matches means
+// the parent has not been discovered, and more than one means two GPUs reported the same
+// kfd id, so neither can be attributed. Both are errors rather than a first-match guess,
+// since map iteration order would otherwise decide which parent a partition inherits.
+func uniquePhysicalParent(devID string, physical map[string]map[string]interface{}) (map[string]interface{}, error) {
+	var found map[string]interface{}
+	var addrs []string
+	for _, device := range physical {
+		if device["kfdID"] != devID {
+			continue
+		}
+		addr, _ := device["pciAddr"].(string)
+		addrs = append(addrs, addr)
+		found = device
+	}
+	switch len(addrs) {
+	case 0:
+		return nil, fmt.Errorf("no physical GPU reports kfd id %q", devID)
+	case 1:
+		return found, nil
+	default:
+		sort.Strings(addrs)
+		return nil, fmt.Errorf("kfd id %q is reported by %d physical GPUs (%s)", devID, len(addrs), strings.Join(addrs, ", "))
+	}
+}
+
+// pciAddrOf returns the PCI address encoded in a sysfs device path.
+func pciAddrOf(devicePath string) string { return filepath.Base(devicePath) }
+
+// readPartitionMode reads a current_*_partition file. A missing file means the device
+// does not support partitioning, which is a whole GPU. Any other error is returned
+// rather than reported as an empty mode, because an empty mode reads downstream as
+// "no partitioning" and would publish a partitioned GPU as one whole device.
+func readPartitionMode(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("unable to read %s: %w", path, err)
+	}
+	return strings.ToLower(strings.TrimSpace(string(data))), nil
+}
+
+// discoveryAttempts and discoveryBackoff bound the wait for a GPU whose sysfs entries are
+// still appearing. Discovery runs once at startup, so a device skipped here stays missing
+// until the plugin restarts.
+var (
+	discoveryAttempts = 5
+	discoveryBackoff  = 200 * time.Millisecond
+)
+
+// SetDiscoveryRetry overrides the retry bounds. Used by tests to avoid waiting out the
+// real backoff for a device that is meant to stay incomplete.
+func SetDiscoveryRetry(attempts int, backoff time.Duration) (restore func()) {
+	prevAttempts, prevBackoff := discoveryAttempts, discoveryBackoff
+	discoveryAttempts, discoveryBackoff = attempts, backoff
+	return func() { discoveryAttempts, discoveryBackoff = prevAttempts, prevBackoff }
+}
+
+// readStablePartitionPair returns the two partition modes only if they held still while
+// being read. They come from separate files, so a repartition in between yields a pair
+// that never existed on the hardware, such as spx from before the change with nps4 from
+// after it. read is a parameter so a test can change a mode between the two passes.
+func readStablePartitionPair(read func(string) (string, error), computeFile, memoryFile string) (string, string, error) {
+	compute, err := read(computeFile)
+	if err != nil {
+		return "", "", err
+	}
+	memory, err := read(memoryFile)
+	if err != nil {
+		return "", "", err
+	}
+
+	recheckCompute, err := read(computeFile)
+	if err != nil {
+		return "", "", err
+	}
+	recheckMemory, err := read(memoryFile)
+	if err != nil {
+		return "", "", err
+	}
+	if recheckCompute != compute || recheckMemory != memory {
+		return "", "", fmt.Errorf("partition mode changed during discovery (compute %q->%q, memory %q->%q)",
+			compute, recheckCompute, memory, recheckMemory)
+	}
+	return compute, memory, nil
+}
+
+// discoveryFingerprint identifies which devices a pass found rather than how many. Two
+// passes can report the same count with one GPU replaced by another, or with the same
+// GPUs under different card, render or partition mappings.
+func discoveryFingerprint(devices map[string]map[string]interface{}) string {
+	names := make([]string, 0, len(devices))
+	for name := range devices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	for _, name := range names {
+		d := devices[name]
+		fmt.Fprintf(&b, "%s|%v|%v|%v|%v|%v|%v|%v;", name, d["pciAddr"], d["card"], d["renderD"],
+			d["kfdID"], d["nodeId"], d["computePartitionType"], d["memoryPartitionType"])
+	}
+	return b.String()
+}
+
+// GetAMDGPUs returns the AMD GPUs on the node, keyed by part of the PCI address. A device
+// bound to amdgpu whose DRM or KFD entries have not appeared yet is retried a few times,
+// since discovery runs once and would otherwise leave the GPU missing for the lifetime of
+// the process. Publishing waits for two consecutive passes that skip nothing and describe
+// the same devices, which costs one backoff at startup and is what rules out a pass taken
+// across a driver reload or a repartition. A pass still unsettled after that is published
+// as before, since a plugin that never starts is worse than one that starts incomplete.
 func GetAMDGPUs() map[string]map[string]interface{} {
-	if _, err := os.Stat("/sys/module/amdgpu/drivers/"); err != nil {
+	previous, havePrevious := "", false
+	for attempt := 1; ; attempt++ {
+		devices, skipped := discoverAMDGPUs()
+		current := discoveryFingerprint(devices)
+		if skipped == 0 && havePrevious && current == previous {
+			return devices
+		}
+		previous, havePrevious = current, true
+		if attempt >= discoveryAttempts {
+			glog.Warningf("discovery had not settled after %d attempts (%d device(s) incomplete); publishing %d device(s) until the plugin restarts", attempt, skipped, len(devices))
+			return devices
+		}
+		glog.Infof("discovery not settled (%d device(s) incomplete); retrying (%d/%d)", skipped, attempt, discoveryAttempts)
+		time.Sleep(discoveryBackoff)
+	}
+}
+
+// discoverAMDGPUs runs one discovery pass, returning the devices it published and how many
+// it skipped for a condition that may still resolve.
+func discoverAMDGPUs() (map[string]map[string]interface{}, int) {
+	if _, err := os.Stat(AMDGPUDriversPath); err != nil {
+		// Retryable: the module may be reloading. On a node with no AMD GPU at all
+		// this costs one bounded backoff at startup and still returns empty.
 		glog.Warningf("amdgpu driver unavailable: %s", err)
-		return make(map[string]map[string]interface{})
+		return make(map[string]map[string]interface{}), 1
 	}
 
 	//ex: /sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0
-	matches, _ := filepath.Glob("/sys/module/amdgpu/drivers/pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*")
+	matches, _ := filepath.Glob(filepath.Join(AMDGPUDriversPath, "pci:amdgpu/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*"))
 
-	devID := ""
 	devices := make(map[string]map[string]interface{})
-	card, renderD, nodeId := 0, 128, 0
+	skipped := 0
 
 	// Get comprehensive topology information once instead of multiple calls
 	topologyInfo := GetTopologyInfo()
@@ -96,21 +294,22 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		memoryPartitionFile := filepath.Join(path, "current_memory_partition")
 		numaNodeFile := filepath.Join(path, "numa_node")
 
-		computePartitionType, memoryPartitionType := "", ""
 		var numaNode int
 
-		// Read the compute partition
-		if data, err := os.ReadFile(computePartitionFile); err == nil {
-			computePartitionType = strings.ToLower(strings.TrimSpace(string(data)))
-		} else {
-			glog.Warningf("Failed to read 'current_compute_partition' file at %s: %s", computePartitionFile, err)
+		computePartitionType, memoryPartitionType, err := readStablePartitionPair(readPartitionMode, computePartitionFile, memoryPartitionFile)
+		if err != nil {
+			glog.Errorf("Skipping device %s: %s", pciAddrOf(path), err)
+			skipped++
+			continue
 		}
 
-		// Read the memory partition
-		if data, err := os.ReadFile(memoryPartitionFile); err == nil {
-			memoryPartitionType = strings.ToLower(strings.TrimSpace(string(data)))
-		} else {
-			glog.Warningf("Failed to read 'current_memory_partition' file at %s: %s", memoryPartitionFile, err)
+		// The two files appear and disappear together on a partitioned GPU. Exactly one
+		// of them means the read caught the tree mid-change, and reading it as "no
+		// partitioning" would publish a partitioned GPU whole.
+		if (computePartitionType == "") != (memoryPartitionType == "") {
+			glog.Warningf("Skipping device %s: compute partition %q and memory partition %q are not both present", pciAddrOf(path), computePartitionType, memoryPartitionType)
+			skipped++
+			continue
 		}
 
 		if data, err := os.ReadFile(numaNodeFile); err == nil {
@@ -118,35 +317,41 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			numaNode, err = strconv.Atoi(numaNodeStr)
 			if err != nil {
 				glog.Warningf("Failed to convert 'numa_node' value to int: %s", err)
+				skipped++
 				continue
 			}
 		} else {
 			glog.Warningf("Failed to read 'numa_node' file at %s: %s", numaNodeFile, err)
+			skipped++
 			continue
 		}
 
 		glog.Info(path)
 		devPaths, _ := filepath.Glob(path + "/drm/*")
-
-		for _, devPath := range devPaths {
-			switch name := filepath.Base(devPath); {
-			case name[0:4] == "card":
-				card, _ = strconv.Atoi(name[4:])
-			case name[0:7] == "renderD":
-				renderD, _ = strconv.Atoi(name[7:])
-				if info, exists := topologyInfo[renderD]; exists {
-					devID = info.UniqueID
-					nodeId = info.NodeID
-				}
-			}
-
-		}
 		// Extract PCI address from path (e.g., "0000:19:00.0" from "/sys/module/amdgpu/drivers/pci:amdgpu/0000:19:00.0")
 		pciAddr := filepath.Base(path)
+		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
+		if !ok {
+			glog.Warningf("Skipping device %s: no valid card and renderD drm entries", pciAddr)
+			skipped++
+			continue
+		}
+		if devID == "" {
+			// Partitions find their parent by this id, and the platform loop skips a
+			// partition without one, so publishing this device alone would advertise
+			// part of a partitioned GPU. A device that is not partitioned is still
+			// usable whole, so only the partitioned case is dropped.
+			if computePartitionType != "" && computePartitionType != "spx" {
+				glog.Warningf("Skipping device %s (card%d renderD%d): compute mode %q but no KFD compute identity yet, so its partitions cannot be matched", pciAddr, card, renderD, computePartitionType)
+				skipped++
+				continue
+			}
+			glog.Warningf("device %s (card%d renderD%d) has no KFD compute identity (empty unique id); publishing it as a full GPU anyway", pciAddr, card, renderD)
+		}
 
 		// Get product name
 		productName := ""
-		productNamePath := fmt.Sprintf("/sys/class/drm/card%d/device/product_name", card)
+		productNamePath := filepath.Join(DRMClassPath, fmt.Sprintf("card%d/device/product_name", card))
 		if b, err := os.ReadFile(productNamePath); err != nil {
 			glog.Warningf("Failed to read product name from %s: %s", productNamePath, err)
 		} else {
@@ -182,9 +387,14 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		devices[filepath.Base(path)] = deviceInfo
 	}
 
+	// The platform loop appends to devices, so search a snapshot of the physical GPUs: a
+	// partition must match its parent, never an XCP sibling an earlier iteration added.
+	physicalDevices := make(map[string]map[string]interface{}, len(devices))
+	maps.Copy(physicalDevices, devices)
+
 	// certain products have additional devices (such as MI300's partitions)
 	//ex: /sys/devices/platform/amdgpu_xcp_30
-	platformMatches, _ := filepath.Glob("/sys/devices/platform/amdgpu_xcp_*")
+	platformMatches, _ := filepath.Glob(filepath.Join(PlatformDevicesPath, "amdgpu_xcp_*"))
 
 	for _, path := range platformMatches {
 		glog.Info(path)
@@ -196,32 +406,26 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		productName := ""
 		sysfsDeviceID := ""
 
-		for _, devPath := range devPaths {
-			switch name := filepath.Base(devPath); {
-			case name[0:4] == "card":
-				card, _ = strconv.Atoi(name[4:])
-			case name[0:7] == "renderD":
-				renderD, _ = strconv.Atoi(name[7:])
-				if info, exists := topologyInfo[renderD]; exists {
-					devID = info.UniqueID
-					nodeId = info.NodeID
-				}
-				// Set the computePartitionType, memoryPartitionType, numaNode, PCI address from the real GPU using the common devID
-				for _, device := range devices {
-					if device["kfdID"] == devID {
-						parentPciAddr = device["pciAddr"].(string)
-						numaNode = device["numaNode"].(int)
-						productName = device["productName"].(string)
-						sysfsDeviceID = device["deviceID"].(string)
-						if device["computePartitionType"].(string) != "" && device["memoryPartitionType"].(string) != "" {
-							computePartitionType = device["computePartitionType"].(string)
-							memoryPartitionType = device["memoryPartitionType"].(string)
-							break
-						}
-					}
-				}
-			}
+		card, renderD, nodeId, devID, ok := resolveDRMIdentity(devPaths, topologyInfo)
+		if !ok || devID == "" {
+			glog.Warningf("Skipping platform device %s: unresolved GPU identity", filepath.Base(path))
+			skipped++
+			continue
 		}
+		// Inherit the compute/memory partition, NUMA node, PCI address, product name,
+		// and device ID from the parent GPU that shares this kfd (unique) ID.
+		parent, err := uniquePhysicalParent(devID, physicalDevices)
+		if err != nil {
+			glog.Warningf("Skipping platform device %s: %s", filepath.Base(path), err)
+			skipped++
+			continue
+		}
+		parentPciAddr = parent["pciAddr"].(string)
+		numaNode = parent["numaNode"].(int)
+		productName = parent["productName"].(string)
+		sysfsDeviceID = parent["deviceID"].(string)
+		computePartitionType = parent["computePartitionType"].(string)
+		memoryPartitionType = parent["memoryPartitionType"].(string)
 		// This is needed because some of the visible renderD are actually not valid
 		// Their validity depends on topology information from KFD
 
@@ -257,13 +461,13 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 		devices[filepath.Base(path)] = deviceInfo
 	}
 	glog.Infof("Devices map: %v", devices)
-	return devices
+	return devices, skipped
 }
 
 // GetDeviceID reads the PCI device ID from sysfs for the given DRM card
 // Returns the device ID string (e.g., "0x740f") or empty string on failure
 func GetDeviceID(cardName string) string {
-	sysfsDevicePath := "/sys/class/drm/" + cardName + "/device/device"
+	sysfsDevicePath := filepath.Join(DRMClassPath, cardName, "device/device")
 	b, err := os.ReadFile(sysfsDevicePath)
 	if err != nil {
 		glog.Warningf("Failed to read device ID from %s: %s", sysfsDevicePath, err)
@@ -274,7 +478,7 @@ func GetDeviceID(cardName string) string {
 
 // AMDGPU check if a particular card is an AMD GPU by checking the device's vendor ID
 func AMDGPU(cardName string) bool {
-	sysfsVendorPath := "/sys/class/drm/" + cardName + "/device/vendor"
+	sysfsVendorPath := filepath.Join(DRMClassPath, cardName, "device/vendor")
 	b, err := os.ReadFile(sysfsVendorPath)
 	if err == nil {
 		vid := strings.TrimSpace(string(b))
@@ -363,7 +567,7 @@ var topoDomainRe = regexp.MustCompile(`domain\s(\d+)`)
 // GetTopologyInfo returns comprehensive topology information for all render devices
 // This combines the functionality of GetDevIdsFromTopology and GetNodeIdsFromTopology
 func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
-	topoRoot := "/sys/class/kfd/kfd"
+	topoRoot := KFDTopologyPath
 	if len(topoRootParam) == 1 {
 		topoRoot = topoRootParam[0]
 	}
