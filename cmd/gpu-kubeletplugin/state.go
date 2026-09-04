@@ -137,16 +137,202 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 
 	for _, c := range checkpoints {
 		if c == DriverPluginCheckpointFile {
+			if err := state.reconcileCDISpecs(); err != nil {
+				return nil, fmt.Errorf("unable to reconcile CDI spec files from checkpoint: %v", err)
+			}
 			return state, nil
 		}
 	}
 
-	checkpoint := newCheckpoint()
-	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
 	return state, nil
+}
+
+// validatePreparedDevices rejects a checkpoint entry that cannot be turned into a
+// CDI spec, so a corrupt or partial checkpoint fails the claim loudly rather than
+// panicking at startup or reporting a claim as prepared when it is not.
+func validatePreparedDevices(claimUID string, preparedDevices PreparedDevices) error {
+	if len(preparedDevices) == 0 {
+		return fmt.Errorf("checkpoint entry for claim %s has no prepared devices", claimUID)
+	}
+	for _, pd := range preparedDevices {
+		if pd == nil {
+			return fmt.Errorf("checkpoint entry for claim %s has a nil prepared device", claimUID)
+		}
+		if pd.DeviceName == "" {
+			return fmt.Errorf("checkpoint entry for claim %s has a device with no name", claimUID)
+		}
+		if pd.ContainerEdits == nil || pd.ContainerEdits.ContainerEdits == nil {
+			return fmt.Errorf("checkpoint entry for claim %s device %s has no container edits", claimUID, pd.DeviceName)
+		}
+		// Edits that grant no device node would rebuild into a spec that resolves but
+		// hands the container no GPU.
+		if len(pd.ContainerEdits.ContainerEdits.DeviceNodes) == 0 {
+			return fmt.Errorf("checkpoint entry for claim %s device %s grants no device nodes", claimUID, pd.DeviceName)
+		}
+		// A non-nil wrapper can still carry nil entries in its pointer slices; CDI
+		// dereferences these while determining the spec version, so a nil entry would
+		// panic before CreateClaimSpecFile could return a normal error.
+		edits := pd.ContainerEdits.ContainerEdits
+		for i, n := range edits.DeviceNodes {
+			if n == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil deviceNodes[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, h := range edits.Hooks {
+			if h == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil hooks[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, m := range edits.Mounts {
+			if m == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil mounts[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+		for i, nd := range edits.NetDevices {
+			if nd == nil {
+				return fmt.Errorf("checkpoint entry for claim %s device %s has a nil netDevices[%d]", claimUID, pd.DeviceName, i)
+			}
+		}
+	}
+	return nil
+}
+
+// validateCheckpointedClaim rejects a checkpoint entry that cannot be safely turned
+// into a CDI spec: one that is structurally corrupt, or that names a device not in
+// the current allocatable inventory (removed, repartitioned, or skipped by discovery
+// this boot). The name match is necessary but not sufficient; proving it is the same
+// physical GPU needs the stable identity tracked in #83.
+func (s *DeviceState) validateCheckpointedClaim(claimUID string, preparedDevices PreparedDevices) error {
+	if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+		return err
+	}
+	return s.claimDevicesAllocatable(claimUID, preparedDevices)
+}
+
+// claimDevicesAllocatable reports whether discovery currently offers every device the
+// claim was prepared with. Absence is not proof the claim is dead: discovery can be
+// incomplete, and an on-demand VFIO conversion returns the device under another name.
+func (s *DeviceState) claimDevicesAllocatable(claimUID string, preparedDevices PreparedDevices) error {
+	for _, pd := range preparedDevices {
+		if _, ok := s.allocatable[pd.DeviceName]; !ok {
+			return fmt.Errorf("checkpointed device %s for claim %s is not currently allocatable", pd.DeviceName, claimUID)
+		}
+	}
+	return nil
+}
+
+// ensureClaimSpec makes sure the CDI spec for a checkpointed claim exists, so a
+// claim reported as prepared from the checkpoint is actually usable. It is safe to
+// call repeatedly: CreateClaimSpecFile overwrites the deterministic spec path.
+func (s *DeviceState) ensureClaimSpec(claimUID string, preparedDevices PreparedDevices) error {
+	if err := s.validateCheckpointedClaim(claimUID, preparedDevices); err != nil {
+		return err
+	}
+	// The response always names the common device, so that spec has to exist as well.
+	if err := s.cdi.CreateCommonSpecFile(); err != nil {
+		return fmt.Errorf("ensure common CDI spec for claim %s: %w", claimUID, err)
+	}
+	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		return fmt.Errorf("ensure CDI spec for claim %s: %w", claimUID, err)
+	}
+	return nil
+}
+
+// deviceNodesCurrent reports whether every checkpointed device node still resolves on the
+// host. It is the only check that the checkpoint still describes this machine, so a node
+// that cannot be stat'd, changed type, or moved to different numbers fails it. CDI lets a
+// node carry only a path, with the host path defaulting to Path and the numbers resolved
+// by the runtime, and the VFIO path emits exactly that, so those are verified by path
+// rather than skipped. It does NOT catch a node that keeps its numbers but now backs a
+// different GPU, which needs the stable identity tracked in #83.
+func (s *DeviceState) deviceNodesCurrent(claims PreparedClaims) bool {
+	for _, preparedDevices := range claims {
+		for _, pd := range preparedDevices {
+			if pd == nil || pd.ContainerEdits == nil || pd.ContainerEdits.ContainerEdits == nil {
+				continue
+			}
+			for _, n := range pd.ContainerEdits.ContainerEdits.DeviceNodes {
+				if n == nil {
+					continue
+				}
+				hostPath := n.HostPath
+				if hostPath == "" {
+					hostPath = n.Path
+				}
+				if hostPath == "" {
+					continue
+				}
+				major, minor, devType, _, err := getDeviceAttrs(hostPath)
+				if err != nil {
+					klog.Warningf("checkpointed device node %s no longer resolves (%v); the checkpoint is stale", hostPath, err)
+					return false
+				}
+				if n.Type != "" && n.Type != devType {
+					klog.Warningf("checkpointed device node %s is type %q now, recorded %q; the checkpoint is stale", hostPath, devType, n.Type)
+					return false
+				}
+				if (n.Major != 0 || n.Minor != 0) && (major != n.Major || minor != n.Minor) {
+					klog.Warningf("checkpointed device node %s resolves to %d:%d now, recorded %d:%d; the checkpoint is stale", hostPath, major, minor, n.Major, n.Minor)
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// reconcileCDISpecs rebuilds the per-claim CDI spec files from the checkpoint on a
+// plugin restart, which can clear the (often tmpfs) spec directory while the
+// checkpoint survives. Startup fails when a checkpointed device node no longer resolves,
+// because deleting state kubelet still holds prepared would strand the claim. A malformed
+// entry loses its stale spec; one whose device is merely absent from the inventory keeps
+// it, since absence can be incomplete discovery or an on-demand VFIO rename. A CDI write
+// error fails startup, because the kubelet may not re-Prepare an already-prepared claim.
+func (s *DeviceState) reconcileCDISpecs() error {
+	checkpoint := newCheckpoint()
+	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+	}
+	if checkpoint.V1 == nil {
+		return fmt.Errorf("checkpoint has no v1 payload")
+	}
+
+	// Nothing here removes checkpointed state. kubelet does not call Prepare again for a
+	// claim it still considers prepared, so dropping one would strand it, and telling
+	// this boot apart from the one the claims were prepared in needs the stable identity
+	// in #83. Rebuild what still matches the host and refuse to start otherwise.
+	if !s.deviceNodesCurrent(checkpoint.V1.PreparedClaims) {
+		return fmt.Errorf("checkpointed device nodes no longer match the host; refusing to serve %d claim(s) kubelet may still consider prepared", len(checkpoint.V1.PreparedClaims))
+	}
+
+	for claimUID, preparedDevices := range checkpoint.V1.PreparedClaims {
+		if err := validatePreparedDevices(claimUID, preparedDevices); err != nil {
+			// Content this malformed can never be rebuilt into a spec, so drop the
+			// authorization the old one still grants.
+			klog.Warningf("removing the spec for malformed checkpoint entry %s: %v", claimUID, err)
+			if rmErr := s.cdi.DeleteClaimSpecFile(claimUID); rmErr != nil {
+				return fmt.Errorf("unable to remove the spec for malformed claim %s: %w", claimUID, rmErr)
+			}
+			continue
+		}
+		if err := s.claimDevicesAllocatable(claimUID, preparedDevices); err != nil {
+			// deviceNodesCurrent already proved the nodes resolve, so an existing spec is
+			// no less valid than before this start; an on-demand VFIO device lands here.
+			klog.Warningf("leaving the spec for claim %s in place: %v", claimUID, err)
+			continue
+		}
+		if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+			// A CDI write or filesystem error is not self-healing: the kubelet may keep
+			// the claim marked prepared and never call Prepare again, so fail startup
+			// loudly instead of registering with a missing spec.
+			return fmt.Errorf("rebuild CDI spec for claim %s on startup: %w", claimUID, err)
+		}
+	}
+	return nil
 }
 
 func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
@@ -159,10 +345,23 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
+	if checkpoint.V1 == nil {
+		return nil, fmt.Errorf("checkpoint has no v1 payload")
+	}
+	if checkpoint.V1.PreparedClaims == nil {
+		// An explicit "preparedClaims": null decodes to a nil map; initialize it so the
+		// assignment below does not panic.
+		checkpoint.V1.PreparedClaims = make(PreparedClaims)
+	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
-	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), nil
+	if preparedDevices := preparedClaims[claimUID]; preparedDevices != nil {
+		// The spec directory can be cleared (tmpfs) while the checkpoint survives, so
+		// make sure the spec exists before reporting the claim as already prepared.
+		if err := s.ensureClaimSpec(claimUID, preparedDevices); err != nil {
+			return nil, err
+		}
+		return preparedDevices.GetDevices(), nil
 	}
 
 	preparedDevices, err := s.prepareDevices(claim)
@@ -190,10 +389,19 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
+	if checkpoint.V1 == nil {
+		return fmt.Errorf("checkpoint has no v1 payload")
+	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] == nil {
 		return nil
+	}
+
+	// Startup validates the checkpoint, but Unprepare is reached again on every claim
+	// teardown, so a malformed entry would otherwise be dereferenced here instead.
+	if err := validatePreparedDevices(claimUID, preparedClaims[claimUID]); err != nil {
+		return fmt.Errorf("cannot unprepare claim %s: %w", claimUID, err)
 	}
 
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
@@ -378,6 +586,11 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 	for _, device := range devices {
 		allocDev, exists := s.allocatable[device.DeviceName]
 		if !exists {
+			// Reporting success here would tell kubelet the device was cleaned up while
+			// its host state, including a driver binding left by a VFIO conversion, is
+			// whatever the last Prepare made it. Surface it instead of releasing the
+			// claim on an unverifiable cleanup.
+			errs = append(errs, fmt.Errorf("device %s is no longer in the inventory, so its host state cannot be restored", device.DeviceName))
 			continue
 		}
 		if allocDev.Type() == consts.VfioDeviceType && allocDev.Vfio != nil && s.vfioManager != nil {
