@@ -9,7 +9,9 @@ vendors the prebuilt library, its runtime dependencies, and the public header.
 |---|---|
 | `include/amdsmi.h` | Public AMD SMI C header (MIT licensed). Used by the cgo `#include`. |
 | `lib/libamd_smi.so*` | Prebuilt AMD SMI shared library (+ soname symlinks). |
-| `lib/librocm_sysdeps_{nl_3,nl_genl_3,mnl}.so*` | The rocm_sysdeps netlink libraries that `libamd_smi.so` `DT_NEEDED`s (verified with `readelf -d`). Only these are vendored; the upstream tarball ships ~40 sysdeps libs but AMD SMI links just this netlink trio. |
+| `lib/librocm_sysdeps_{nl_3,nl_genl_3,mnl}.so*` | The rocm_sysdeps netlink libraries `libamd_smi.so` `DT_NEEDED`s (see `readelf -d`). |
+| `lib/librocm_sysdeps_drm{,_amdgpu}.so*` | The DRM backend `libamd_smi.so` `dlopen`s at runtime. It appears in no ELF header, so `readelf` does not list it — `strings libamd_smi.so \| grep ^lib` does. Without it amd-smi still loads, but queries backed by DRM return garbage (device BDFs come back as uninitialised memory). |
+| `lib/libdrm{,_amdgpu}.so` | Symlinks to the two above: the alternative names amd-smi tries when `dlopen`ing the DRM backend. |
 | `lib/.version` | The vendored tarball version, compared against `ROCM_TARBALL_URL` by `scripts/update-amdsmi.sh` to decide whether a refresh is needed. Written by the script; not hand-edited. |
 
 ## Provenance

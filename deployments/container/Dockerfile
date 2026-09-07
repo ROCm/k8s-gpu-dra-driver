@@ -58,10 +58,12 @@ RUN microdnf update -y && \
     microdnf clean all
 
 # Copy the vendored AMD SMI library (third_party/amd_smi, sourced from the ROCm
-# theRock tarball) for runtime linking, along with the rocm_sysdeps netlink
-# libraries it DT_NEEDEDs.
+# theRock tarball) for runtime linking, along with the rocm_sysdeps libraries it
+# needs: the netlink trio it DT_NEEDEDs, and the DRM pair it dlopens at runtime
+# (plus the libdrm* symlinks, the alternative names it tries first).
 COPY --from=build /build/third_party/amd_smi/lib/libamd_smi.so* /usr/lib64/
 COPY --from=build /build/third_party/amd_smi/lib/librocm_sysdeps_*.so* /usr/lib64/
+COPY --from=build /build/third_party/amd_smi/lib/libdrm*.so* /usr/lib64/
 
 COPY --from=build /artifacts/gpu-kubeletplugin /usr/bin/gpu-kubeletplugin
 COPY --from=build /artifacts/webhook           /usr/bin/webhook

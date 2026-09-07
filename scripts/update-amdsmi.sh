@@ -39,13 +39,24 @@ LIB_DIR="${AMDSMI_DIR}/lib"
 INCLUDE_DIR="${AMDSMI_DIR}/include"
 VERSION_FILE="${LIB_DIR}/.version"
 
-# The rocm_sysdeps netlink libraries that libamd_smi.so DT_NEEDEDs (verified with
-# `readelf -d libamd_smi.so`). The tarball ships ~40 sysdeps libs; AMD SMI links
-# only this netlink trio (nl_genl_3 additionally needs nl_3).
+# The rocm_sysdeps libraries libamd_smi.so needs. The tarball ships ~40; only
+# these are vendored.
+#
+# DT_NEEDED alone is not enough. The netlink trio below is linked and shows up in
+# `readelf -d libamd_smi.so`, but the DRM pair is dlopen'd at runtime and appears
+# nowhere in the ELF headers — `strings libamd_smi.so | grep ^lib` is what
+# surfaces it. Omitting it does not fail the build or the link: amd-smi starts,
+# then silently returns garbage from the queries backed by DRM (device BDFs came
+# back as uninitialised memory), so check both when adding a ROCm release.
+#
+# librocm_sysdeps_drm_amdgpu.so.1 additionally needs librocm_sysdeps_drm.so.2,
+# and nl_genl_3 needs nl_3.
 AMDSMI_SYSDEPS=(
   'librocm_sysdeps_nl_3.so*'
   'librocm_sysdeps_nl_genl_3.so*'
   'librocm_sysdeps_mnl.so*'
+  'librocm_sysdeps_drm.so*'
+  'librocm_sysdeps_drm_amdgpu.so*'
 )
 
 # The tarball filename is the version, and it distinguishes builds the library
@@ -85,12 +96,19 @@ mkdir -p "${LIB_DIR}" "${INCLUDE_DIR}"
 
 # Refresh the library, its required sysdeps, and the header. Clear old libs first
 # so a soname bump doesn't leave stale files behind.
-rm -f "${LIB_DIR}"/libamd_smi.so* "${LIB_DIR}"/librocm_sysdeps_*.so*
+rm -f "${LIB_DIR}"/libamd_smi.so* "${LIB_DIR}"/librocm_sysdeps_*.so* "${LIB_DIR}"/libdrm*.so*
 cp -a "${stage}"/lib/libamd_smi.so* "${LIB_DIR}/"
 for pattern in "${AMDSMI_SYSDEPS[@]}"; do
   cp -a "${stage}"/lib/rocm_sysdeps/lib/${pattern} "${LIB_DIR}/" 2>/dev/null || true
 done
 cp -a "${stage}"/include/amd_smi/amdsmi.h "${INCLUDE_DIR}/amdsmi.h"
+
+# amd-smi dlopens the DRM backend by either name, trying librocm_sysdeps_drm_*
+# first and falling back to the classic libdrm_* ones. The tarball ships the
+# latter only as symlinks in a directory we do not copy wholesale, so recreate
+# them next to their targets.
+ln -sf librocm_sysdeps_drm.so.2 "${LIB_DIR}/libdrm.so"
+ln -sf librocm_sysdeps_drm_amdgpu.so.1 "${LIB_DIR}/libdrm_amdgpu.so"
 
 # Record the vendored version; this is what the no-op check above compares.
 echo "${want_version}" > "${VERSION_FILE}"
