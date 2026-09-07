@@ -33,6 +33,7 @@ limitations under the License.
 package main
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
@@ -45,6 +46,26 @@ import (
 // gpuPCIAddresses must contain entries for all GPU indices that will be used.
 func newTestPartitionState(gpuPCIAddresses map[int]string, partitionableGPUs []int, allocatable AllocatableDevices) *PartitionState {
 	return NewPartitionState(gpuPCIAddresses, partitionableGPUs, allocatable, false, nil)
+}
+
+// testShares builds one PartitionShare per device name, giving each a distinct
+// share key so they occupy distinct partition slots (as separate requests in a
+// claim would).
+func testShares(claimUID string, deviceNames ...string) []PartitionShare {
+	shares := make([]PartitionShare, 0, len(deviceNames))
+	for i, deviceName := range deviceNames {
+		shares = append(shares, PartitionShare{
+			DeviceName: deviceName,
+			ShareKey:   ShareKey(claimUID, "req"+strconv.Itoa(i), deviceName, nil),
+		})
+	}
+	return shares
+}
+
+// testShareKey builds a single share key for direct ReservePartition/
+// ReleasePartition calls.
+func testShareKey(claimUID, deviceName string) string {
+	return ShareKey(claimUID, "req0", deviceName, nil)
 }
 
 // prepopulatePartitionState bypasses amd-smi by directly setting the modes.
@@ -81,7 +102,7 @@ func TestPartitionState_ReservePartition_SecondAllocationIsNoOp(t *testing.T) {
 
 	// Second allocation on same GPU with same compute+memory mode
 	deviceName := "gpu-0-cpx-nps4"
-	taintsChanged, err := ps.ReservePartition(deviceName)
+	taintsChanged, err := ps.ReservePartition(deviceName, testShareKey("claim-test", deviceName))
 	if err != nil {
 		t.Fatalf("expected no error for second allocation with same mode, got: %v", err)
 	}
@@ -117,7 +138,7 @@ func TestPartitionState_ReservePartition_ConflictingComputeModeReturnsError(t *t
 
 	// Try to allocate with SPX (conflicting compute mode)
 	deviceName := "gpu-0-spx-nps1"
-	_, err := ps.ReservePartition(deviceName)
+	_, err := ps.ReservePartition(deviceName, testShareKey("claim-test", deviceName))
 	if err == nil {
 		t.Fatal("expected error for conflicting compute mode, got nil")
 	}
@@ -140,7 +161,7 @@ func TestPartitionState_ReservePartition_ConflictingMemoryModeReturnsError(t *te
 
 	// Try to allocate GPU 1 with CPX but NPS1 memory (conflicting memory mode)
 	deviceName := "gpu-1-cpx-nps1"
-	_, err := ps.ReservePartition(deviceName)
+	_, err := ps.ReservePartition(deviceName, testShareKey("claim-test", deviceName))
 	if err == nil {
 		t.Fatal("expected error for conflicting memory mode, got nil")
 	}
@@ -153,7 +174,7 @@ func TestPartitionState_ReservePartition_FirstAllocationStampsTaints(t *testing.
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	taintsChanged, err := ps.ReservePartition("gpu-0-cpx-nps4")
+	taintsChanged, err := ps.ReservePartition("gpu-0-cpx-nps4", testShareKey("claim-test", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("expected no error for first reservation, got: %v", err)
 	}
@@ -178,7 +199,7 @@ func TestPartitionState_ReservePartition_InvalidDeviceNameReturnsError(t *testin
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	_, err := ps.ReservePartition("not-a-valid-name")
+	_, err := ps.ReservePartition("not-a-valid-name", testShareKey("claim-test", "not-a-valid-name"))
 	if err == nil {
 		t.Fatal("expected error for invalid device name, got nil")
 	}
@@ -202,12 +223,12 @@ func TestPartitionState_ReserveClaim_RetryIsIdempotent(t *testing.T) {
 	devices := []string{"gpu-0-cpx-nps4"}
 
 	// First Prepare attempt: reserve.
-	if _, err := ps.ReserveClaim(claimUID, devices); err != nil {
+	if _, err := ps.ReserveClaim(claimUID, testShares(claimUID, devices...)); err != nil {
 		t.Fatalf("first ReserveClaim failed: %v", err)
 	}
 	// Simulate several kubelet retries while the async reload converges.
 	for i := 0; i < 3; i++ {
-		if _, err := ps.ReserveClaim(claimUID, devices); err != nil {
+		if _, err := ps.ReserveClaim(claimUID, testShares(claimUID, devices...)); err != nil {
 			t.Fatalf("retry %d ReserveClaim failed: %v", i, err)
 		}
 	}
@@ -227,10 +248,10 @@ func TestPartitionState_ReserveClaim_DistinctClaimsAccumulate(t *testing.T) {
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	if _, err := ps.ReserveClaim("claim-1", []string{"gpu-0-cpx-nps4"}); err != nil {
+	if _, err := ps.ReserveClaim("claim-1", testShares("claim-1", "gpu-0-cpx-nps4")); err != nil {
 		t.Fatalf("ReserveClaim claim-1 failed: %v", err)
 	}
-	if _, err := ps.ReserveClaim("claim-2", []string{"gpu-0-cpx-nps4"}); err != nil {
+	if _, err := ps.ReserveClaim("claim-2", testShares("claim-2", "gpu-0-cpx-nps4")); err != nil {
 		t.Fatalf("ReserveClaim claim-2 failed: %v", err)
 	}
 
@@ -252,12 +273,12 @@ func TestPartitionState_ReserveClaim_ConflictRollsBackWholeClaim(t *testing.T) {
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0, 1}, allocatable)
 
 	// A prior claim already locked node memory mode to nps1 via GPU 1.
-	if _, err := ps.ReserveClaim("claim-prior", []string{"gpu-1-spx-nps1"}); err != nil {
+	if _, err := ps.ReserveClaim("claim-prior", testShares("claim-prior", "gpu-1-spx-nps1")); err != nil {
 		t.Fatalf("prior ReserveClaim failed: %v", err)
 	}
 
 	// New claim: first device is fine (nps1), second requests nps4 -> conflict.
-	_, err := ps.ReserveClaim("claim-new", []string{"gpu-0-spx-nps1", "gpu-0-cpx-nps4"})
+	_, err := ps.ReserveClaim("claim-new", testShares("claim-new", "gpu-0-spx-nps1", "gpu-0-cpx-nps4"))
 	if err == nil {
 		t.Fatal("expected conflict error for mixed memory modes, got nil")
 	}
@@ -271,7 +292,7 @@ func TestPartitionState_ReserveClaim_ConflictRollsBackWholeClaim(t *testing.T) {
 		t.Errorf("expected totalAllocCount=1 after rollback, got %d", ps.totalAllocCount)
 	}
 	// A retry of the same failing claim must still fail (not treated as reserved).
-	if _, err := ps.ReserveClaim("claim-new", []string{"gpu-0-spx-nps1", "gpu-0-cpx-nps4"}); err == nil {
+	if _, err := ps.ReserveClaim("claim-new", testShares("claim-new", "gpu-0-spx-nps1", "gpu-0-cpx-nps4")); err == nil {
 		t.Fatal("expected failing claim to remain unreserved on retry, got nil error")
 	}
 }
@@ -284,11 +305,11 @@ func TestPartitionState_ReleaseClaim_Idempotent(t *testing.T) {
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	if _, err := ps.ReserveClaim("claim-1", []string{"gpu-0-cpx-nps4"}); err != nil {
+	if _, err := ps.ReserveClaim("claim-1", testShares("claim-1", "gpu-0-cpx-nps4")); err != nil {
 		t.Fatalf("ReserveClaim failed: %v", err)
 	}
 
-	taintsChanged, err := ps.ReleaseClaim("claim-1", []string{"gpu-0-cpx-nps4"})
+	taintsChanged, err := ps.ReleaseClaim("claim-1", testShares("claim-1", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("ReleaseClaim failed: %v", err)
 	}
@@ -296,7 +317,7 @@ func TestPartitionState_ReleaseClaim_Idempotent(t *testing.T) {
 		t.Error("expected taintsChanged=true when last allocation released")
 	}
 	// Second release for the same claim must be a no-op.
-	taintsChanged, err = ps.ReleaseClaim("claim-1", []string{"gpu-0-cpx-nps4"})
+	taintsChanged, err = ps.ReleaseClaim("claim-1", testShares("claim-1", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("second ReleaseClaim failed: %v", err)
 	}
@@ -324,7 +345,7 @@ func TestPartitionState_ReleasePartition_DecrementsCounters(t *testing.T) {
 		2,
 	)
 
-	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4")
+	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4", testShareKey("claim-test", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -355,7 +376,7 @@ func TestPartitionState_ReleasePartition_LastAllocationClearsMode(t *testing.T) 
 		1,
 	)
 
-	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4")
+	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4", testShareKey("claim-test", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -390,7 +411,7 @@ func TestPartitionState_ReleasePartition_ClearsComputeModeWhenGPUDrained(t *test
 	)
 
 	// Release the single allocation on GPU 0
-	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4")
+	taintsChanged, err := ps.ReleasePartition("gpu-0-cpx-nps4", testShareKey("claim-test", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,7 +433,7 @@ func TestPartitionState_ReleasePartition_InvalidDeviceNameReturnsError(t *testin
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	_, err := ps.ReleasePartition("invalid-name")
+	_, err := ps.ReleasePartition("invalid-name", testShareKey("claim-test", "invalid-name"))
 	if err == nil {
 		t.Fatal("expected error for invalid device name, got nil")
 	}
@@ -552,7 +573,7 @@ func TestPartitionState_RecoverFromCheckpoint_RestoresState(t *testing.T) {
 		1: consts.ComputePartitionCPX,
 	}
 
-	ps.RecoverFromCheckpoint(consts.MemoryPartitionNPS4, gpuComputeModes, nil, preparedClaims)
+	ps.RecoverFromCheckpoint(consts.MemoryPartitionNPS4, gpuComputeModes, nil, preparedClaims, nil)
 
 	if ps.activeMemoryMode != consts.MemoryPartitionNPS4 {
 		t.Errorf("expected activeMemoryMode=%q, got %q", consts.MemoryPartitionNPS4, ps.activeMemoryMode)
@@ -588,10 +609,10 @@ func TestPartitionState_RecoverFromCheckpoint_MarksClaimsReserved(t *testing.T) 
 		},
 	}
 	ps.RecoverFromCheckpoint(consts.MemoryPartitionNPS4,
-		map[int]string{0: consts.ComputePartitionCPX}, nil, preparedClaims)
+		map[int]string{0: consts.ComputePartitionCPX}, nil, preparedClaims, nil)
 
 	// A recovered claim must be releasable exactly once.
-	taintsChanged, err := ps.ReleaseClaim("claim-uid-1", []string{"gpu-0-cpx-nps4"})
+	taintsChanged, err := ps.ReleaseClaim("claim-uid-1", testShares("claim-uid-1", "gpu-0-cpx-nps4"))
 	if err != nil {
 		t.Fatalf("ReleaseClaim after recovery failed: %v", err)
 	}
@@ -610,7 +631,7 @@ func TestPartitionState_RecoverFromCheckpoint_EmptyCheckpoint(t *testing.T) {
 	gpuPCIAddresses := map[int]string{0: "0000:19:00.0"}
 	ps := newTestPartitionState(gpuPCIAddresses, []int{0}, allocatable)
 
-	ps.RecoverFromCheckpoint("", nil, nil, PreparedClaims{})
+	ps.RecoverFromCheckpoint("", nil, nil, PreparedClaims{}, nil)
 
 	if ps.activeMemoryMode != "" {
 		t.Errorf("expected empty activeMemoryMode, got %q", ps.activeMemoryMode)
@@ -639,6 +660,7 @@ func TestPartitionState_RecoverFromCheckpoint_NonPartitionDevicesSkipped(t *test
 		map[int]string{0: consts.ComputePartitionCPX},
 		nil,
 		preparedClaims,
+		nil,
 	)
 
 	// Only the synthetic partition device should be counted
@@ -730,5 +752,231 @@ func TestPartitionState_BuildDevices_SortedByName(t *testing.T) {
 		if devices[i-1].Name > devices[i].Name {
 			t.Errorf("devices not sorted by name: %q came before %q", devices[i-1].Name, devices[i].Name)
 		}
+	}
+}
+
+// ---- Tests for per-share partition slot assignment ----
+
+// TestPartitionState_MultipleSharesOfSameDeviceGetDistinctSlots is the regression
+// test for partition-slot aliasing. A claim may hold several shares of one
+// synthetic device (AllowMultipleAllocations), and each must land on a different
+// physical partition. The slot used to be derived from the GPU's allocation
+// count, so every share of a device read the same value and the containers were
+// handed identical device nodes.
+func TestPartitionState_MultipleSharesOfSameDeviceGetDistinctSlots(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	shares := testShares("claim-1", "gpu-0-cpx-nps4", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-1", shares); err != nil {
+		t.Fatalf("ReserveClaim: %v", err)
+	}
+
+	slot0, ok := ps.GetAssignedSlot(0, shares[0].ShareKey)
+	if !ok {
+		t.Fatal("no slot assigned for first share")
+	}
+	slot1, ok := ps.GetAssignedSlot(0, shares[1].ShareKey)
+	if !ok {
+		t.Fatal("no slot assigned for second share")
+	}
+	if slot0 == slot1 {
+		t.Errorf("both shares of the same device got slot %d; expected distinct slots", slot0)
+	}
+	if ps.gpuAllocCounts[0] != 2 {
+		t.Errorf("expected gpuAllocCounts[0]=2, got %d", ps.gpuAllocCounts[0])
+	}
+}
+
+// TestPartitionState_ReleasedSlotIsReused verifies that releasing a share frees
+// its slot for a later share, and that a non-LIFO release does not disturb the
+// slot held by a share that is still active.
+func TestPartitionState_ReleasedSlotIsReused(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	a := testShares("claim-a", "gpu-0-cpx-nps4")
+	b := testShares("claim-b", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-a", a); err != nil {
+		t.Fatalf("ReserveClaim(a): %v", err)
+	}
+	if _, err := ps.ReserveClaim("claim-b", b); err != nil {
+		t.Fatalf("ReserveClaim(b): %v", err)
+	}
+
+	slotA, _ := ps.GetAssignedSlot(0, a[0].ShareKey)
+	slotB, _ := ps.GetAssignedSlot(0, b[0].ShareKey)
+	if slotA == slotB {
+		t.Fatalf("concurrent claims shared slot %d", slotA)
+	}
+
+	// Release the FIRST claim while the second is still active (non-LIFO).
+	if _, err := ps.ReleaseClaim("claim-a", a); err != nil {
+		t.Fatalf("ReleaseClaim(a): %v", err)
+	}
+
+	// The still-active claim must keep its slot.
+	if got, ok := ps.GetAssignedSlot(0, b[0].ShareKey); !ok || got != slotB {
+		t.Errorf("active claim's slot changed after unrelated release: got %d, ok=%v, want %d", got, ok, slotB)
+	}
+
+	// A new claim should take the freed slot, not collide with the active one.
+	c := testShares("claim-c", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-c", c); err != nil {
+		t.Fatalf("ReserveClaim(c): %v", err)
+	}
+	slotC, _ := ps.GetAssignedSlot(0, c[0].ShareKey)
+	if slotC == slotB {
+		t.Errorf("new claim collided with active claim on slot %d", slotC)
+	}
+	if slotC != slotA {
+		t.Errorf("expected new claim to reuse freed slot %d, got %d", slotA, slotC)
+	}
+}
+
+// TestPartitionState_ReserveClaimRetryKeepsSameSlot verifies that re-driving
+// Prepare for an already-reserved claim (as kubelet does while an async memory
+// reload converges) neither inflates the counts nor moves the assigned slot.
+func TestPartitionState_ReserveClaimRetryKeepsSameSlot(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	shares := testShares("claim-1", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-1", shares); err != nil {
+		t.Fatalf("ReserveClaim: %v", err)
+	}
+	first, _ := ps.GetAssignedSlot(0, shares[0].ShareKey)
+
+	for i := 0; i < 3; i++ {
+		if _, err := ps.ReserveClaim("claim-1", shares); err != nil {
+			t.Fatalf("ReserveClaim retry %d: %v", i, err)
+		}
+	}
+
+	again, ok := ps.GetAssignedSlot(0, shares[0].ShareKey)
+	if !ok || again != first {
+		t.Errorf("slot changed across retries: got %d (ok=%v), want %d", again, ok, first)
+	}
+	if ps.totalAllocCount != 1 {
+		t.Errorf("retries inflated totalAllocCount to %d, want 1", ps.totalAllocCount)
+	}
+}
+
+// TestPartitionState_RecoverFromCheckpoint_RestoresSlotsWithoutPreparedClaims is
+// the regression test for the reload-window checkpoint gap. A claim reserved but
+// not yet prepared (ApplyPartition returned errReloadInProgress) is absent from
+// preparedClaims. Rebuilding counts from preparedClaims alone left the node with
+// an active memory mode and taints but a zero allocation count, which no release
+// could ever clear. Slots are persisted at reservation time, so they carry it.
+func TestPartitionState_RecoverFromCheckpoint_RestoresSlotsWithoutPreparedClaims(t *testing.T) {
+	allocatable := make(AllocatableDevices)
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, allocatable)
+
+	shareKey := ShareKey("claim-inflight", "req0", "gpu-0-cpx-nps4", nil)
+	assigned := map[int]map[string]int{0: {shareKey: 0}}
+
+	// preparedClaims is empty: Prepare had not completed when the driver stopped.
+	ps.RecoverFromCheckpoint(consts.MemoryPartitionNPS4,
+		map[int]string{0: consts.ComputePartitionCPX},
+		nil,
+		PreparedClaims{},
+		assigned,
+	)
+
+	if ps.totalAllocCount != 1 {
+		t.Errorf("expected totalAllocCount=1 recovered from slots, got %d", ps.totalAllocCount)
+	}
+	if !ps.reservedClaims["claim-inflight"] {
+		t.Error("expected in-flight claim to be marked reserved after recovery")
+	}
+	if got, ok := ps.GetAssignedSlot(0, shareKey); !ok || got != 0 {
+		t.Errorf("expected recovered slot 0, got %d (ok=%v)", got, ok)
+	}
+
+	// The recovered reservation must be releasable, clearing the memory mode.
+	taintsChanged, err := ps.ReleaseClaim("claim-inflight", []PartitionShare{
+		{DeviceName: "gpu-0-cpx-nps4", ShareKey: shareKey},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseClaim: %v", err)
+	}
+	if !taintsChanged {
+		t.Error("expected taintsChanged=true when last allocation released")
+	}
+	if ps.activeMemoryMode != "" {
+		t.Errorf("memory mode not cleared after release: %q", ps.activeMemoryMode)
+	}
+}
+
+// TestPartitionState_RecoverFromCheckpoint_FallsBackToPreparedClaims verifies
+// that a checkpoint written before slots were persisted still recovers its
+// allocation counts, and that recovered devices are given distinct slots.
+func TestPartitionState_RecoverFromCheckpoint_FallsBackToPreparedClaims(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	preparedClaims := PreparedClaims{
+		"claim-old": {
+			{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}},
+			{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}},
+		},
+	}
+
+	ps.RecoverFromCheckpoint(consts.MemoryPartitionNPS4,
+		map[int]string{0: consts.ComputePartitionCPX},
+		nil,
+		preparedClaims,
+		nil, // no persisted slots: pre-upgrade checkpoint
+	)
+
+	if ps.totalAllocCount != 2 {
+		t.Errorf("expected totalAllocCount=2 from prepared claims, got %d", ps.totalAllocCount)
+	}
+	if !ps.reservedClaims["claim-old"] {
+		t.Error("expected recovered claim to be marked reserved")
+	}
+
+	// Both recovered devices must hold distinct slots.
+	seen := make(map[int]bool)
+	ps.mu.Lock()
+	for _, slot := range ps.assignedSlots[0] {
+		if seen[slot] {
+			t.Errorf("duplicate slot %d assigned during fallback recovery", slot)
+		}
+		seen[slot] = true
+	}
+	ps.mu.Unlock()
+	if len(seen) != 2 {
+		t.Errorf("expected 2 distinct recovered slots, got %d", len(seen))
+	}
+}
+
+// TestPartitionState_ReleaseClaim_ErrorKeepsClaimReserved verifies that a failed
+// release does not drop the claim's reservation marker. Dropping it would strand
+// the remaining counts, so totalAllocCount could never reach zero and the node
+// memory mode and its taints would never clear.
+func TestPartitionState_ReleaseClaim_ErrorKeepsClaimReserved(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	good := PartitionShare{DeviceName: "gpu-0-cpx-nps4", ShareKey: testShareKey("claim-1", "gpu-0-cpx-nps4")}
+	if _, err := ps.ReserveClaim("claim-1", []PartitionShare{good}); err != nil {
+		t.Fatalf("ReserveClaim: %v", err)
+	}
+
+	// A device name that cannot be parsed makes ReleasePartition fail.
+	bad := PartitionShare{DeviceName: "not-a-valid-name", ShareKey: "k"}
+	if _, err := ps.ReleaseClaim("claim-1", []PartitionShare{bad, good}); err == nil {
+		t.Fatal("expected error from ReleaseClaim when a device fails to release")
+	}
+
+	ps.mu.Lock()
+	stillReserved := ps.reservedClaims["claim-1"]
+	ps.mu.Unlock()
+	if !stillReserved {
+		t.Error("claim marker was dropped despite a failed release; remaining counts would be stranded")
+	}
+
+	// Retrying with only the good share must now balance the counts.
+	if _, err := ps.ReleaseClaim("claim-1", []PartitionShare{good}); err != nil {
+		t.Fatalf("retry ReleaseClaim: %v", err)
+	}
+	if ps.totalAllocCount != 0 {
+		t.Errorf("expected totalAllocCount=0 after successful retry, got %d", ps.totalAllocCount)
 	}
 }

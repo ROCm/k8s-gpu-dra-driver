@@ -303,6 +303,13 @@ becomes available again.
 
 ### Enabling auto-partition via Helm
 
+> **Drain the node before enabling or disabling this feature gate.**
+> Enabling it changes how GPUs are advertised: physical GPU devices are replaced
+> by synthetic partition devices. Allocations made before the switch are not
+> tracked by the partition state, so a claim prepared afterwards can repartition
+> a GPU that an existing pod is still using, resetting it mid-workload. The same
+> applies when turning the gate back off.
+
 Enable the `AutoPartition` feature gate in your Helm values:
 
 ```yaml

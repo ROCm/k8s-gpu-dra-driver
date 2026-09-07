@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,20 @@ type PartitionState struct {
 	// gpuAllocCounts tracks the number of active allocations per physical GPU.
 	gpuAllocCounts map[int]int
 
+	// assignedSlots records which partition slot each allocation share holds:
+	// gpuIndex -> shareKey -> slot ordinal.
+	//
+	// A slot is an index into the GPU's sub-partition device nodes, sorted by card
+	// index (see discoverPartitionDeviceNodes). It is assigned once at reservation
+	// time and looked up thereafter, rather than derived from gpuAllocCounts.
+	//
+	// The count cannot identify a slot: a claim may hold several shares of the same
+	// synthetic device (AllowMultipleAllocations), in which case every share reads
+	// the same final count; and releases need not be LIFO, so a freed slot must be
+	// reusable without shifting the slots still held. Deriving the slot from the
+	// count handed two concurrent shares the same physical partition.
+	assignedSlots map[int]map[string]int
+
 	// totalAllocCount is the total number of active partition allocations across all GPUs.
 	totalAllocCount int
 
@@ -112,6 +127,7 @@ func NewPartitionState(gpuPCIAddresses map[int]string, partitionableGPUs []int, 
 	return &PartitionState{
 		gpuComputeModes:   make(map[int]string),
 		gpuAllocCounts:    make(map[int]int),
+		assignedSlots:     make(map[int]map[string]int),
 		gpuPCIAddresses:   gpuPCIAddresses,
 		partitionableGPUs: partitionableGPUs,
 		allocatable:       allocatable,
@@ -119,6 +135,98 @@ func NewPartitionState(gpuPCIAddresses map[int]string, partitionableGPUs []int, 
 		recoverer:         recoverer,
 		reservedClaims:    make(map[string]bool),
 	}
+}
+
+// PartitionShare is one allocation share of a synthetic-partition device within
+// a claim: the device being allocated plus the key identifying this particular
+// share of it. A claim holding several shares of one device yields several
+// PartitionShares with the same DeviceName and distinct ShareKeys.
+type PartitionShare struct {
+	DeviceName string
+	ShareKey   string
+}
+
+// ShareKey identifies a single allocation share of a synthetic-partition device.
+//
+// DRA distinguishes concurrent shares of one device by ShareID, so the device
+// name alone is not unique within a claim. ShareID is a UUID (and is only set
+// when DRAConsumableCapacity is enabled), so it cannot serve as a slot ordinal
+// itself; it is used purely as an identity key. When absent (single-allocation
+// devices, where the device name is already unique within the claim) the request
+// name keeps the key distinct.
+func ShareKey(claimUID, request, deviceName string, shareID *string) string {
+	id := ""
+	if shareID != nil {
+		id = *shareID
+	}
+	return fmt.Sprintf("%s/%s/%s/%s", claimUID, request, deviceName, id)
+}
+
+// assignSlotLocked returns the partition slot for shareKey on gpuIndex, assigning
+// the lowest free slot if it does not already hold one. Callers must hold ps.mu.
+//
+// Assignment is idempotent: a repeat call for the same shareKey returns the slot
+// already held, which is what makes kubelet's Prepare retries stable.
+func (ps *PartitionState) assignSlotLocked(gpuIndex int, shareKey string) int {
+	slots, ok := ps.assignedSlots[gpuIndex]
+	if !ok {
+		slots = make(map[string]int)
+		ps.assignedSlots[gpuIndex] = slots
+	}
+	if slot, held := slots[shareKey]; held {
+		return slot
+	}
+
+	taken := make(map[int]bool, len(slots))
+	for _, s := range slots {
+		taken[s] = true
+	}
+	slot := 0
+	for taken[slot] {
+		slot++
+	}
+	slots[shareKey] = slot
+	return slot
+}
+
+// releaseSlotLocked frees the slot held by shareKey on gpuIndex, if any.
+// Callers must hold ps.mu.
+func (ps *PartitionState) releaseSlotLocked(gpuIndex int, shareKey string) {
+	slots, ok := ps.assignedSlots[gpuIndex]
+	if !ok {
+		return
+	}
+	delete(slots, shareKey)
+	if len(slots) == 0 {
+		delete(ps.assignedSlots, gpuIndex)
+	}
+}
+
+// GetAssignedSlot returns the partition slot held by shareKey on gpuIndex.
+// The second return value reports whether a slot is held.
+func (ps *PartitionState) GetAssignedSlot(gpuIndex int, shareKey string) (int, bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	slot, ok := ps.assignedSlots[gpuIndex][shareKey]
+	return slot, ok
+}
+
+// GetAssignedSlots returns a deep copy of the slot assignments, for checkpointing.
+func (ps *PartitionState) GetAssignedSlots() map[int]map[string]int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.assignedSlots) == 0 {
+		return nil
+	}
+	out := make(map[int]map[string]int, len(ps.assignedSlots))
+	for gpuIndex, slots := range ps.assignedSlots {
+		inner := make(map[string]int, len(slots))
+		for k, v := range slots {
+			inner[k] = v
+		}
+		out[gpuIndex] = inner
+	}
+	return out
 }
 
 // ReserveClaim is the claim-scoped, idempotent entry point for phase 1 of the
@@ -133,7 +241,7 @@ func NewPartitionState(gpuPCIAddresses map[int]string, partitionableGPUs []int, 
 // Reservation is all-or-nothing: if any device conflicts, devices already
 // reserved for THIS call are rolled back and the claim is left unreserved so a
 // later retry re-evaluates cleanly.
-func (ps *PartitionState) ReserveClaim(claimUID string, deviceNames []string) (taintsChanged bool, err error) {
+func (ps *PartitionState) ReserveClaim(claimUID string, shares []PartitionShare) (taintsChanged bool, err error) {
 	ps.mu.Lock()
 	alreadyReserved := ps.reservedClaims[claimUID]
 	ps.mu.Unlock()
@@ -141,19 +249,19 @@ func (ps *PartitionState) ReserveClaim(claimUID string, deviceNames []string) (t
 		return false, nil
 	}
 
-	var reserved []string
-	for _, deviceName := range deviceNames {
-		changed, rerr := ps.ReservePartition(deviceName)
+	var reserved []PartitionShare
+	for _, share := range shares {
+		changed, rerr := ps.ReservePartition(share.DeviceName, share.ShareKey)
 		if rerr != nil {
 			for _, d := range reserved {
-				if _, relErr := ps.ReleasePartition(d); relErr != nil {
-					klog.Warningf("error rolling back device %s during failed claim %s reservation: %v", d, claimUID, relErr)
+				if _, relErr := ps.ReleasePartition(d.DeviceName, d.ShareKey); relErr != nil {
+					klog.Warningf("error rolling back device %s during failed claim %s reservation: %v", d.DeviceName, claimUID, relErr)
 				}
 			}
 			return false, rerr
 		}
 		taintsChanged = taintsChanged || changed
-		reserved = append(reserved, deviceName)
+		reserved = append(reserved, share)
 	}
 
 	ps.mu.Lock()
@@ -168,7 +276,7 @@ func (ps *PartitionState) ReserveClaim(claimUID string, deviceNames []string) (t
 // no-op returning taintsChanged=false. This mirrors ReserveClaim so that the
 // per-GPU/total allocation counts balance out regardless of how many times
 // Prepare/Unprepare are re-driven.
-func (ps *PartitionState) ReleaseClaim(claimUID string, deviceNames []string) (taintsChanged bool, err error) {
+func (ps *PartitionState) ReleaseClaim(claimUID string, shares []PartitionShare) (taintsChanged bool, err error) {
 	ps.mu.Lock()
 	reserved := ps.reservedClaims[claimUID]
 	ps.mu.Unlock()
@@ -176,11 +284,15 @@ func (ps *PartitionState) ReleaseClaim(claimUID string, deviceNames []string) (t
 		return false, nil
 	}
 
-	for _, deviceName := range deviceNames {
-		changed, rerr := ps.ReleasePartition(deviceName)
+	for _, share := range shares {
+		changed, rerr := ps.ReleasePartition(share.DeviceName, share.ShareKey)
 		if rerr != nil {
-			klog.Warningf("error releasing device %s for claim %s: %v", deviceName, claimUID, rerr)
-			continue
+			// Keep the claim marked reserved: its counts are now only partially
+			// decremented, and dropping the marker here would strand the remainder
+			// (totalAllocCount never reaching 0, so the node memory mode and its
+			// taints would never clear). Returning the error lets the caller retry.
+			klog.Warningf("error releasing device %s for claim %s: %v", share.DeviceName, claimUID, rerr)
+			return taintsChanged, fmt.Errorf("error releasing device %s for claim %s: %w", share.DeviceName, claimUID, rerr)
 		}
 		taintsChanged = taintsChanged || changed
 	}
@@ -198,7 +310,11 @@ func (ps *PartitionState) ReleaseClaim(claimUID string, deviceNames []string) (t
 // hardware work, so the caller can publish the resulting taints to the API
 // server before the slow ApplyPartition step runs. Returns whether taints
 // changed (so the caller knows to re-publish) and an error on mode conflict.
-func (ps *PartitionState) ReservePartition(deviceName string) (taintsChanged bool, err error) {
+//
+// shareKey identifies the individual allocation share (see ShareKey) and is what
+// the assigned partition slot is recorded against. Reserving the same shareKey
+// again keeps its existing slot, so kubelet retries are stable.
+func (ps *PartitionState) ReservePartition(deviceName, shareKey string) (taintsChanged bool, err error) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -231,12 +347,16 @@ func (ps *PartitionState) ReservePartition(deviceName string) (taintsChanged boo
 		taintsChanged = true
 	}
 
+	// Claim a partition slot for this share before incrementing the counts, so the
+	// slot is owned by the share rather than inferred from the count later.
+	slot := ps.assignSlotLocked(gpuIndex, shareKey)
+
 	// Increment allocation counts.
 	ps.gpuAllocCounts[gpuIndex]++
 	ps.totalAllocCount++
 
-	klog.Infof("Partition reserved: GPU %d, compute=%s, memory=%s, gpuAllocs=%d, totalAllocs=%d, taintsChanged=%t",
-		gpuIndex, computeMode, memoryMode, ps.gpuAllocCounts[gpuIndex], ps.totalAllocCount, taintsChanged)
+	klog.Infof("Partition reserved: GPU %d, compute=%s, memory=%s, slot=%d, gpuAllocs=%d, totalAllocs=%d, taintsChanged=%t",
+		gpuIndex, computeMode, memoryMode, slot, ps.gpuAllocCounts[gpuIndex], ps.totalAllocCount, taintsChanged)
 
 	return taintsChanged, nil
 }
@@ -402,7 +522,10 @@ func (ps *PartitionState) GetMemoryReloadMarker() *MemoryReloadMarker {
 // Rollback is in-memory only: it never reverts the hardware partition mode. The
 // hardware may be left repartitioned; the next kubelet-driven Prepare reconciles
 // against sysfs via ApplyPartition's idempotent skip.
-func (ps *PartitionState) ReleasePartition(deviceName string) (taintsChanged bool, err error) {
+//
+// shareKey must match the one used to reserve; its partition slot is freed for
+// reuse by a later share on the same GPU.
+func (ps *PartitionState) ReleasePartition(deviceName, shareKey string) (taintsChanged bool, err error) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -410,6 +533,10 @@ func (ps *PartitionState) ReleasePartition(deviceName string) (taintsChanged boo
 	if err != nil {
 		return false, fmt.Errorf("error parsing device name for partition release: %v", err)
 	}
+
+	// Free this share's partition slot so a later allocation can take it. Slots
+	// are freed individually, so releases need not be LIFO.
+	ps.releaseSlotLocked(gpuIndex, shareKey)
 
 	// Decrement allocation counts
 	if ps.gpuAllocCounts[gpuIndex] > 0 {
@@ -461,7 +588,18 @@ func (ps *PartitionState) GetGPUComputeModes() map[int]string {
 // compute modes, and any in-flight KMM memory-reload marker from the persisted
 // checkpoint. Recovering the marker ensures a restart mid-reload resumes polling
 // for convergence instead of re-triggering the reload.
-func (ps *PartitionState) RecoverFromCheckpoint(activeMemoryMode string, gpuComputeModes map[int]string, memoryReload *MemoryReloadMarker, preparedClaims PreparedClaims) {
+//
+// Allocation counts and the reserved-claim set are rebuilt from assignedSlots,
+// which is written at reservation time and is therefore authoritative even for a
+// claim whose Prepare had not finished when the driver stopped. Rebuilding them
+// from preparedClaims instead would lose any reservation made during an in-flight
+// memory reload (that claim is only recorded as prepared once Prepare completes),
+// leaving the node with an active memory mode and taints but a zero allocation
+// count — a state no release can clear, pinning the node to that memory mode.
+//
+// preparedClaims is still used as a fallback for checkpoints written before slots
+// were persisted, so an upgrade with claims already prepared recovers its counts.
+func (ps *PartitionState) RecoverFromCheckpoint(activeMemoryMode string, gpuComputeModes map[int]string, memoryReload *MemoryReloadMarker, preparedClaims PreparedClaims, assignedSlots map[int]map[string]int) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -479,28 +617,53 @@ func (ps *PartitionState) RecoverFromCheckpoint(activeMemoryMode string, gpuComp
 		}
 	}
 
-	// Reconstruct allocation counts and the reserved-claim set from prepared
-	// claims. Marking each recovered claim as reserved keeps the idempotency
-	// guard consistent so a post-restart Unprepare (ReleaseClaim) decrements the
-	// counts instead of no-oping.
 	ps.gpuAllocCounts = make(map[int]int)
 	ps.totalAllocCount = 0
 	ps.reservedClaims = make(map[string]bool)
+	ps.assignedSlots = make(map[int]map[string]int)
 
-	for claimUID, devices := range preparedClaims {
-		claimHasPartitionDevice := false
-		for _, device := range devices {
-			gpuIndex, _, _, err := parseSyntheticPartitionDeviceName(device.DeviceName)
-			if err != nil {
-				// Not a synthetic-partition device, skip
-				continue
+	if len(assignedSlots) > 0 {
+		for gpuIndex, slots := range assignedSlots {
+			inner := make(map[string]int, len(slots))
+			for shareKey, slot := range slots {
+				inner[shareKey] = slot
+				ps.gpuAllocCounts[gpuIndex]++
+				ps.totalAllocCount++
+				// The claim UID is the first segment of the share key (see ShareKey).
+				if claimUID, _, ok := strings.Cut(shareKey, "/"); ok && claimUID != "" {
+					ps.reservedClaims[claimUID] = true
+				}
 			}
-			ps.gpuAllocCounts[gpuIndex]++
-			ps.totalAllocCount++
-			claimHasPartitionDevice = true
+			ps.assignedSlots[gpuIndex] = inner
 		}
-		if claimHasPartitionDevice {
-			ps.reservedClaims[claimUID] = true
+	} else {
+		// Checkpoint predates slot persistence: rebuild counts from prepared claims
+		// and re-assign slots in a stable order so recovered claims keep distinct
+		// partitions. Device names alone cannot distinguish shares, so a claim
+		// holding several shares of one device is keyed by position here.
+		claimUIDs := make([]string, 0, len(preparedClaims))
+		for claimUID := range preparedClaims {
+			claimUIDs = append(claimUIDs, claimUID)
+		}
+		slices.Sort(claimUIDs)
+
+		for _, claimUID := range claimUIDs {
+			claimHasPartitionDevice := false
+			for i, device := range preparedClaims[claimUID] {
+				gpuIndex, _, _, err := parseSyntheticPartitionDeviceName(device.DeviceName)
+				if err != nil {
+					// Not a synthetic-partition device, skip
+					continue
+				}
+				shareKey := ShareKey(claimUID, strconv.Itoa(i), device.DeviceName, nil)
+				ps.assignSlotLocked(gpuIndex, shareKey)
+				ps.gpuAllocCounts[gpuIndex]++
+				ps.totalAllocCount++
+				claimHasPartitionDevice = true
+			}
+			if claimHasPartitionDevice {
+				ps.reservedClaims[claimUID] = true
+			}
 		}
 	}
 
@@ -509,8 +672,8 @@ func (ps *PartitionState) RecoverFromCheckpoint(activeMemoryMode string, gpuComp
 		ps.applyMemoryTaints(ps.activeMemoryMode)
 	}
 
-	klog.Infof("Partition state recovered: memoryMode=%q, computeModes=%v, totalAllocs=%d",
-		ps.activeMemoryMode, ps.gpuComputeModes, ps.totalAllocCount)
+	klog.Infof("Partition state recovered: memoryMode=%q, computeModes=%v, totalAllocs=%d, slots=%v",
+		ps.activeMemoryMode, ps.gpuComputeModes, ps.totalAllocCount, ps.assignedSlots)
 }
 
 // applyMemoryTaints adds NoExecute taints to all synthetic-partition devices

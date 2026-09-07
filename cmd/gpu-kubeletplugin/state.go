@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -71,6 +72,15 @@ type OpaqueDeviceConfig struct {
 type PreparedDevice struct {
 	drapbv1.Device
 	ContainerEdits *cdiapi.ContainerEdits
+
+	// PartitionSlot is the partition slot this share was assigned on its GPU, for
+	// synthetic-partition devices. nil for regular GPU and VFIO devices. It is
+	// persisted so Unprepare rebuilds the same CDI device name that Prepare wrote.
+	PartitionSlot *int `json:"partitionSlot,omitempty"`
+
+	// ShareKey identifies the allocation share this device represents (see
+	// ShareKey). Persisted so Unprepare releases the exact slot that was reserved.
+	ShareKey string `json:"shareKey,omitempty"`
 }
 
 func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
@@ -177,6 +187,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 					checkpoint.V1.GPUComputeModes,
 					checkpoint.V1.MemoryReload,
 					checkpoint.V1.PreparedClaims,
+					checkpoint.V1.AssignedSlots,
 				)
 			}
 		}
@@ -215,22 +226,17 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	// and fail the Prepare; the kubelet re-drives it and ApplyPartition reconciles
 	// against sysfs idempotently.
 	if s.syntheticPartition && s.partitionState != nil && claim.Status.Allocation != nil {
-		// The partition devices for this claim are derivable from the allocation
+		// The partition shares for this claim are derivable from the allocation
 		// results on every call, so we rebuild the list each time Prepare is
 		// re-driven (kubelet retries it while an async memory reload converges).
-		var partitionDevices []string
-		for _, result := range claim.Status.Allocation.Devices.Results {
-			device, exists := s.allocatable[result.Device]
-			if !exists || device.SyntheticPartition == nil {
-				continue
-			}
-			partitionDevices = append(partitionDevices, result.Device)
-		}
+		// One entry per result, not per device: a claim may hold several shares of
+		// the same device, each of which needs its own partition slot.
+		partitionShares := partitionSharesForClaim(claim, s.allocatable)
 
 		// Phase 1: reserve modes and stamp taints (fast, in-memory only). This is
 		// idempotent per claim: on a retry the claim is already reserved, so counts
 		// are not re-incremented and taintsChanged is false.
-		taintsChanged, err := s.partitionState.ReserveClaim(claimUID, partitionDevices)
+		taintsChanged, err := s.partitionState.ReserveClaim(claimUID, partitionShares)
 		if err != nil {
 			return nil, fmt.Errorf("error reserving partition for claim %s: %v", claimUID, err)
 		}
@@ -239,13 +245,15 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		// scheduler-visible protection for the reload window, so roll back and fail.
 		if taintsChanged && s.driver != nil {
 			if err := s.driver.republishResources(context.TODO()); err != nil {
-				s.rollbackPartitions(claimUID, partitionDevices)
+				s.rollbackPartitions(claimUID, partitionShares)
 				return nil, fmt.Errorf("failed to publish partition taints before apply: %v", err)
 			}
 		}
 
 		// Phase 2: apply the hardware partition (slow: compute set + memory reload).
-		for _, deviceName := range partitionDevices {
+		// Applying is per physical device, so shares of the same device collapse to
+		// a single apply; ApplyPartition is idempotent against sysfs regardless.
+		for _, deviceName := range uniqueShareDevices(partitionShares) {
 			if err := s.partitionState.ApplyPartition(deviceName); err != nil {
 				// On a KMM node the reload is asynchronous: ApplyPartition reports
 				// errReloadInProgress until sysfs converges. This is NOT a failure —
@@ -259,7 +267,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 					}
 					return nil, fmt.Errorf("partition apply for device %s pending: %w", deviceName, err)
 				}
-				s.rollbackPartitions(claimUID, partitionDevices)
+				s.rollbackPartitions(claimUID, partitionShares)
 				return nil, fmt.Errorf("error applying partition for device %s: %v", deviceName, err)
 			}
 		}
@@ -289,9 +297,62 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	return preparedClaims[claimUID].GetDevices(), nil
 }
 
+// partitionSharesForClaim returns one PartitionShare per allocation result that
+// refers to a synthetic-partition device, in allocation order.
+//
+// There is one entry per result rather than per device name: DRA allows a claim
+// to hold several concurrent shares of the same device (AllowMultipleAllocations),
+// distinguished only by ShareID, and each share needs its own partition slot.
+func partitionSharesForClaim(claim *resourceapi.ResourceClaim, allocatable AllocatableDevices) []PartitionShare {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	claimUID := string(claim.UID)
+	var shares []PartitionShare
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		device, exists := allocatable[result.Device]
+		if !exists || device.SyntheticPartition == nil {
+			continue
+		}
+		shares = append(shares, PartitionShare{
+			DeviceName: result.Device,
+			ShareKey:   allocationResultKey(claimUID, &result),
+		})
+	}
+	return shares
+}
+
+// allocationResultKey returns the share key for one allocation result. Both the
+// reservation path (partitionSharesForClaim) and the device-node resolution path
+// (applyConfig) go through here, so the slot reserved for a share is the one
+// looked up for it.
+func allocationResultKey(claimUID string, result *resourceapi.DeviceRequestAllocationResult) string {
+	var shareID *string
+	if result.ShareID != nil {
+		s := string(*result.ShareID)
+		shareID = &s
+	}
+	return ShareKey(claimUID, result.Request, result.Device, shareID)
+}
+
+// uniqueShareDevices returns the distinct device names across the given shares,
+// preserving first-seen order.
+func uniqueShareDevices(shares []PartitionShare) []string {
+	seen := make(map[string]bool, len(shares))
+	var names []string
+	for _, share := range shares {
+		if seen[share.DeviceName] {
+			continue
+		}
+		seen[share.DeviceName] = true
+		names = append(names, share.DeviceName)
+	}
+	return names
+}
+
 // savePartitionCheckpoint writes the current partition state (active memory mode,
-// per-GPU compute modes, and any in-flight KMM reload marker) into the checkpoint.
-// No-op when synthetic-partition mode is disabled.
+// per-GPU compute modes, any in-flight KMM reload marker, and the per-share slot
+// assignments) into the checkpoint. No-op when synthetic-partition mode is disabled.
 func (s *DeviceState) savePartitionCheckpoint(checkpoint *Checkpoint) {
 	if !s.syntheticPartition || s.partitionState == nil {
 		return
@@ -299,6 +360,7 @@ func (s *DeviceState) savePartitionCheckpoint(checkpoint *Checkpoint) {
 	checkpoint.V1.ActiveMemoryMode = s.partitionState.GetActiveMemoryMode()
 	checkpoint.V1.GPUComputeModes = s.partitionState.GetGPUComputeModes()
 	checkpoint.V1.MemoryReload = s.partitionState.GetMemoryReloadMarker()
+	checkpoint.V1.AssignedSlots = s.partitionState.GetAssignedSlots()
 }
 
 // rollbackPartitions releases the reservation for the given claim (in-memory
@@ -306,11 +368,11 @@ func (s *DeviceState) savePartitionCheckpoint(checkpoint *Checkpoint) {
 // drop the now-stale taints. Used to undo a two-phase Prepare when a later phase
 // fails. It is idempotent per claim (see ReleaseClaim). The hardware partition
 // state is intentionally not reverted; see ReleasePartition.
-func (s *DeviceState) rollbackPartitions(claimUID string, devices []string) {
+func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShare) {
 	if s.partitionState == nil {
 		return
 	}
-	taintsChanged, err := s.partitionState.ReleaseClaim(claimUID, devices)
+	taintsChanged, err := s.partitionState.ReleaseClaim(claimUID, shares)
 	if err != nil {
 		klog.Warningf("Error rolling back partition reservation for claim %s: %v", claimUID, err)
 	}
@@ -342,15 +404,27 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	// claim-scoped release so the per-GPU/total allocation counts balance the
 	// reservation exactly once, regardless of retries.
 	if s.syntheticPartition && s.partitionState != nil {
-		var partitionDevices []string
-		for _, device := range preparedClaims[claimUID] {
+		// Release the exact shares that were reserved, using the share keys stored
+		// at Prepare time. Rebuilding them from device names would collapse several
+		// shares of one device into a single release and strand their slots.
+		var partitionShares []PartitionShare
+		for i, device := range preparedClaims[claimUID] {
 			allocDevice, exists := s.allocatable[device.DeviceName]
 			if !exists || allocDevice.SyntheticPartition == nil {
 				continue
 			}
-			partitionDevices = append(partitionDevices, device.DeviceName)
+			shareKey := device.ShareKey
+			if shareKey == "" {
+				// Checkpoint written before share keys were persisted: fall back to
+				// the positional key used by RecoverFromCheckpoint for such entries.
+				shareKey = ShareKey(claimUID, strconv.Itoa(i), device.DeviceName, nil)
+			}
+			partitionShares = append(partitionShares, PartitionShare{
+				DeviceName: device.DeviceName,
+				ShareKey:   shareKey,
+			})
 		}
-		changed, err := s.partitionState.ReleaseClaim(claimUID, partitionDevices)
+		changed, err := s.partitionState.ReleaseClaim(claimUID, partitionShares)
 		if err != nil {
 			klog.Warningf("Error releasing partition for claim %s: %v", claimUID, err)
 		}
@@ -484,7 +558,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			if err := castConfig.Validate(); err != nil {
 				return nil, fmt.Errorf("error validating GPU config: %w", err)
 			}
-			containerEdits, err := s.applyConfig(castConfig, results)
+			containerEdits, err := s.applyConfig(string(claim.UID), castConfig, results)
 			if err != nil {
 				return nil, fmt.Errorf("error applying GPU config: %w", err)
 			}
@@ -516,7 +590,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
 				configuredNames = append(configuredNames, result.Device)
-				perDeviceCDIContainerEdits[result.Device] = edits
+				perDeviceCDIContainerEdits[allocationResultKey(string(claim.UID), result)] = edits
 			}
 		default:
 			return nil, fmt.Errorf("runtime object is not a recognized configuration")
@@ -525,19 +599,32 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 
 	// Walk through each config and its associated device allocation results
 	// and construct the list of prepared devices to return.
+	claimUID := string(claim.UID)
 	var preparedDevices PreparedDevices
 	for _, results := range configResultsMap {
 		for _, result := range results {
-			cdiDeviceIDs := s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device})
+			key := allocationResultKey(claimUID, result)
 			device := &PreparedDevice{
 				Device: drapbv1.Device{
 					RequestNames: []string{result.Request},
 					PoolName:     result.Pool,
 					DeviceName:   result.Device,
-					CdiDeviceIds: cdiDeviceIDs,
 				},
-				ContainerEdits: perDeviceCDIContainerEdits[result.Device],
+				ContainerEdits: perDeviceCDIContainerEdits[key],
+				ShareKey:       key,
 			}
+
+			// Record the partition slot so the CDI device name is unique per share
+			// and can be rebuilt identically on unprepare.
+			if allocDev := s.allocatable[result.Device]; allocDev != nil && allocDev.SyntheticPartition != nil && s.partitionState != nil {
+				gpuIndex := allocDev.SyntheticPartition.GPUIndex
+				if slot, ok := s.partitionState.GetAssignedSlot(gpuIndex, key); ok {
+					device.PartitionSlot = &slot
+				}
+			}
+
+			// Built after PartitionSlot is set: the CDI device name embeds the slot.
+			device.CdiDeviceIds = s.cdi.GetClaimDevices(claimUID, []*PreparedDevice{device})
 			preparedDevices = append(preparedDevices, device)
 		}
 	}
@@ -608,7 +695,12 @@ func getDeviceAttrs(path string) (major, minor int64, devType, permissions strin
 }
 
 // applyConfig applies a configuration to a set of device allocation results.
-func (s *DeviceState) applyConfig(config *configapi.GpuConfig, results []*resourceapi.DeviceRequestAllocationResult) (PerDeviceCDIContainerEdits, error) {
+//
+// Results are keyed by share key rather than device name: a claim may hold
+// several shares of one synthetic-partition device, and each resolves to a
+// different physical partition, so keying by name would collapse them onto one
+// set of container edits.
+func (s *DeviceState) applyConfig(claimUID string, config *configapi.GpuConfig, results []*resourceapi.DeviceRequestAllocationResult) (PerDeviceCDIContainerEdits, error) {
 	perDeviceEdits := make(PerDeviceCDIContainerEdits)
 
 	for _, result := range results {
@@ -622,10 +714,12 @@ func (s *DeviceState) applyConfig(config *configapi.GpuConfig, results []*resour
 			return nil, fmt.Errorf("requested device is not allocatable: %v", result.Device)
 		}
 
+		key := allocationResultKey(claimUID, result)
+
 		if device.SyntheticPartition != nil {
 			// Synthetic-partition device: discover card/renderD by re-reading sysfs
 			// after GPU has been partitioned by ApplyPartition
-			card, renderD, err = s.discoverPartitionDeviceNodes(result.Device)
+			card, renderD, err = s.discoverPartitionDeviceNodes(result.Device, key)
 			if err != nil {
 				return nil, fmt.Errorf("error discovering device nodes for synthetic-partition device %s: %w", result.Device, err)
 			}
@@ -650,7 +744,7 @@ func (s *DeviceState) applyConfig(config *configapi.GpuConfig, results []*resour
 				result.Device, card, renderD, err)
 		}
 
-		perDeviceEdits[result.Device] = &cdiapi.ContainerEdits{ContainerEdits: edits}
+		perDeviceEdits[key] = &cdiapi.ContainerEdits{ContainerEdits: edits}
 	}
 
 	return perDeviceEdits, nil
@@ -708,8 +802,9 @@ func (s *DeviceState) buildDeviceCDIEdits(card, renderD int) (*cdispec.Container
 // discoverPartitionDeviceNodes re-reads sysfs to find the card/renderD indices
 // for a synthetic-partition device after GPU partitioning has been applied.
 // For SPX (full GPU), it uses the parent GPU's card/renderD.
-// For partitioned modes, it reads XCP platform devices from sysfs.
-func (s *DeviceState) discoverPartitionDeviceNodes(deviceName string) (card, renderD int, err error) {
+// For partitioned modes, it reads XCP platform devices from sysfs and selects the
+// one matching the partition slot reserved for shareKey.
+func (s *DeviceState) discoverPartitionDeviceNodes(deviceName, shareKey string) (card, renderD int, err error) {
 	gpuIndex, computeMode, _, err := parseSyntheticPartitionDeviceName(deviceName)
 	if err != nil {
 		return 0, 0, err
@@ -773,26 +868,24 @@ func (s *DeviceState) discoverPartitionDeviceNodes(deviceName string) (card, ren
 		return partitions[i].card < partitions[j].card
 	})
 
-	// Use allocCount-1 as the partition index (allocCount was already incremented in ReservePartition)
-	allocIndex := 0
-	if s.partitionState != nil {
-		s.partitionState.mu.Lock()
-		allocCount := s.partitionState.gpuAllocCounts[gpuIndex]
-		s.partitionState.mu.Unlock()
-		if allocCount > 0 {
-			allocIndex = allocCount - 1
-		}
+	// Use the slot assigned to this share at reservation time. It is looked up,
+	// not derived from the allocation count: several shares of one device see the
+	// same count, and releases need not be LIFO, so a count cannot say which
+	// partition this particular share owns.
+	slot, ok := s.partitionState.GetAssignedSlot(gpuIndex, shareKey)
+	if !ok {
+		return 0, 0, fmt.Errorf("no partition slot reserved for share %q on GPU %d", shareKey, gpuIndex)
 	}
 
-	if allocIndex >= len(partitions) {
-		return 0, 0, fmt.Errorf("allocation index %d exceeds available partitions %d for GPU %d",
-			allocIndex, len(partitions), gpuIndex)
+	if slot >= len(partitions) {
+		return 0, 0, fmt.Errorf("partition slot %d exceeds available partitions %d for GPU %d",
+			slot, len(partitions), gpuIndex)
 	}
 
-	card = partitions[allocIndex].card
-	renderD = partitions[allocIndex].renderD
-	klog.Infof("Auto-partition device %s mapped to partition %d: card=%d renderD=%d",
-		deviceName, allocIndex, card, renderD)
+	card = partitions[slot].card
+	renderD = partitions[slot].renderD
+	klog.Infof("Auto-partition device %s (share %s) mapped to partition slot %d: card=%d renderD=%d",
+		deviceName, shareKey, slot, card, renderD)
 
 	return card, renderD, nil
 }
