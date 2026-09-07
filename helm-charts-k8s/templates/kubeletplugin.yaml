@@ -110,12 +110,15 @@ spec:
         - name: sys
           mountPath: /sys
         # Required by BOTH auto-partition reload paths so the amdgpu kernel module
-        # can be reloaded from inside the container after a memory-partition change:
-        #  - non-KMM: amdsmi_gpu_driver_reload() fails with AMDSMI_STATUS_AMDGPU_RESTART_ERR
-        #    (54) unless the host module tree is visible (needs the amdgpu .ko + modules.dep).
-        #  - KMM: `modprobe -rv amdgpu` resolves the module from here.
-        # Verified on hardware: an in-pod reload returns 54 without this mount and
-        # succeeds with it.
+        # can be reloaded from inside the container after a memory-partition change.
+        # Both shell out to modprobe, which resolves the module and its modules.dep
+        # from here:
+        #  - non-KMM: `modprobe -rv amdgpu` then `modprobe -v amdgpu`.
+        #  - KMM: `modprobe -rv amdgpu`; the KMM operator reloads its own module.
+        # Verified on hardware while the non-KMM path still used
+        # amdsmi_gpu_driver_reload() (since removed in ROCm 10.0): an in-pod reload
+        # returned AMDSMI_STATUS_AMDGPU_RESTART_ERR (54) without this mount and
+        # succeeded with it.
         - name: lib-modules
           mountPath: /lib/modules
           readOnly: true

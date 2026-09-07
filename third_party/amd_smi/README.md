@@ -17,7 +17,11 @@ vendors the prebuilt library, its runtime dependencies, and the public header.
 These files are extracted from the ROCm **theRock** (rockrel) multi-arch distribution tarball.
 The source URL and version are pinned by `ROCM_TARBALL_URL` in the repository `env.sh`.
 
-Current version: **ROCm 10.0.0 RC2** (`libamd_smi.so.27`).
+Current version: **ROCm 10.0.0 GA** (`libamd_smi.so.27`, amdsmi `27.0.0+6b0e43f3`).
+
+Note that ROCm 10.0 removed `amdsmi_gpu_driver_reload()`. The driver reload that
+must follow a memory-partition change is done with `modprobe` instead; see
+`kmm.ReloadInboxDriver`.
 
 ## Refreshing
 

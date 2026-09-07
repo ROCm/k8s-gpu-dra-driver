@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +42,45 @@ var nodeModulesConfigGVR = schema.GroupVersionResource{
 // modprobeTimeout bounds the `modprobe -rv amdgpu` unload step. The KMM operator
 // handles the subsequent (slow) reload out of band; this only covers the unload.
 const modprobeTimeout = 30 * time.Second
+
+// inboxReloadTimeout bounds the full unload+load cycle on the non-KMM path.
+// Unlike the KMM path, nothing else brings the driver back, so this covers
+// re-probing every GPU and is correspondingly longer.
+const inboxReloadTimeout = 5 * time.Minute
+
+// ReloadInboxDriver reloads the inbox amdgpu kernel module to apply a staged
+// memory-partition change. It unloads and reloads the module in one bounded,
+// synchronous call, and returns only once the module is back.
+//
+// This replaces amdsmi_gpu_driver_reload(), which ROCm 10.0 removed;
+// amdsmi_set_gpu_memory_partition only stages the mode, so something still has to
+// cycle the driver for it to take effect. device-config-manager made the same
+// change for the same reason.
+//
+// It must NOT be used when the amdgpu driver is KMM-managed: reloading by hand
+// would bring back the inbox driver instead of the KMM-provisioned one. Use
+// Recoverer.TriggerReload on that path.
+//
+// The container must have the host module tree mounted at /lib/modules (the
+// amdgpu .ko plus modules.dep for the running kernel) and the kmod binaries
+// available; the kubelet plugin DaemonSet provides both.
+func ReloadInboxDriver(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, inboxReloadTimeout)
+	defer cancel()
+
+	klog.Infof("Reloading inbox amdgpu driver to apply memory partition change")
+	for _, args := range [][]string{{"-rv", "amdgpu"}, {"-v", "amdgpu"}} {
+		out, err := exec.CommandContext(ctx, "modprobe", args...).CombinedOutput()
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout running 'modprobe %s' after %v", strings.Join(args, " "), inboxReloadTimeout)
+			}
+			return fmt.Errorf("'modprobe %s' failed: %v, output: %s", strings.Join(args, " "), err, string(out))
+		}
+	}
+	klog.Infof("Inbox amdgpu driver reloaded")
+	return nil
+}
 
 // Recoverer triggers a KMM-managed amdgpu driver reload on the local node. It is
 // used instead of the amd-smi driver reload, which on a KMM node would restore

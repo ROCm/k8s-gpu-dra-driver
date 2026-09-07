@@ -440,11 +440,18 @@ func (ps *PartitionState) ApplyPartition(deviceName string) error {
 	return nil
 }
 
-// triggerMemoryReload starts the driver reload for a staged memory-mode change
+// triggerMemoryReload performs the driver reload for a staged memory-mode change
 // and records a checkpointed marker, returning errReloadInProgress. Callers must
-// hold ps.mu. On a KMM node the reload is delegated to the KMM operator (modprobe
-// + NodeModulesConfig delete). On a non-KMM node the blocking amd-smi reload is
-// run in a background goroutine so this call returns immediately.
+// hold ps.mu.
+//
+// On a KMM node the reload is delegated to the KMM operator (module unload +
+// NodeModulesConfig delete) and completes out of band, so this returns while it
+// is still converging. On a non-KMM node the inbox module is cycled directly,
+// which is synchronous: a failure is reported here rather than surfacing later as
+// a mode that never converges.
+//
+// Either way the marker is set only once the reload has been triggered (or
+// completed), and callers poll sysfs for convergence.
 func (ps *PartitionState) triggerMemoryReload(memoryMode string) error {
 	if ps.kmmEnabled {
 		if ps.recoverer == nil {
@@ -455,14 +462,15 @@ func (ps *PartitionState) triggerMemoryReload(memoryMode string) error {
 			return fmt.Errorf("failed to trigger KMM driver reload for memory mode %q: %v", memoryMode, err)
 		}
 	} else {
-		klog.Infof("Triggering async amd-smi driver reload for memory mode %q", memoryMode)
-		go func() {
-			if err := amdsmi.ReloadDriver(); err != nil {
-				klog.Warningf("async amd-smi driver reload for memory mode %q failed: %v (will be retried/observed via sysfs)", memoryMode, err)
-			} else {
-				klog.Infof("async amd-smi driver reload for memory mode %q completed", memoryMode)
-			}
-		}()
+		// ROCm 10.0 removed amdsmi_gpu_driver_reload(), so the inbox module is
+		// cycled directly. This blocks under ps.mu for the duration of the reload;
+		// it is bounded, and the alternative (a detached goroutine) loses the error
+		// and lets a failed reload masquerade as one still converging until the
+		// deadline expires.
+		klog.Infof("Reloading inbox amdgpu driver for memory mode %q", memoryMode)
+		if err := kmm.ReloadInboxDriver(context.TODO()); err != nil {
+			return fmt.Errorf("failed to reload inbox amdgpu driver for memory mode %q: %v", memoryMode, err)
+		}
 	}
 	ps.memoryReload = &MemoryReloadMarker{Mode: memoryMode, TriggeredAtUnix: time.Now().Unix()}
 	return errReloadInProgress

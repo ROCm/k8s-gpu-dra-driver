@@ -379,28 +379,6 @@ func SetMemoryPartition(gpuIndex int, mode string) error {
 		func() int { return int(C.amdsmi_set_gpu_memory_partition(handle, memType)) })
 }
 
-// ReloadDriver reloads the amdgpu kernel driver via amd-smi. This is required
-// once after changing the memory partition mode on ROCm 7.0.0+, since
-// amdsmi_set_gpu_memory_partition no longer reloads automatically.
-//
-// It must NOT be called when the amdgpu driver is KMM-managed: a manual reload
-// would bring back the inbox driver instead of the KMM-provisioned one. The
-// caller is responsible for that gating.
-func ReloadDriver() error {
-	klog.Infof("Reloading amdgpu driver after memory partition change")
-
-	// Call amdsmi_gpu_driver_reload() directly on the existing session. This
-	// unloads and reloads the amdgpu kernel module, so the container MUST have the
-	// host module tree mounted at /lib/modules (the amdgpu .ko + modules.dep for the
-	// running kernel) — without it the reload fails with
-	// AMDSMI_STATUS_AMDGPU_RESTART_ERR (54). The kubelet plugin DaemonSet mounts
-	// /lib/modules for exactly this reason. An active session is required
-	// (shutting it down first yields AMDSMI_STATUS_NOT_INIT, 32), so we do NOT
-	// release the session around the call.
-	ret := C.amdsmi_gpu_driver_reload()
-	if ret != C.AMDSMI_STATUS_SUCCESS {
-		return fmt.Errorf("amdsmi_gpu_driver_reload failed with status %d", int(ret))
-	}
-	klog.Infof("Driver reloaded successfully")
-	return nil
-}
+// Note: the driver reload that must follow a memory-partition change no longer
+// lives here. ROCm 10.0 removed amdsmi_gpu_driver_reload(), so the inbox amdgpu
+// module is reloaded directly via modprobe; see kmm.ReloadInboxDriver.
