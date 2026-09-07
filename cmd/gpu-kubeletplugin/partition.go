@@ -332,7 +332,7 @@ func (ps *PartitionState) ReservePartition(deviceName, shareKey string) (taintsC
 	}
 
 	// Validate memory partition mode on the node against the tracked mode.
-	if ps.activeMemoryMode != "" && ps.activeMemoryMode != memoryMode {
+	if !IsCompatibleMemoryMode(ps.activeMemoryMode, memoryMode) {
 		return false, fmt.Errorf("node is already in memory mode %q, cannot switch to %q while allocations exist",
 			ps.activeMemoryMode, memoryMode)
 	}

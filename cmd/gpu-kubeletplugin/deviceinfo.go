@@ -310,12 +310,8 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 		},
 		ConsumesCounters: []resourceapi.DeviceCounterConsumption{
 			{
-				CounterSet: fmt.Sprintf("gpu-%d-mutex", d.GPUIndex),
-				Counters: map[string]resourceapi.Counter{
-					"partition-mode": {
-						Value: *resource.NewQuantity(1, resource.DecimalSI),
-					},
-				},
+				CounterSet: mutexCounterSetName(d.GPUIndex),
+				Counters:   mutexCounters(),
 			},
 		},
 	}
@@ -333,25 +329,36 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 	return device
 }
 
-// mutexCounterSetName returns the shared counter set name for a GPU's partition mutex.
+// mutexCounterSetName returns the shared counter set name for a GPU's partition
+// mutex. The name a device consumes (ConsumesCounters) and the name the counter
+// set is published under must be identical, or the scheduler silently stops
+// enforcing one-partition-mode-per-GPU, so both sides call this.
 func mutexCounterSetName(gpuIndex int) string {
 	return fmt.Sprintf("gpu-%d-mutex", gpuIndex)
+}
+
+// mutexCounters returns the counter map for a GPU's partition-mode mutex. The
+// capacity of 1 is what makes the modes mutually exclusive: the scheduler can
+// satisfy only one partition device per GPU at a time.
+func mutexCounters() map[string]resourceapi.Counter {
+	return map[string]resourceapi.Counter{
+		"partition-mode": {
+			Value: *resource.NewQuantity(1, resource.DecimalSI),
+		},
+	}
 }
 
 // buildMutexCounterSet returns the CounterSet for a GPU's partition-mode mutex.
 func buildMutexCounterSet(gpuIndex int) resourceapi.CounterSet {
 	return resourceapi.CounterSet{
-		Name: mutexCounterSetName(gpuIndex),
-		Counters: map[string]resourceapi.Counter{
-			"partition-mode": {
-				Value: *resource.NewQuantity(1, resource.DecimalSI),
-			},
-		},
+		Name:     mutexCounterSetName(gpuIndex),
+		Counters: mutexCounters(),
 	}
 }
 
-// IsCompatibleMemoryMode checks whether the given memory mode is compatible
-// with the currently active memory mode (or if no mode is active).
+// IsCompatibleMemoryMode reports whether requestedMode can be satisfied while
+// activeMode is in effect. Memory mode is node-wide, so once a mode is locked
+// only that same mode is allowed; an empty activeMode means the node is unlocked.
 func IsCompatibleMemoryMode(activeMode, requestedMode string) bool {
 	return activeMode == "" || activeMode == requestedMode
 }

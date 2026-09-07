@@ -86,13 +86,5 @@ var ValidPartitionConfigs = []PartitionConfig{
 	{ComputePartitionCPX, MemoryPartitionNPS4, 8},
 }
 
-// PartitionCountMap maps compute partition mode to the number of partitions it creates
-var PartitionCountMap = map[string]int{
-	ComputePartitionSPX: 1,
-	ComputePartitionDPX: 2,
-	ComputePartitionQPX: 4,
-	ComputePartitionCPX: 8,
-}
-
 // MemoryPartitionTaintKey is the taint key used for memory partition conflicts
 const MemoryPartitionTaintKey = "gpu.amd.com/memory-partition-conflict"

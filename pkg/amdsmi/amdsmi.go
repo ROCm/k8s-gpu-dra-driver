@@ -39,14 +39,19 @@ import (
 const (
 	// retryCount is the number of retry attempts for AMDSMI_STATUS_BUSY.
 	retryCount = 3
-	// retryBackoff is the delay between retries when GPU is busy.
-	retryBackoff = 5 * time.Second
 
+	// statusSuccess maps to AMDSMI_STATUS_SUCCESS (0).
+	statusSuccess = 0
 	// statusBusy maps to AMDSMI_STATUS_BUSY (30).
 	statusBusy = 30
 	// statusSettingUnavailable maps to AMDSMI_STATUS_SETTING_UNAVAILABLE (55).
 	statusSettingUnavailable = 55
 )
+
+// retryBackoff is the delay between retries when the GPU is busy. It is a
+// variable rather than a constant so tests can drive the retry loop without
+// sleeping.
+var retryBackoff = 5 * time.Second
 
 var (
 	initMu   sync.Mutex
@@ -292,6 +297,39 @@ func memoryPartitionToC(mode string) (C.amdsmi_memory_partition_type_t, error) {
 	}
 }
 
+// setPartitionWithRetry applies a partition setting, retrying on
+// AMDSMI_STATUS_BUSY. set performs one attempt and returns its status; kind
+// ("compute"/"memory") and cCall (the underlying amd-smi function name) appear in
+// messages, and successLog describes what succeeded.
+//
+// On AMDSMI_STATUS_BUSY (30) it retries up to retryCount times with retryBackoff
+// between attempts. On AMDSMI_STATUS_SETTING_UNAVAILABLE (55) it fails
+// immediately: the mode is not supported on this GPU, so retrying cannot help.
+func setPartitionWithRetry(gpuIndex int, mode, kind, cCall, successLog string, set func() int) error {
+	for attempt := 0; attempt <= retryCount; attempt++ {
+		retCode := set()
+		if retCode == statusSuccess {
+			klog.Infof("%s %q on GPU %d", successLog, strings.ToUpper(mode), gpuIndex)
+			return nil
+		}
+
+		if retCode == statusSettingUnavailable {
+			return fmt.Errorf("%s partition mode %q is not available on GPU %d (AMDSMI_STATUS_SETTING_UNAVAILABLE)", kind, mode, gpuIndex)
+		}
+
+		if retCode == statusBusy && attempt < retryCount {
+			klog.Warningf("GPU %d is busy (AMDSMI_STATUS_BUSY), retrying in %v (attempt %d/%d)",
+				gpuIndex, retryBackoff, attempt+1, retryCount)
+			time.Sleep(retryBackoff)
+			continue
+		}
+
+		return fmt.Errorf("%s failed on GPU %d with status %d", cCall, gpuIndex, retCode)
+	}
+
+	return fmt.Errorf("%s failed on GPU %d after %d retries (GPU busy)", cCall, gpuIndex, retryCount)
+}
+
 // SetComputePartition sets the compute partition mode on the GPU at the given
 // index. The mode string should be one of: "spx", "dpx", "qpx", "cpx"
 // (case-insensitive).
@@ -309,29 +347,9 @@ func SetComputePartition(gpuIndex int, mode string) error {
 		return err
 	}
 
-	for attempt := 0; attempt <= retryCount; attempt++ {
-		ret := C.amdsmi_set_gpu_compute_partition(handle, computeType)
-		if ret == C.AMDSMI_STATUS_SUCCESS {
-			klog.Infof("Successfully set compute partition mode %q on GPU %d", strings.ToUpper(mode), gpuIndex)
-			return nil
-		}
-
-		retCode := int(ret)
-		if retCode == statusSettingUnavailable {
-			return fmt.Errorf("compute partition mode %q is not available on GPU %d (AMDSMI_STATUS_SETTING_UNAVAILABLE)", mode, gpuIndex)
-		}
-
-		if retCode == statusBusy && attempt < retryCount {
-			klog.Warningf("GPU %d is busy (AMDSMI_STATUS_BUSY), retrying in %v (attempt %d/%d)",
-				gpuIndex, retryBackoff, attempt+1, retryCount)
-			time.Sleep(retryBackoff)
-			continue
-		}
-
-		return fmt.Errorf("amdsmi_set_gpu_compute_partition failed on GPU %d with status %d", gpuIndex, retCode)
-	}
-
-	return fmt.Errorf("amdsmi_set_gpu_compute_partition failed on GPU %d after %d retries (GPU busy)", gpuIndex, retryCount)
+	return setPartitionWithRetry(gpuIndex, mode, "compute", "amdsmi_set_gpu_compute_partition",
+		"Successfully set compute partition mode",
+		func() int { return int(C.amdsmi_set_gpu_compute_partition(handle, computeType)) })
 }
 
 // SetMemoryPartition sets the memory partition mode on the GPU at the given
@@ -356,29 +374,9 @@ func SetMemoryPartition(gpuIndex int, mode string) error {
 		return err
 	}
 
-	for attempt := 0; attempt <= retryCount; attempt++ {
-		ret := C.amdsmi_set_gpu_memory_partition(handle, memType)
-		if ret == C.AMDSMI_STATUS_SUCCESS {
-			klog.Infof("Successfully staged memory partition mode %q on GPU %d", strings.ToUpper(mode), gpuIndex)
-			return nil
-		}
-
-		retCode := int(ret)
-		if retCode == statusSettingUnavailable {
-			return fmt.Errorf("memory partition mode %q is not available on GPU %d (AMDSMI_STATUS_SETTING_UNAVAILABLE)", mode, gpuIndex)
-		}
-
-		if retCode == statusBusy && attempt < retryCount {
-			klog.Warningf("GPU %d is busy (AMDSMI_STATUS_BUSY), retrying in %v (attempt %d/%d)",
-				gpuIndex, retryBackoff, attempt+1, retryCount)
-			time.Sleep(retryBackoff)
-			continue
-		}
-
-		return fmt.Errorf("amdsmi_set_gpu_memory_partition failed on GPU %d with status %d", gpuIndex, retCode)
-	}
-
-	return fmt.Errorf("amdsmi_set_gpu_memory_partition failed on GPU %d after %d retries (GPU busy)", gpuIndex, retryCount)
+	return setPartitionWithRetry(gpuIndex, mode, "memory", "amdsmi_set_gpu_memory_partition",
+		"Successfully staged memory partition mode",
+		func() int { return int(C.amdsmi_set_gpu_memory_partition(handle, memType)) })
 }
 
 // ReloadDriver reloads the amdgpu kernel driver via amd-smi. This is required
