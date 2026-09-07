@@ -57,9 +57,8 @@ want_version="$(basename "${ROCM_TARBALL_URL}")"
 want_version="${want_version#therock-dist-linux-multiarch-}"
 want_version="${want_version%.tar.gz}"
 
-# First line only: the file also carries the amdsmi build as provenance.
 have_version=""
-[[ -f "${VERSION_FILE}" ]] && have_version="$(head -1 "${VERSION_FILE}")"
+[[ -f "${VERSION_FILE}" ]] && have_version="$(cat "${VERSION_FILE}")"
 
 # ROCM_TARBALL_FORCE=1 re-pulls even when the versions agree, for the case the
 # filename cannot see: upstream respinning a tarball under the same URL.
@@ -93,18 +92,15 @@ for pattern in "${AMDSMI_SYSDEPS[@]}"; do
 done
 cp -a "${stage}"/include/amd_smi/amdsmi.h "${INCLUDE_DIR}/amdsmi.h"
 
-# Record the tarball version and, when the tarball carries it, the amdsmi build
-# it was cut from. The version drives the no-op check above; the build is
-# provenance for the exact artifact that was vendored.
+# Record the vendored version; this is what the no-op check above compares.
+echo "${want_version}" > "${VERSION_FILE}"
+
+# Report the amdsmi build the tarball was cut from. Printed rather than stored:
+# it identifies the artifact for the commit message, but nothing reads it back.
 amdsmi_build=""
 if [[ -f "${stage}/libexec/amdsmi_cli/_version.py" ]]; then
   amdsmi_build="$(sed -n 's/.*__version__ *= *"\([^"]*\)".*/\1/p' \
     "${stage}/libexec/amdsmi_cli/_version.py" | head -1)"
 fi
-
-{
-  echo "${want_version}"
-  [[ -n "${amdsmi_build}" ]] && echo "amdsmi ${amdsmi_build}"
-} > "${VERSION_FILE}"
 
 echo "amd-smi ${want_version} vendored into third_party/amd_smi${amdsmi_build:+ (amdsmi ${amdsmi_build})}."

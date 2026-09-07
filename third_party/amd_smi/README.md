@@ -10,7 +10,7 @@ vendors the prebuilt library, its runtime dependencies, and the public header.
 | `include/amdsmi.h` | Public AMD SMI C header (MIT licensed). Used by the cgo `#include`. |
 | `lib/libamd_smi.so*` | Prebuilt AMD SMI shared library (+ soname symlinks). |
 | `lib/librocm_sysdeps_{nl_3,nl_genl_3,mnl}.so*` | The rocm_sysdeps netlink libraries that `libamd_smi.so` `DT_NEEDED`s (verified with `readelf -d`). Only these are vendored; the upstream tarball ships ~40 sysdeps libs but AMD SMI links just this netlink trio. |
-| `lib/.version` | The vendored tarball version (first line), used by `scripts/update-amdsmi.sh` to decide whether a refresh is needed, plus the amdsmi build it was cut from as provenance. Written by the script; not hand-edited. |
+| `lib/.version` | The vendored tarball version, compared against `ROCM_TARBALL_URL` by `scripts/update-amdsmi.sh` to decide whether a refresh is needed. Written by the script; not hand-edited. |
 
 ## Provenance
 
