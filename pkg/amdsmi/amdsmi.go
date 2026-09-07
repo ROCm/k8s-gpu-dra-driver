@@ -26,7 +26,9 @@ package amdsmi
 */
 import "C"
 import (
+	"encoding/binary"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,14 +49,26 @@ const (
 )
 
 var (
-	initMu     sync.Mutex
-	initDone   bool
-	gpuHandles []C.amdsmi_processor_handle // cached at Init() time
+	initMu   sync.Mutex
+	initDone bool
+
+	// gpuHandles maps the driver's GPU index to the AMD SMI processor handle for
+	// that physical GPU. The mapping is resolved by PCI address at Init() time
+	// rather than by enumeration position: the driver assigns GPU indices by
+	// sorted PCI address, while AMD SMI enumerates by socket then processor, and
+	// nothing guarantees the two orders agree. Indexing a positionally-ordered
+	// handle slice with a PCI-ordered index would drive partition changes against
+	// the wrong physical GPU, and would disagree with the sysfs fallback paths,
+	// which address GPUs by PCI address.
+	gpuHandles map[int]C.amdsmi_processor_handle
 )
 
-// Init initializes the AMD SMI library for GPU operations.
+// Init initializes the AMD SMI library for GPU operations and binds each driver
+// GPU index to its AMD SMI processor handle using gpuPCIAddresses (GPU index ->
+// PCI address, e.g. "0000:19:00.0"), as produced by device discovery.
+//
 // It is idempotent: subsequent calls after the first successful init are no-ops.
-func Init() error {
+func Init(gpuPCIAddresses map[int]string) error {
 	initMu.Lock()
 	defer initMu.Unlock()
 
@@ -73,11 +87,83 @@ func Init() error {
 		C.amdsmi_shut_down()
 		return fmt.Errorf("failed to enumerate GPU handles: %v", err)
 	}
-	gpuHandles = handles
+
+	byIndex, err := mapHandlesByPCIAddress(handles, gpuPCIAddresses)
+	if err != nil {
+		C.amdsmi_shut_down()
+		return err
+	}
+	gpuHandles = byIndex
 
 	initDone = true
-	klog.Infof("AMD SMI initialized successfully, discovered %d GPUs", len(gpuHandles))
+	klog.Infof("AMD SMI initialized successfully, bound %d of %d enumerated GPUs by PCI address",
+		len(gpuHandles), len(handles))
 	return nil
+}
+
+// mapHandlesByPCIAddress resolves each enumerated processor handle to its PCI
+// address via amdsmi_get_gpu_device_bdf and keys it by the driver's GPU index.
+//
+// Every requested GPU index must resolve: a missing one means the driver could
+// not identify the GPU it would later partition, so this fails rather than
+// silently falling back to enumeration order.
+func mapHandlesByPCIAddress(handles []C.amdsmi_processor_handle, gpuPCIAddresses map[int]string) (map[int]C.amdsmi_processor_handle, error) {
+	handlesByAddr := make(map[string]C.amdsmi_processor_handle, len(handles))
+	for i, handle := range handles {
+		var bdf C.amdsmi_bdf_t
+		if ret := C.amdsmi_get_gpu_device_bdf(handle, &bdf); ret != C.AMDSMI_STATUS_SUCCESS {
+			klog.Warningf("amdsmi_get_gpu_device_bdf failed for enumerated GPU %d with status %d, skipping", i, int(ret))
+			continue
+		}
+		addr := formatBDF(bdfToUint64(bdf))
+		handlesByAddr[addr] = handle
+		klog.V(2).Infof("AMD SMI enumerated GPU %d has PCI address %s", i, addr)
+	}
+
+	byIndex := make(map[int]C.amdsmi_processor_handle, len(gpuPCIAddresses))
+	var missing []string
+	for gpuIndex, pciAddr := range gpuPCIAddresses {
+		handle, ok := handlesByAddr[strings.ToLower(pciAddr)]
+		if !ok {
+			missing = append(missing, fmt.Sprintf("GPU %d (%s)", gpuIndex, pciAddr))
+			continue
+		}
+		byIndex[gpuIndex] = handle
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		enumerated := make([]string, 0, len(handlesByAddr))
+		for addr := range handlesByAddr {
+			enumerated = append(enumerated, addr)
+		}
+		sort.Strings(enumerated)
+		return nil, fmt.Errorf("no AMD SMI handle found for %s; enumerated PCI addresses: %v",
+			strings.Join(missing, ", "), enumerated)
+	}
+
+	return byIndex, nil
+}
+
+// bdfToUint64 reads amdsmi_bdf_t as the single 64-bit value its `as_uint` member
+// aliases. cgo renders the union as an opaque [8]byte because its other members
+// are bitfields, so the value is decoded from those bytes rather than accessed as
+// a field. x86_64 and aarch64 are both little-endian.
+func bdfToUint64(bdf C.amdsmi_bdf_t) uint64 {
+	return binary.LittleEndian.Uint64(bdf[:])
+}
+
+// formatBDF renders the packed amdsmi_bdf_t value as a canonical Linux PCI
+// address ("domain:bus:device.function", e.g. "0000:19:00.0") so it can be
+// compared with the addresses discovery reads from sysfs.
+//
+// Bitfields are laid out from the least significant bit: function [0:3),
+// device [3:8), bus [8:16), domain [16:64).
+func formatBDF(raw uint64) string {
+	function := raw & 0x7
+	device := (raw >> 3) & 0x1f
+	bus := (raw >> 8) & 0xff
+	domain := raw >> 16
+	return fmt.Sprintf("%04x:%02x:%02x.%d", domain, bus, device, function)
 }
 
 // Shutdown shuts down the AMD SMI library.
@@ -160,14 +246,16 @@ func enumerateGPUHandles() ([]C.amdsmi_processor_handle, error) {
 	return handles, nil
 }
 
-// getProcessorHandle returns the cached processor handle for the GPU at the
-// given index (0-based). Handles are cached at Init() time before any
-// partitioning occurs, so indices remain stable.
+// getProcessorHandle returns the processor handle bound to the driver's GPU
+// index. Handles are resolved by PCI address at Init() time, before any
+// partitioning occurs, so the binding stays correct regardless of the order AMD
+// SMI enumerated its processors in.
 func getProcessorHandle(gpuIndex int) (C.amdsmi_processor_handle, error) {
-	if gpuIndex < 0 || gpuIndex >= len(gpuHandles) {
-		return nil, fmt.Errorf("GPU index %d out of range (have %d GPUs)", gpuIndex, len(gpuHandles))
+	handle, ok := gpuHandles[gpuIndex]
+	if !ok {
+		return nil, fmt.Errorf("no AMD SMI handle bound for GPU index %d (have %d GPUs)", gpuIndex, len(gpuHandles))
 	}
-	return gpuHandles[gpuIndex], nil
+	return handle, nil
 }
 
 // computePartitionToC maps a lowercase compute partition mode string to the

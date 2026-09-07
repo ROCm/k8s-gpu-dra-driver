@@ -85,9 +85,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		d.partitionableGPUs = state.partitionState.partitionableGPUs
 	}
 
-	// Initialize AMD SMI library for GPU partition operations
+	// Initialize AMD SMI library for GPU partition operations. The discovered PCI
+	// addresses bind each GPU index to its processor handle, so partition calls
+	// target the same physical GPU that discovery and the sysfs fallbacks do.
 	if d.enableSyntheticPartition {
-		if err := amdsmi.Init(); err != nil {
+		var gpuPCIAddresses map[int]string
+		if state.partitionState != nil {
+			gpuPCIAddresses = state.partitionState.gpuPCIAddresses
+		}
+		if err := amdsmi.Init(gpuPCIAddresses); err != nil {
 			return nil, fmt.Errorf("failed to initialize AMD SMI: %v", err)
 		}
 	}
