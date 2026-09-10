@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -78,11 +79,52 @@ func (c *GpuConfig) Normalize() error {
 	return nil
 }
 
+// IOMMUBackendPolicy encodes the IOMMU backend selection policy.
+type IOMMUBackendPolicy string
+
+const (
+	IOMMUBackendPolicyLegacyOnly    IOMMUBackendPolicy = "LegacyOnly"
+	IOMMUBackendPolicyPreferIommuFD IOMMUBackendPolicy = "PreferIommuFD"
+)
+
+// Validate ensures that IOMMUBackendPolicy has a valid value.
+func (p IOMMUBackendPolicy) Validate() error {
+	switch p {
+	case IOMMUBackendPolicyLegacyOnly, IOMMUBackendPolicyPreferIommuFD:
+		return nil
+	default:
+		return fmt.Errorf("unknown IOMMU backend policy: %v", p)
+	}
+}
+
+// IOMMUConfig holds parameters for configuring the IOMMU backend for VFIO devices.
+type IOMMUConfig struct {
+	BackendPolicy   IOMMUBackendPolicy `json:"backendPolicy"`
+	EnableAPIDevice *bool              `json:"enableAPIDevice,omitempty"`
+}
+
+// ShouldPreferIommuFD returns true if the IOMMU backend policy is PreferIommuFD.
+func (c *IOMMUConfig) ShouldPreferIommuFD() bool {
+	return c.BackendPolicy == IOMMUBackendPolicyPreferIommuFD
+}
+
+// ShouldEnableAPIDevice returns true if the IOMMU API device should be
+// made available to the workload.
+func (c *IOMMUConfig) ShouldEnableAPIDevice() bool {
+	return c.EnableAPIDevice != nil && *c.EnableAPIDevice
+}
+
+// Validate ensures that IOMMUConfig has a valid set of values.
+func (c *IOMMUConfig) Validate() error {
+	return c.BackendPolicy.Validate()
+}
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // VfioDeviceConfig holds configuration for VFIO passthrough devices.
 type VfioDeviceConfig struct {
 	metav1.TypeMeta `json:",inline"`
+	Iommu           *IOMMUConfig `json:"iommu,omitempty"`
 }
 
 // DefaultVfioDeviceConfig provides the default VFIO configuration.
@@ -92,6 +134,10 @@ func DefaultVfioDeviceConfig() *VfioDeviceConfig {
 			APIVersion: GroupName + "/" + Version,
 			Kind:       VfioDeviceConfigKind,
 		},
+		Iommu: &IOMMUConfig{
+			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
+			EnableAPIDevice: ptr.To(false),
+		},
 	}
 }
 
@@ -100,12 +146,28 @@ func (c *VfioDeviceConfig) Normalize() error {
 	if c == nil {
 		return fmt.Errorf("config is 'nil'")
 	}
+	if c.Iommu == nil {
+		c.Iommu = &IOMMUConfig{
+			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
+			EnableAPIDevice: ptr.To(false),
+		}
+		return nil
+	}
+	if c.Iommu.BackendPolicy == "" {
+		c.Iommu.BackendPolicy = IOMMUBackendPolicyLegacyOnly
+	}
+	if c.Iommu.EnableAPIDevice == nil {
+		c.Iommu.EnableAPIDevice = ptr.To(false)
+	}
 	return nil
 }
 
 // Validate checks a VfioDeviceConfig for invalid settings.
 func (c *VfioDeviceConfig) Validate() error {
-	return nil
+	if c.Iommu == nil {
+		return nil
+	}
+	return c.Iommu.Validate()
 }
 
 func init() {

@@ -188,6 +188,59 @@ func TestConfigure(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "0000:0d:00.0", string(bindContent))
 	})
+
+	t.Run("populates IommuFDCdev after bind", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.0", "")
+		createDriverDir(t, root, "vfio-pci")
+		vfioDevDir := filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio99")
+		require.NoError(t, os.MkdirAll(vfioDevDir, 0755))
+
+		vm := &VfioPciManager{}
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
+
+		err := vm.Configure(info)
+		assert.NoError(t, err)
+		assert.Equal(t, "vfio99", info.IommuFDCdev)
+	})
+
+	t.Run("no IommuFDCdev without vfio-dev", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.0", "")
+		createDriverDir(t, root, "vfio-pci")
+
+		vm := &VfioPciManager{}
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
+
+		err := vm.Configure(info)
+		assert.NoError(t, err)
+		assert.Equal(t, "", info.IommuFDCdev)
+	})
+}
+
+func TestVfioPciManager_IommuFDEnabled(t *testing.T) {
+	t.Run("enabled when /dev/iommu exists", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		iommuPath := filepath.Join(root, "dev/iommu")
+		require.NoError(t, os.MkdirAll(filepath.Dir(iommuPath), 0755))
+		require.NoError(t, os.WriteFile(iommuPath, nil, 0644))
+		iommuGroupDir := filepath.Join(root, "sys/kernel/iommu_groups/1")
+		require.NoError(t, os.MkdirAll(iommuGroupDir, 0755))
+
+		vm, err := NewVfioPciManager()
+		assert.NoError(t, err)
+		assert.True(t, vm.iommuFDEnabled)
+	})
+
+	t.Run("disabled when /dev/iommu missing", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		iommuGroupDir := filepath.Join(root, "sys/kernel/iommu_groups/1")
+		require.NoError(t, os.MkdirAll(iommuGroupDir, 0755))
+
+		vm, err := NewVfioPciManager()
+		assert.NoError(t, err)
+		assert.False(t, vm.iommuFDEnabled)
+	})
 }
 
 func TestUnconfigure(t *testing.T) {
@@ -261,5 +314,57 @@ func TestUnconfigure(t *testing.T) {
 		bindContent, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/amdgpu/bind"))
 		require.NoError(t, err)
 		assert.Equal(t, "0000:0d:00.0", string(bindContent))
+	})
+}
+
+func TestGetVfioCommonCDI(t *testing.T) {
+	t.Run("legacy with API device", func(t *testing.T) {
+		edits := GetVfioCommonCDIEdits(false, false)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/vfio")
+	})
+
+	t.Run("iommufd preferred and available", func(t *testing.T) {
+		edits := GetVfioCommonCDIEdits(true, true)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/iommu")
+	})
+
+	t.Run("iommufd preferred but not available", func(t *testing.T) {
+		edits := GetVfioCommonCDIEdits(true, false)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/vfio")
+	})
+
+	t.Run("legacy always includes /dev/vfio/vfio", func(t *testing.T) {
+		edits := GetVfioCommonCDIEdits(false, false)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/vfio")
+	})
+}
+
+func TestGetVfioDeviceCDI(t *testing.T) {
+	t.Run("legacy group path", func(t *testing.T) {
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42"}
+		edits, usingIommuFD := GetVfioDeviceCDIEdits(info, false)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/42")
+		assert.False(t, usingIommuFD)
+	})
+
+	t.Run("iommufd cdev path", func(t *testing.T) {
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42", IommuFDCdev: "vfio5"}
+		edits, usingIommuFD := GetVfioDeviceCDIEdits(info, true)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/devices/vfio5")
+		assert.True(t, usingIommuFD)
+	})
+
+	t.Run("iommufd preferred but no cdev falls back to legacy", func(t *testing.T) {
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42", IommuFDCdev: ""}
+		edits, usingIommuFD := GetVfioDeviceCDIEdits(info, true)
+		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+		assert.Contains(t, edits.ContainerEdits.DeviceNodes[0].Path, "/dev/vfio/42")
+		assert.False(t, usingIommuFD)
 	})
 }
