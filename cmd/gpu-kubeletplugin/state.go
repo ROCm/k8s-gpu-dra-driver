@@ -629,7 +629,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			}
 			var configuredNames []string
 			for _, result := range results {
-				edits, err := s.applyVFIOConfig(result)
+				edits, err := s.applyVFIOConfig(result, castConfig)
 				if err != nil {
 					if dev := s.allocatable[result.Device]; dev != nil && dev.Vfio != nil {
 						configuredNames = append(configuredNames, result.Device)
@@ -1012,7 +1012,7 @@ func GetOpaqueDeviceConfigs(
 }
 
 // applyVFIOConfig configures a VFIO passthrough device and returns CDI edits.
-func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocationResult) (*cdiapi.ContainerEdits, error) {
+func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocationResult, config *configapi.VfioDeviceConfig) (*cdiapi.ContainerEdits, error) {
 	device, exists := s.allocatable[result.Device]
 	if !exists || device.Vfio == nil {
 		return nil, fmt.Errorf("device %s is not a VFIO device", result.Device)
@@ -1025,17 +1025,16 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 		return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
 	}
 
-	deviceEdits, err := GetVfioCDIContainerEdits(device.Vfio)
-	if err != nil {
-		return nil, fmt.Errorf("error building CDI edits for %s: %w", result.Device, err)
-	}
+	preferIommuFD := config.Iommu != nil && config.Iommu.ShouldPreferIommuFD()
 
-	commonEdits, err := GetVfioCommonCDIContainerEdits()
-	if err != nil {
-		return nil, fmt.Errorf("error building common VFIO CDI edits: %w", err)
-	}
+	deviceEdits, usingIommuFD := GetVfioDeviceCDIEdits(device.Vfio, preferIommuFD)
+	commonEdits := GetVfioCommonCDIEdits(usingIommuFD, s.vfioManager.iommuFDEnabled)
 	deviceEdits.ContainerEdits.DeviceNodes = append(deviceEdits.ContainerEdits.DeviceNodes, commonEdits.ContainerEdits.DeviceNodes...)
 
-	klog.Infof("Applied VFIO config for %s: iommuGroup=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup)
+	backend := "legacy"
+	if usingIommuFD {
+		backend = "iommufd"
+	}
+	klog.Infof("Applied VFIO config for %s: iommuGroup=%s, backend=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup, backend)
 	return deviceEdits, nil
 }
