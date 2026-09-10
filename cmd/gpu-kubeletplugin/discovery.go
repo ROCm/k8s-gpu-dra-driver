@@ -73,17 +73,33 @@ func getMemoryBytes(gpuInfoMap map[string]interface{}, deviceType, pciAddr strin
 	return 0
 }
 
-func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttribute, deviceattribute.DeviceAttribute, string, error) {
+type topologyAttrs struct {
+	pcieRoot deviceattribute.DeviceAttribute
+	pciBusID deviceattribute.DeviceAttribute
+	numaNode deviceattribute.DeviceAttribute
+	pciAddr  string
+}
+
+func getPcieInfo(gpuInfoMap map[string]interface{}) (topologyAttrs, error) {
 	pciAddr := gpuInfoMap["pciAddr"].(string)
 	pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciAddr)
 	if err != nil {
-		return pcieRootAttr, deviceattribute.DeviceAttribute{}, "", fmt.Errorf("Failed to get PCIe root attribute for device %s: %v", pciAddr, err)
+		return topologyAttrs{}, fmt.Errorf("failed to get PCIe root attribute for device %s: %v", pciAddr, err)
 	}
 	pciBusIDAttr, err := deviceattribute.GetPCIBusIDAttribute(pciAddr)
 	if err != nil {
-		return pcieRootAttr, pciBusIDAttr, "", fmt.Errorf("Failed to get PCI Bus ID attribute for device %s: %v", pciAddr, err)
+		return topologyAttrs{}, fmt.Errorf("failed to get PCI Bus ID attribute for device %s: %v", pciAddr, err)
 	}
-	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
+	numaNodeAttr, err := deviceattribute.GetNUMANodeAttributeByPCIBusID(pciAddr, deviceattribute.ScalarAttribute)
+	if err != nil {
+		klog.V(2).Infof("Standard numaNode attribute unavailable for %s: %v", pciAddr, err)
+	}
+	return topologyAttrs{
+		pcieRoot: pcieRootAttr,
+		pciBusID: pciBusIDAttr,
+		numaNode: numaNodeAttr,
+		pciAddr:  pciAddr,
+	}, nil
 }
 
 // enumerateAllPossibleDevices discovers AMD GPUs and returns allocatable devices.
@@ -136,12 +152,14 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 			}
 		}
 
-		// Get PCIe root attribute for this device using the PCI address from the device info
-		pcieRootAttr, pciBusIDAttr, pciAddrFromMap, err := getPcieInfo(gpuInfoMap)
+		topo, err := getPcieInfo(gpuInfoMap)
 		if err != nil {
-			// Continue without PCIe root attribute rather than failing completely
 			klog.Warning(err.Error())
 		}
+		pcieRootAttr := topo.pcieRoot
+		pciBusIDAttr := topo.pciBusID
+		numaNodeAttr := topo.numaNode
+		pciAddrFromMap := topo.pciAddr
 
 		// Check compute partition type to determine device type
 		computePartitionType := gpuInfoMap["computePartitionType"].(string)
@@ -170,6 +188,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					ProductName:      gpuInfoMap["productName"].(string),
 					pcieRootAttr:     pcieRootAttr,
 					pciBusIDAttr:     pciBusIDAttr,
+					numaNodeAttr:     numaNodeAttr,
 					SimdUnits:        simdUnits,
 					ComputeUnits:     computeUnits,
 					NumaNode:         gpuInfoMap["numaNode"].(int),
@@ -202,6 +221,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					NumaNode:         gpuInfoMap["numaNode"].(int),
 					pcieRootAttr:     pcieRootAttr,
 					pciBusIDAttr:     pciBusIDAttr,
+					numaNodeAttr:     numaNodeAttr,
 				}
 
 				device := &AllocatableDevice{SyntheticPartition: apDevice}
@@ -232,6 +252,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					ProductName:      gpuInfoMap["productName"].(string),
 					pcieRootAttr:     pcieRootAttr,
 					pciBusIDAttr:     pciBusIDAttr,
+					numaNodeAttr:     numaNodeAttr,
 					SimdUnits:        simdUnits,
 					ComputeUnits:     computeUnits,
 					NumaNode:         gpuInfoMap["numaNode"].(int),
@@ -258,6 +279,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					ProductName:   gpuInfoMap["productName"].(string),
 					pcieRootAttr:  pcieRootAttr,
 					pciBusIDAttr:  pciBusIDAttr,
+					numaNodeAttr:  numaNodeAttr,
 				}
 
 				// Create partition info
@@ -311,6 +333,10 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						klog.Warningf("Failed to get PCIe root for VFIO PF %s: %v", pf.PCIAddress, err)
 					}
 					pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(pf.PCIAddress)
+					numaNodeAttr, err := deviceattribute.GetNUMANodeAttributeByPCIBusID(pf.PCIAddress, deviceattribute.ScalarAttribute)
+					if err != nil {
+						klog.V(2).Infof("Standard numaNode attribute unavailable for VFIO PF %s: %v", pf.PCIAddress, err)
+					}
 					device := &AmdGpuVFIOInfo{
 						PCIAddress:         pf.PCIAddress,
 						DeviceID:           pf.DeviceID,
@@ -322,6 +348,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						IsVF:               false,
 						pciBusIDAttr:       pciBusIDAttr,
 						pcieRootAttr:       pcieRootAttr,
+						numaNodeAttr:       numaNodeAttr,
 						preConfigureDriver: consts.VFIODriverName,
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
@@ -351,6 +378,10 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						klog.Warningf("Failed to get PCIe root for VFIO VF %s: %v", vf.PCIAddress, err)
 					}
 					pciBusIDAttr, _ := deviceattribute.GetPCIBusIDAttribute(vf.PCIAddress)
+					numaNodeAttr, err := deviceattribute.GetNUMANodeAttributeByPCIBusID(vf.PCIAddress, deviceattribute.ScalarAttribute)
+					if err != nil {
+						klog.V(2).Infof("Standard numaNode attribute unavailable for VFIO VF %s: %v", vf.PCIAddress, err)
+					}
 					currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
 					device := &AmdGpuVFIOInfo{
 						PCIAddress:         vf.PCIAddress,
@@ -363,6 +394,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						IsVF:               true,
 						pciBusIDAttr:       pciBusIDAttr,
 						pcieRootAttr:       pcieRootAttr,
+						numaNodeAttr:       numaNodeAttr,
 						preConfigureDriver: currentDriver,
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
