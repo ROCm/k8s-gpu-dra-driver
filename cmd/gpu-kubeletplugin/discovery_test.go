@@ -20,7 +20,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 )
+
+func TestNUMAAttributeForm(t *testing.T) {
+	assert.Equal(t, deviceattribute.ScalarAttribute, numaAttributeForm(false))
+	assert.Equal(t, deviceattribute.ListAttribute, numaAttributeForm(true))
+}
 
 func TestGetMemoryBytes(t *testing.T) {
 	withVram := map[string]interface{}{"vramBytes": uint64(16 * 1024 * 1024 * 1024)}
