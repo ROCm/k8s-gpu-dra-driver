@@ -35,6 +35,12 @@ var (
 	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
 	VFIOModulePath       = "/sys/module/vfio_pci"
 	VFIODevicesRoot      = "/dev/vfio"
+
+	// Roots used by GPU discovery, kept here so one call rebases every sysfs path.
+	AMDGPUDriversPath   = "/sys/module/amdgpu/drivers"
+	DRMClassPath        = "/sys/class/drm"
+	PlatformDevicesPath = "/sys/devices/platform"
+	KFDTopologyPath     = "/sys/class/kfd/kfd"
 )
 
 // SetSysfsRoot rebases all sysfs/devfs path variables under the given root.
@@ -48,6 +54,10 @@ func SetSysfsRoot(root string) {
 	KernelIOMMUGroupPath = filepath.Join(root, "sys/kernel/iommu_groups")
 	VFIOModulePath = filepath.Join(root, "sys/module/vfio_pci")
 	VFIODevicesRoot = filepath.Join(root, "dev/vfio")
+	AMDGPUDriversPath = filepath.Join(root, "sys/module/amdgpu/drivers")
+	DRMClassPath = filepath.Join(root, "sys/class/drm")
+	PlatformDevicesPath = filepath.Join(root, "sys/devices/platform")
+	KFDTopologyPath = filepath.Join(root, "sys/class/kfd/kfd")
 }
 
 // ResetSysfsRoot restores all path variables to their real system defaults.
@@ -60,6 +70,10 @@ func ResetSysfsRoot() {
 	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
 	VFIOModulePath = "/sys/module/vfio_pci"
 	VFIODevicesRoot = "/dev/vfio"
+	AMDGPUDriversPath = "/sys/module/amdgpu/drivers"
+	DRMClassPath = "/sys/class/drm"
+	PlatformDevicesPath = "/sys/devices/platform"
+	KFDTopologyPath = "/sys/class/kfd/kfd"
 }
 
 // PFInfo holds metadata for a Physical Function already bound to vfio-pci
