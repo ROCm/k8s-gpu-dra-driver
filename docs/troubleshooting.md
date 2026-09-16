@@ -95,6 +95,17 @@ kubectl describe pod <name>
 2. Verify CDI specs are being written to the configured path (default: `/var/run/cdi`).
 3. Check kubelet logs on the node for DRA-related errors.
 
+### Container fails with `unresolvable CDI devices` after a driver restart or node reboot
+
+**Symptom:** `kubectl describe pod` shows `CreateContainerError` with `CDI device injection failed: unresolvable CDI devices k8s.gpu.amd.com/gpu=<claim-uid>-...`, while the ResourceClaim still reports `allocated,reserved`.
+
+**Cause:** The claim's CDI spec under the CDI path (default `/var/run/cdi`, usually tmpfs) is gone, while the driver's checkpoint still lists the claim as prepared. The kubelet does not prepare an already-prepared claim again while it keeps running, so nothing rewrites the spec until the driver starts.
+
+**Resolution:**
+1. Restart the driver pod on the node. On startup the driver rebuilds the spec of every checkpointed claim whose device nodes still match the host and logs `Rebuilt the CDI spec for checkpointed claim <claim-uid>`.
+2. If the log instead shows `Removing the CDI spec for claim <claim-uid>, whose checkpoint entry can no longer be rebuilt`, the device nodes changed since the claim was prepared (for example a reboot renumbered `/dev/dri`). Delete and recreate the pod so the claim is prepared again; a `NodePrepareResources` error for the claim that says `recreate the pod` points at the same action.
+3. If the log shows `Leaving the CDI spec for claim <claim-uid> as is`, discovery did not find the claim's device on this start. Check the discovery errors earlier in the log.
+
 ### Partition-related issues
 
 **Symptom:** Partition devices do not appear in ResourceSlices, or partition claims remain Pending.
@@ -113,6 +124,7 @@ kubectl describe pod <name>
 - **Kubernetes 1.32+ required:** The DRA APIs used by this driver require Kubernetes 1.32 or later. The specific API version (`v1`, `v1beta2`, `v1beta1`) varies by Kubernetes version — the Helm chart auto-detects this.
 - **Sysfs-dependent attributes:** Device attributes are read from sysfs at discovery time. Attributes not exposed by the kernel driver or hardware will not appear in ResourceSlices. Documentation and examples may reference attributes that are not available on all GPU models.
 - **Unreadable VRAM:** When sysfs does not report a valid VRAM size, the driver publishes `memory: 0` and logs a warning. Memory-aware claims should require a positive capacity behind an existence guard (see the selector example in the driver attributes reference). Restart the driver after correcting the underlying sysfs/driver issue so discovery runs again.
+- **Prepared claims do not survive a device renumbering:** Device names are built from DRM minors (`gpu-<card>-<render>`), which the kernel assigns dynamically. When a reboot, module reload, or repartition renumbers a device node, the driver refuses to prepare the claims recorded against the old numbers and logs that their checkpoint entries can no longer be rebuilt; recreate those pods so the scheduler allocates against the current devices. Unchanged numbers are not proof that a name still refers to the same physical GPU.
 
 ## Reporting issues
 
