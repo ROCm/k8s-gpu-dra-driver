@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func deviceNames(devices []resourceapi.Device) []string {
@@ -90,6 +91,63 @@ func TestCollectCounterSets(t *testing.T) {
 }
 
 func TestBuildDriverResourcesWithCounters(t *testing.T) {
+	t.Run("compute VF publishes matching counter consumption", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-0-128": {AmdGpu: &AmdGpuInfo{
+					cardIndex:       0,
+					renderIndex:     128,
+					ParentPFAddress: "0000:0a:00.0",
+					TotalVFs:        8,
+					IsVF:            true,
+				}},
+			},
+		}}
+
+		res := d.buildDriverResources("test-node")
+		pool := res.Pools["test-node"]
+		require.Len(t, pool.Slices, 2)
+		require.Len(t, pool.Slices[0].SharedCounters, 1)
+		require.Len(t, pool.Slices[1].Devices, 1)
+
+		counterSet := pool.Slices[0].SharedCounters[0]
+		assert.Equal(t, "pf-0000-0a-00-0-counter-set", counterSet.Name)
+		assert.Equal(t, *resource.NewQuantity(8, resource.BinarySI), counterSet.Counters[VFSlotCounterName].Value)
+
+		device := pool.Slices[1].Devices[0]
+		require.Len(t, device.ConsumesCounters, 1)
+		consumption := device.ConsumesCounters[0]
+		assert.Equal(t, counterSet.Name, consumption.CounterSet)
+		assert.Equal(t, *resource.NewQuantity(1, resource.BinarySI), consumption.Counters[VFSlotCounterName].Value)
+	})
+
+	t.Run("VFIO PF publishes matching full counter consumption", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{
+					Index:           0,
+					IsVF:            false,
+					TotalVFs:        4,
+					ParentPFAddress: "0000:0a:00.0",
+					IOMMUGroup:      "42",
+					PCIAddress:      "0000:0a:00.0",
+				}},
+			},
+		}}
+
+		res := d.buildDriverResources("test-node")
+		pool := res.Pools["test-node"]
+		require.Len(t, pool.Slices, 2)
+		require.Len(t, pool.Slices[0].SharedCounters, 1)
+		require.Len(t, pool.Slices[1].Devices, 1)
+
+		counterSet := pool.Slices[0].SharedCounters[0]
+		device := pool.Slices[1].Devices[0]
+		require.Len(t, device.ConsumesCounters, 1)
+		assert.Equal(t, counterSet.Name, device.ConsumesCounters[0].CounterSet)
+		assert.Equal(t, *resource.NewQuantity(4, resource.BinarySI), device.ConsumesCounters[0].Counters[VFSlotCounterName].Value)
+	})
+
 	t.Run("with counters has 2 slices", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
