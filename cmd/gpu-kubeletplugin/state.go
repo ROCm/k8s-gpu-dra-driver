@@ -303,6 +303,8 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 							VendorID:           consts.AMDVendorID,
 							ProductName:        allocDev.AmdGpu.ProductName,
 							NumaNode:           allocDev.AmdGpu.NumaNode,
+							ParentPFAddress:    allocDev.AmdGpu.ParentPFAddress,
+							TotalVFs:           allocDev.AmdGpu.TotalVFs,
 							IsVF:               isVF,
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,

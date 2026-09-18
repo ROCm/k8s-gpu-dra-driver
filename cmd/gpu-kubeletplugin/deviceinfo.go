@@ -43,6 +43,9 @@ type AmdGpuInfo struct {
 	ComputeUnits     int
 	SimdUnits        int
 	NumaNode         int
+	ParentPFAddress  string
+	TotalVFs         int
+	IsVF             bool
 	cardIndex        int // unexported: for CanonicalName and CDI path derivation
 	renderIndex      int // unexported: for CanonicalName and CDI path derivation
 	pcieRootAttr     deviceattribute.DeviceAttribute
@@ -91,8 +94,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: getConsumesCounters(d.ParentPFAddress, d.TotalVFs, d.IsVF),
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"memory":       {Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)},
 			"computeUnits": {Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)},
@@ -103,6 +107,43 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
 const VFSlotCounterName = "vf-slots"
+
+func getSharedCounterSetName(parentPFAddress string, totalVFs int) string {
+	if totalVFs == 0 || parentPFAddress == "" {
+		return ""
+	}
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(parentPFAddress))
+}
+
+func getSharedCounterSet(parentPFAddress string, totalVFs int) *resourceapi.CounterSet {
+	name := getSharedCounterSetName(parentPFAddress, totalVFs)
+	if name == "" {
+		return nil
+	}
+	return &resourceapi.CounterSet{
+		Name: name,
+		Counters: map[string]resourceapi.Counter{
+			VFSlotCounterName: {Value: *resource.NewQuantity(int64(totalVFs), resource.BinarySI)},
+		},
+	}
+}
+
+func getConsumesCounters(parentPFAddress string, totalVFs int, isVF bool) []resourceapi.DeviceCounterConsumption {
+	name := getSharedCounterSetName(parentPFAddress, totalVFs)
+	if name == "" {
+		return nil
+	}
+	consumed := int64(totalVFs)
+	if isVF {
+		consumed = 1
+	}
+	return []resourceapi.DeviceCounterConsumption{{
+		CounterSet: name,
+		Counters: map[string]resourceapi.Counter{
+			VFSlotCounterName: {Value: *resource.NewQuantity(consumed, resource.BinarySI)},
+		},
+	}}
+}
 
 type AmdGpuVFIOInfo struct {
 	PCIAddress         string
@@ -153,43 +194,18 @@ func pciAddrToDNSLabel(addr string) string {
 // GetSharedCounterSetName returns the KEP-4815 counter set name for the parent
 // PF of this VFIO device. Returns "" if this device has no SR-IOV capability.
 func (d *AmdGpuVFIOInfo) GetSharedCounterSetName() string {
-	if d.TotalVFs == 0 || d.ParentPFAddress == "" {
-		return ""
-	}
-	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(d.ParentPFAddress))
+	return getSharedCounterSetName(d.ParentPFAddress, d.TotalVFs)
 }
 
 // GetSharedCounterSet returns the KEP-4815 CounterSet for the parent PF.
 func (d *AmdGpuVFIOInfo) GetSharedCounterSet() *resourceapi.CounterSet {
-	name := d.GetSharedCounterSetName()
-	if name == "" {
-		return nil
-	}
-	return &resourceapi.CounterSet{
-		Name: name,
-		Counters: map[string]resourceapi.Counter{
-			VFSlotCounterName: {Value: *resource.NewQuantity(int64(d.TotalVFs), resource.BinarySI)},
-		},
-	}
+	return getSharedCounterSet(d.ParentPFAddress, d.TotalVFs)
 }
 
 // GetConsumesCounters returns the KEP-4815 counter consumption for this device.
 // VFs consume 1 vf-slot; PFs consume all vf-slots (mutually exclusive with VFs).
 func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
-	name := d.GetSharedCounterSetName()
-	if name == "" {
-		return nil
-	}
-	consumed := int64(1)
-	if !d.IsVF {
-		consumed = int64(d.TotalVFs)
-	}
-	return []resourceapi.DeviceCounterConsumption{{
-		CounterSet: name,
-		Counters: map[string]resourceapi.Counter{
-			VFSlotCounterName: {Value: *resource.NewQuantity(consumed, resource.BinarySI)},
-		},
-	}}
+	return getConsumesCounters(d.ParentPFAddress, d.TotalVFs, d.IsVF)
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU

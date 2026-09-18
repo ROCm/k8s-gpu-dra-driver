@@ -86,6 +86,35 @@ func TestGetSharedCounterSetName(t *testing.T) {
 	}
 }
 
+func TestAmdGpuGetDeviceConsumesCounters(t *testing.T) {
+	t.Run("VF consumes one slot from its parent PF", func(t *testing.T) {
+		device := (&AmdGpuInfo{
+			PCIAddress:      "0000:01:00.2",
+			ParentPFAddress: "0000:01:00.0",
+			TotalVFs:        8,
+			IsVF:            true,
+		}).GetDevice()
+		require.Len(t, device.ConsumesCounters, 1)
+		assert.Equal(t, "pf-0000-01-00-0-counter-set", device.ConsumesCounters[0].CounterSet)
+		assert.Equal(t, *resource.NewQuantity(1, resource.BinarySI), device.ConsumesCounters[0].Counters[VFSlotCounterName].Value)
+	})
+
+	t.Run("GPU without SR-IOV identity has no counters", func(t *testing.T) {
+		device := (&AmdGpuInfo{PCIAddress: "0000:01:00.0"}).GetDevice()
+		assert.Empty(t, device.ConsumesCounters)
+	})
+
+	t.Run("PF consumes the complete slot set", func(t *testing.T) {
+		device := (&AmdGpuInfo{
+			ParentPFAddress: "0000:01:00.0",
+			TotalVFs:        8,
+			IsVF:            false,
+		}).GetDevice()
+		require.Len(t, device.ConsumesCounters, 1)
+		assert.Equal(t, *resource.NewQuantity(8, resource.BinarySI), device.ConsumesCounters[0].Counters[VFSlotCounterName].Value)
+	})
+}
+
 func TestGetSharedCounterSet(t *testing.T) {
 	t.Run("returns CounterSet when TotalVFs > 0", func(t *testing.T) {
 		d := &AmdGpuVFIOInfo{TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}

@@ -86,6 +86,18 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }
 
+// getCounterIdentity returns the PF identity used by KEP-4815 for a compute
+// GPU. GIM VFs expose a physfn link, while a PF uses its own PCI address.
+func getCounterIdentity(pciAddr string) (string, int, bool) {
+	parentPF := pciAddr
+	isVF := false
+	if parent, err := amdgpu.GetPFAddress(pciAddr); err == nil {
+		parentPF = parent
+		isVF = true
+	}
+	return parentPF, amdgpu.ReadSRIOVTotalVFs(parentPF), isVF
+}
+
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 	alldevices := make(AllocatableDevices)
 	vfioIndex := 0
@@ -113,6 +125,12 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				partitionProfile = fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType)
 			}
 
+			var parentPFAddress string
+			var totalVFs int
+			var isVF bool
+			if featuregates.Enabled(featuregates.VFIOPassthrough) {
+				parentPFAddress, totalVFs, isVF = getCounterIdentity(pciAddr)
+			}
 			amdGpuInfo := &AmdGpuInfo{
 				PCIAddress:       pciAddr,
 				cardIndex:        gpuInfoMap["card"].(int),
@@ -128,6 +146,9 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 				ComputeUnits:     computeUnits,
 				NumaNode:         gpuInfoMap["numaNode"].(int),
 				MemoryBytes:      getMemoryBytes(gpuInfoMap, "device", pciAddr),
+				ParentPFAddress:  parentPFAddress,
+				TotalVFs:         totalVFs,
+				IsVF:             isVF,
 			}
 
 			// Create allocatable device for the full GPU
@@ -147,13 +168,13 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 					VendorID:        consts.AMDVendorID,
 					ProductName:     amdGpuInfo.ProductName,
 					NumaNode:        amdGpuInfo.NumaNode,
-					IsVF:            false,
+					IsVF:            isVF,
 					Index:           vfioIndex,
 					IOMMUGroup:      iommuGroup,
 					pciBusIDAttr:    pciBusIDAttr,
 					pcieRootAttr:    pcieRootAttr,
-					ParentPFAddress: pciAddr,
-					TotalVFs:        amdgpu.ReadSRIOVTotalVFs(pciAddr),
+					ParentPFAddress: parentPFAddress,
+					TotalVFs:        totalVFs,
 					MemoryBytes:     amdGpuInfo.MemoryBytes,
 					ComputeUnits:    amdGpuInfo.ComputeUnits,
 					SimdUnits:       amdGpuInfo.SimdUnits,

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
 )
@@ -33,7 +34,7 @@ func deviceNames(devices []resourceapi.Device) []string {
 	return names
 }
 
-func TestCollectVFIOCounterSets(t *testing.T) {
+func TestCollectCounterSets(t *testing.T) {
 	t.Run("deduplicates VFs from same PF", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
@@ -42,7 +43,7 @@ func TestCollectVFIOCounterSets(t *testing.T) {
 				"gpu-0-128":  {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
 			},
 		}}
-		sets := d.collectVFIOCounterSets()
+		sets := d.collectCounterSets()
 		assert.Len(t, sets, 1)
 		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
 	})
@@ -54,7 +55,7 @@ func TestCollectVFIOCounterSets(t *testing.T) {
 				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{Index: 1, IsVF: false, TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}},
 			},
 		}}
-		sets := d.collectVFIOCounterSets()
+		sets := d.collectCounterSets()
 		assert.Len(t, sets, 2)
 		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
 		assert.Equal(t, "pf-0000-0b-00-0-counter-set", sets[1].Name)
@@ -66,8 +67,25 @@ func TestCollectVFIOCounterSets(t *testing.T) {
 				"gpu-0-128": {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
 			},
 		}}
-		sets := d.collectVFIOCounterSets()
+		sets := d.collectCounterSets()
 		assert.Empty(t, sets)
+	})
+
+	t.Run("compute VFs publish the counter set when VFIO siblings are unavailable", func(t *testing.T) {
+		d := &driver{state: &DeviceState{
+			allocatable: AllocatableDevices{
+				"gpu-0-128": {AmdGpu: &AmdGpuInfo{
+					cardIndex:       0,
+					renderIndex:     128,
+					ParentPFAddress: "0000:0a:00.0",
+					TotalVFs:        8,
+					IsVF:            true,
+				}},
+			},
+		}}
+		sets := d.collectCounterSets()
+		require.Len(t, sets, 1)
+		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
 	})
 }
 

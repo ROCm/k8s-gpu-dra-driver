@@ -135,7 +135,7 @@ func resourceSliceDevices(allocatable AllocatableDevices) []resourceapi.Device {
 
 func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
 	devices := resourceSliceDevices(d.state.allocatable)
-	counterSets := d.collectVFIOCounterSets()
+	counterSets := d.collectCounterSets()
 
 	if len(counterSets) == 0 {
 		return resourceslice.DriverResources{
@@ -160,18 +160,24 @@ func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResou
 	}
 }
 
-func (d *driver) collectVFIOCounterSets() []resourceapi.CounterSet {
+func (d *driver) collectCounterSets() []resourceapi.CounterSet {
 	counterSetsByPF := make(map[string]*resourceapi.CounterSet)
 	for _, device := range d.state.allocatable {
-		if device.Vfio == nil {
-			continue
+		var cs *resourceapi.CounterSet
+		var parentPF string
+		switch device.Type() {
+		case consts.VfioDeviceType:
+			cs = device.Vfio.GetSharedCounterSet()
+			parentPF = device.Vfio.ParentPFAddress
+		case consts.AmdGpuDeviceType:
+			cs = getSharedCounterSet(device.AmdGpu.ParentPFAddress, device.AmdGpu.TotalVFs)
+			parentPF = device.AmdGpu.ParentPFAddress
 		}
-		cs := device.Vfio.GetSharedCounterSet()
 		if cs == nil {
 			continue
 		}
-		if _, seen := counterSetsByPF[device.Vfio.ParentPFAddress]; !seen {
-			counterSetsByPF[device.Vfio.ParentPFAddress] = cs
+		if _, seen := counterSetsByPF[parentPF]; !seen {
+			counterSetsByPF[parentPF] = cs
 		}
 	}
 	pfAddrs := make([]string, 0, len(counterSetsByPF))
