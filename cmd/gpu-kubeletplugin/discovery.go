@@ -86,16 +86,19 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }
 
-// getCounterIdentity returns the PF identity used by KEP-4815 for a compute
-// GPU. GIM VFs expose a physfn link, while a PF uses its own PCI address.
-func getCounterIdentity(pciAddr string) (string, int, bool) {
-	parentPF := pciAddr
-	isVF := false
-	if parent, err := amdgpu.GetPFAddress(pciAddr); err == nil {
-		parentPF = parent
-		isVF = true
+// getVFIOParentInfo returns the PF and SR-IOV metadata for a device. A VF may
+// be bound to amdgpu during discovery, so use its physfn link to preserve the
+// PF relationship and publish shared VF-slot counters.
+func getVFIOParentInfo(pciAddr string) (isVF bool, parentPFAddress string, totalVFs, numVFs int) {
+	parentPFAddress = pciAddr
+	totalVFs = amdgpu.ReadSRIOVTotalVFs(pciAddr)
+
+	parent, err := amdgpu.GetPFAddress(pciAddr)
+	if err != nil {
+		return false, parentPFAddress, totalVFs, amdgpu.ReadSRIOVNumVFs(parentPFAddress)
 	}
-	return parentPF, amdgpu.ReadSRIOVTotalVFs(parentPF), isVF
+
+	return true, parent, amdgpu.ReadSRIOVTotalVFs(parent), amdgpu.ReadSRIOVNumVFs(parent)
 }
 
 func enumerateAllPossibleDevices() (AllocatableDevices, error) {
@@ -126,10 +129,10 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 			}
 
 			var parentPFAddress string
-			var totalVFs int
+			var totalVFs, numVFs int
 			var isVF bool
 			if featuregates.Enabled(featuregates.VFIOPassthrough) {
-				parentPFAddress, totalVFs, isVF = getCounterIdentity(pciAddr)
+				isVF, parentPFAddress, totalVFs, numVFs = getVFIOParentInfo(pciAddr)
 			}
 			amdGpuInfo := &AmdGpuInfo{
 				PCIAddress:       pciAddr,
@@ -175,6 +178,7 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 					pcieRootAttr:    pcieRootAttr,
 					ParentPFAddress: parentPFAddress,
 					TotalVFs:        totalVFs,
+					NumVFs:          numVFs,
 					MemoryBytes:     amdGpuInfo.MemoryBytes,
 					ComputeUnits:    amdGpuInfo.ComputeUnits,
 					SimdUnits:       amdGpuInfo.SimdUnits,

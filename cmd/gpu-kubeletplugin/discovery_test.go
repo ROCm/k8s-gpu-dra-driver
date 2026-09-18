@@ -35,7 +35,7 @@ func TestGetMemoryBytes(t *testing.T) {
 	assert.Equal(t, uint64(0), getMemoryBytes(map[string]interface{}{"vramBytes": uint64(0)}, "partition", "0000:00:00.0"))
 }
 
-func TestGetCounterIdentityForVF(t *testing.T) {
+func TestGetVFIOParentInfoForVF(t *testing.T) {
 	root := t.TempDir()
 	amdgpu.SetSysfsRoot(root)
 	t.Cleanup(amdgpu.ResetSysfsRoot)
@@ -46,15 +46,17 @@ func TestGetCounterIdentityForVF(t *testing.T) {
 	require.NoError(t, os.MkdirAll(pf, 0o755))
 	require.NoError(t, os.MkdirAll(vf, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_totalvfs"), []byte("8\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("4\n"), 0o644))
 	require.NoError(t, os.Symlink("../0000:01:00.0", filepath.Join(vf, "physfn")))
 
-	parent, total, isVF := getCounterIdentity("0000:01:00.2")
+	isVF, parent, total, active := getVFIOParentInfo("0000:01:00.2")
 	assert.Equal(t, "0000:01:00.0", parent)
 	assert.Equal(t, 8, total)
+	assert.Equal(t, 4, active)
 	assert.True(t, isVF)
 }
 
-func TestGetCounterIdentityForPF(t *testing.T) {
+func TestGetVFIOParentInfoForPF(t *testing.T) {
 	root := t.TempDir()
 	amdgpu.SetSysfsRoot(root)
 	t.Cleanup(amdgpu.ResetSysfsRoot)
@@ -62,9 +64,11 @@ func TestGetCounterIdentityForPF(t *testing.T) {
 	pf := filepath.Join(root, "sys/bus/pci/devices/0000:01:00.0")
 	require.NoError(t, os.MkdirAll(pf, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_totalvfs"), []byte("4\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("2\n"), 0o644))
 
-	parent, total, isVF := getCounterIdentity("0000:01:00.0")
+	isVF, parent, total, active := getVFIOParentInfo("0000:01:00.0")
 	assert.Equal(t, "0000:01:00.0", parent)
 	assert.Equal(t, 4, total)
+	assert.Equal(t, 2, active)
 	assert.False(t, isVF)
 }
