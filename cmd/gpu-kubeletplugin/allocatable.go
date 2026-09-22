@@ -27,14 +27,17 @@ import (
 // AllocatableDevices represents a collection of allocatable devices mapped by their canonical names
 type AllocatableDevices map[string]*AllocatableDevice
 
-// AllocatableDevice wraps either a full AMD GPU, a partition, or a VFIO device
+// AllocatableDevice wraps either a full AMD GPU, a partition, a VFIO device, or
+// a synthetic-partition virtual device.
 type AllocatableDevice struct {
-	AmdGpu       *AmdGpuInfo
-	AmdPartition *AmdPartitionInfo
-	Vfio         *AmdGpuVFIOInfo
+	AmdGpu             *AmdGpuInfo
+	AmdPartition       *AmdPartitionInfo
+	Vfio               *AmdGpuVFIOInfo
+	SyntheticPartition *SyntheticPartitionDevice
 }
 
-// Type returns the device type
+// Type returns the device type (amdgpu, amdgpu-partition, vfio, or
+// amdgpu-synthetic-partition).
 func (d *AllocatableDevice) Type() string {
 	if d.AmdGpu != nil {
 		return consts.AmdGpuDeviceType
@@ -44,6 +47,9 @@ func (d *AllocatableDevice) Type() string {
 	}
 	if d.Vfio != nil {
 		return consts.VfioDeviceType
+	}
+	if d.SyntheticPartition != nil {
+		return consts.SyntheticPartitionDeviceType
 	}
 	return consts.UnknownDeviceType
 }
@@ -57,6 +63,8 @@ func (d *AllocatableDevice) CanonicalName() string {
 		return d.AmdPartition.CanonicalName()
 	case consts.VfioDeviceType:
 		return d.Vfio.CanonicalName()
+	case consts.SyntheticPartitionDeviceType:
+		return d.SyntheticPartition.CanonicalName()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
@@ -83,6 +91,8 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 		return d.AmdPartition.GetDevice()
 	case consts.VfioDeviceType:
 		return d.Vfio.GetDevice()
+	case consts.SyntheticPartitionDeviceType:
+		return d.SyntheticPartition.GetDevice()
 	}
 	panic(fmt.Sprintf("unexpected device type: %s", d.Type()))
 }
