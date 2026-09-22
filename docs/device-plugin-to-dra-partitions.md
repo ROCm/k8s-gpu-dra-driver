@@ -127,10 +127,16 @@ A ready-to-run example lives at
 - **No pre-partitioning / no DCM.** With auto-partition the driver owns
   partitioning. Do not statically partition the nodes and do not run the Device
   Config Manager on them.
-- **`amd.com/gpu` still works** for whole-GPU requests via the `gpu.amd.com`
-  DeviceClass's `extendedResourceName`. Homogeneous, pre-partitioned nodes that
-  only ever asked for `amd.com/gpu` continue to work; use node selectors to target
-  the desired nodes as before.
+- **`amd.com/gpu` still works, and is enforced to mean a whole GPU.** With
+  AutoPartition enabled, `extendedResourceName` lives on a second DeviceClass,
+  `gpu.amd.com-spx`, whose selector is constrained to `computePartition == "spx"`
+  (or no `computePartition` attribute at all, the non-AutoPartition case). A
+  classic `amd.com/gpu` request is translated into a ResourceClaim with no
+  selector of its own — it can't ask for `spx` itself — so it must go through a
+  class that already guarantees it. This is enforced by the DeviceClass
+  selector, not left to node-selector discipline: a classic request on a node
+  where every GPU currently holds a partition fraction is left unschedulable
+  rather than silently handed a fraction of a GPU.
 - **Per-partition extended resource names are not provided by the DRA driver.**
   If you specifically need `amd.com/cpx_nps4`-style extended resources (rather than
   DRA claims), that remains a device-plugin capability. There is no plan to add

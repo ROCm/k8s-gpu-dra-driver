@@ -980,3 +980,81 @@ func TestPartitionState_ReleaseClaim_ErrorKeepsClaimReserved(t *testing.T) {
 		t.Errorf("expected totalAllocCount=0 after successful retry, got %d", ps.totalAllocCount)
 	}
 }
+
+// TestPartitionState_HasReservation guards the primitive added for the
+// Unprepare cleanup-gap fix: a claim that reserved a partition but never
+// finished Prepare (errReloadInProgress persists AssignedSlots without ever
+// recording the claim as prepared) must still report as reserved, and must
+// stop reporting so once released.
+func TestPartitionState_HasReservation(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	if ps.HasReservation("claim-1") {
+		t.Error("expected no reservation before ReserveClaim")
+	}
+
+	shares := testShares("claim-1", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-1", shares); err != nil {
+		t.Fatalf("ReserveClaim: %v", err)
+	}
+	if !ps.HasReservation("claim-1") {
+		t.Error("expected a reservation to be held after ReserveClaim, even though nothing was ever \"prepared\"")
+	}
+	if ps.HasReservation("claim-2") {
+		t.Error("HasReservation must be per-claim, not global")
+	}
+
+	if _, err := ps.ReleaseClaim("claim-1", shares); err != nil {
+		t.Fatalf("ReleaseClaim: %v", err)
+	}
+	if ps.HasReservation("claim-1") {
+		t.Error("expected no reservation after ReleaseClaim")
+	}
+}
+
+// TestPartitionState_PartitionSharesFromAssignedSlots guards the reconstruction
+// path Unprepare uses when preparedClaims has no entry for a claim that still
+// holds a reservation (see HasReservation): the shares must be recoverable from
+// assignedSlots alone, and must be scoped to the requested claim only.
+func TestPartitionState_PartitionSharesFromAssignedSlots(t *testing.T) {
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, make(AllocatableDevices))
+
+	claim1Shares := testShares("claim-1", "gpu-0-cpx-nps4")
+	if _, err := ps.ReserveClaim("claim-1", claim1Shares); err != nil {
+		t.Fatalf("ReserveClaim claim-1: %v", err)
+	}
+	claim2Shares := []PartitionShare{{
+		DeviceName: "gpu-0-cpx-nps4",
+		ShareKey:   ShareKey("claim-2", "req0", "gpu-0-cpx-nps4", nil),
+	}}
+	if _, err := ps.ReserveClaim("claim-2", claim2Shares); err != nil {
+		t.Fatalf("ReserveClaim claim-2: %v", err)
+	}
+
+	got := ps.PartitionSharesFromAssignedSlots("claim-1")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 share for claim-1, got %d: %v", len(got), got)
+	}
+	if got[0].DeviceName != "gpu-0-cpx-nps4" {
+		t.Errorf("expected DeviceName gpu-0-cpx-nps4, got %q", got[0].DeviceName)
+	}
+	if got[0].ShareKey != claim1Shares[0].ShareKey {
+		t.Errorf("expected ShareKey %q, got %q", claim1Shares[0].ShareKey, got[0].ShareKey)
+	}
+
+	// Reconstructed shares must actually work as ReleaseClaim input, restoring
+	// the exact release path Unprepare takes for a never-fully-prepared claim.
+	if _, err := ps.ReleaseClaim("claim-1", got); err != nil {
+		t.Fatalf("ReleaseClaim with reconstructed shares: %v", err)
+	}
+	if ps.HasReservation("claim-1") {
+		t.Error("expected claim-1 released")
+	}
+	if !ps.HasReservation("claim-2") {
+		t.Error("claim-2 must be unaffected by releasing claim-1")
+	}
+
+	if got := ps.PartitionSharesFromAssignedSlots("no-such-claim"); got != nil {
+		t.Errorf("expected nil shares for a claim with no assigned slots, got %v", got)
+	}
+}

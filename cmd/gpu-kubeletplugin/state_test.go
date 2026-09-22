@@ -39,6 +39,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 )
 
@@ -170,6 +173,63 @@ func TestPreparedDevicesGetDevices(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			devices := test.preparedDevices.GetDevices()
 			assert.Equal(t, test.expected, devices)
+		})
+	}
+}
+
+// TestPartitionSharesForClaim_DriverAndPoolMismatch guards the identity check
+// added to partitionSharesForClaim: a DRA device is identified by
+// (driver, pool, device), not device name alone. A same-named result from
+// another driver or another pool must not be treated as a local partition
+// device, even though the name collides with a real local synthetic device.
+func TestPartitionSharesForClaim_DriverAndPoolMismatch(t *testing.T) {
+	const (
+		nodeName   = "node-a"
+		deviceName = "gpu-0-cpx-nps4"
+	)
+	allocatable := AllocatableDevices{
+		deviceName: {SyntheticPartition: &SyntheticPartitionDevice{GPUIndex: 0}},
+	}
+
+	newClaim := func(driver, pool string) *resourceapi.ResourceClaim {
+		return &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-1")},
+			Status: resourceapi.ResourceClaimStatus{
+				Allocation: &resourceapi.AllocationResult{
+					Devices: resourceapi.DeviceAllocationResult{
+						Results: []resourceapi.DeviceRequestAllocationResult{
+							{Request: "gpu", Driver: driver, Pool: pool, Device: deviceName},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := map[string]struct {
+		driver      string
+		pool        string
+		expectEmpty bool
+	}{
+		"matching driver and pool": {
+			driver: consts.DriverName, pool: nodeName, expectEmpty: false,
+		},
+		"other driver, same pool": {
+			driver: "other-driver.example.com", pool: nodeName, expectEmpty: true,
+		},
+		"local driver, other pool": {
+			driver: consts.DriverName, pool: "node-b", expectEmpty: true,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			shares := partitionSharesForClaim(newClaim(test.driver, test.pool), allocatable, nodeName)
+			if test.expectEmpty {
+				assert.Empty(t, shares, "result from a mismatched driver/pool must not be treated as a local partition device")
+			} else {
+				assert.Len(t, shares, 1)
+			}
 		})
 	}
 }

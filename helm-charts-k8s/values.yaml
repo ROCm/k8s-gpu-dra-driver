@@ -19,8 +19,12 @@ image:
 deviceClass:
   # -- Create the gpu.amd.com DeviceClass resource. Set to false if deploying via gpu-operator.
   create: true
-  # -- Maps classic extended-resource requests to this DeviceClass.
+  # -- Maps classic extended-resource requests to a DeviceClass.
   # Override to another name, or set "" to omit the field.
+  # When featureGates.AutoPartition is enabled, this is applied to a second class,
+  # gpu.amd.com-spx, constrained to whole-GPU (spx) devices only, so classic
+  # requests can't resolve to a leftover partition fraction. When AutoPartition is
+  # disabled, it stays on the single gpu.amd.com class as before.
   extendedResourceName: amd.com/gpu
 
 serviceAccount:

@@ -62,3 +62,100 @@ func TestResourceSliceDevicesAreSortedByName(t *testing.T) {
 		}
 	}
 }
+
+// TestChunkDevices guards the ResourceSlice chunking fix: a node with more
+// partitionable GPUs than resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures
+// (64) synthetic devices must produce multiple Devices slices instead of one
+// oversized (API-invalid) slice.
+func TestChunkDevices(t *testing.T) {
+	makeDevices := func(n int) []resourceapi.Device {
+		devices := make([]resourceapi.Device, n)
+		for i := range devices {
+			devices[i] = resourceapi.Device{Name: string(rune('a' + i%26))}
+		}
+		return devices
+	}
+
+	tests := map[string]struct {
+		count      int
+		size       int
+		wantChunks []int // length of each expected chunk, in order
+	}{
+		"empty":               {count: 0, size: 64, wantChunks: nil},
+		"under limit":         {count: 5, size: 64, wantChunks: []int{5}},
+		"exactly at limit":    {count: 64, size: 64, wantChunks: []int{64}},
+		"one over limit":      {count: 65, size: 64, wantChunks: []int{64, 1}},
+		"several chunks":      {count: 150, size: 64, wantChunks: []int{64, 64, 22}},
+		"9 GPUs x 6 devices":  {count: 54, size: 64, wantChunks: []int{54}},
+		"11 GPUs x 6 devices": {count: 66, size: 64, wantChunks: []int{64, 2}},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			chunks := chunkDevices(makeDevices(test.count), test.size)
+			if len(chunks) != len(test.wantChunks) {
+				t.Fatalf("got %d chunks, want %d (%v)", len(chunks), len(test.wantChunks), test.wantChunks)
+			}
+			total := 0
+			for i, chunk := range chunks {
+				if len(chunk) != test.wantChunks[i] {
+					t.Errorf("chunk %d: got len %d, want %d", i, len(chunk), test.wantChunks[i])
+				}
+				if len(chunk) > test.size {
+					t.Errorf("chunk %d exceeds size limit %d: len %d", i, test.size, len(chunk))
+				}
+				total += len(chunk)
+			}
+			if total != test.count {
+				t.Errorf("total devices across chunks: got %d, want %d", total, test.count)
+			}
+		})
+	}
+}
+
+// TestChunkCounterSets mirrors TestChunkDevices for the shared-counter-set
+// side: a node with more than resourceapi.ResourceSliceMaxCounterSets (8)
+// partitionable GPUs must produce multiple SharedCounters slices.
+func TestChunkCounterSets(t *testing.T) {
+	makeCounterSets := func(n int) []resourceapi.CounterSet {
+		sets := make([]resourceapi.CounterSet, n)
+		for i := range sets {
+			sets[i] = resourceapi.CounterSet{Name: string(rune('a' + i%26))}
+		}
+		return sets
+	}
+
+	tests := map[string]struct {
+		count      int
+		size       int
+		wantChunks []int
+	}{
+		"empty":            {count: 0, size: 8, wantChunks: nil},
+		"under limit":      {count: 3, size: 8, wantChunks: []int{3}},
+		"exactly at limit": {count: 8, size: 8, wantChunks: []int{8}},
+		"one over limit":   {count: 9, size: 8, wantChunks: []int{8, 1}},
+		"several chunks":   {count: 20, size: 8, wantChunks: []int{8, 8, 4}},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			chunks := chunkCounterSets(makeCounterSets(test.count), test.size)
+			if len(chunks) != len(test.wantChunks) {
+				t.Fatalf("got %d chunks, want %d (%v)", len(chunks), len(test.wantChunks), test.wantChunks)
+			}
+			total := 0
+			for i, chunk := range chunks {
+				if len(chunk) != test.wantChunks[i] {
+					t.Errorf("chunk %d: got len %d, want %d", i, len(chunk), test.wantChunks[i])
+				}
+				if len(chunk) > test.size {
+					t.Errorf("chunk %d exceeds size limit %d: len %d", i, test.size, len(chunk))
+				}
+				total += len(chunk)
+			}
+			if total != test.count {
+				t.Errorf("total counter sets across chunks: got %d, want %d", total, test.count)
+			}
+		})
+	}
+}

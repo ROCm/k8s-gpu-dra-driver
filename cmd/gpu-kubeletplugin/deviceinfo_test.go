@@ -420,6 +420,13 @@ func TestSyntheticPartitionDevice_GetDevice_CapacityAndPartitions(t *testing.T) 
 		if partCap.RequestPolicy.Default == nil || partCap.RequestPolicy.Default.Cmp(*defaultQ) != 0 {
 			t.Errorf("RequestPolicy.Default: expected 1, got %v", partCap.RequestPolicy.Default)
 		}
+		// ValidValues must pin the capacity to exactly one partition's worth: Default
+		// alone only fills in a value when the request omits the capacity, it does not
+		// cap an explicit request for more. Without this, a single result could request
+		// e.g. "2" and get twice the hardware the driver believes it handed out.
+		if len(partCap.RequestPolicy.ValidValues) != 1 || partCap.RequestPolicy.ValidValues[0].Cmp(*defaultQ) != 0 {
+			t.Errorf("RequestPolicy.ValidValues: expected exactly [1], got %v", partCap.RequestPolicy.ValidValues)
+		}
 	}
 
 	// Verify memory capacity: Value = total (per-partition * count), Default = per-partition
@@ -437,6 +444,9 @@ func TestSyntheticPartitionDevice_GetDevice_CapacityAndPartitions(t *testing.T) 
 		expectedMemDefault := resource.NewQuantity(int64(memoryBytes), resource.BinarySI)
 		if memCap.RequestPolicy.Default == nil || memCap.RequestPolicy.Default.Cmp(*expectedMemDefault) != 0 {
 			t.Errorf("memory RequestPolicy.Default: expected per-partition %v, got %v", expectedMemDefault, memCap.RequestPolicy.Default)
+		}
+		if len(memCap.RequestPolicy.ValidValues) != 1 || memCap.RequestPolicy.ValidValues[0].Cmp(*expectedMemDefault) != 0 {
+			t.Errorf("memory RequestPolicy.ValidValues: expected exactly [%v], got %v", expectedMemDefault, memCap.RequestPolicy.ValidValues)
 		}
 	}
 
@@ -456,6 +466,9 @@ func TestSyntheticPartitionDevice_GetDevice_CapacityAndPartitions(t *testing.T) 
 		if cuCap.RequestPolicy.Default == nil || cuCap.RequestPolicy.Default.Cmp(*expectedCUDefault) != 0 {
 			t.Errorf("computeUnits RequestPolicy.Default: expected per-partition %v, got %v", expectedCUDefault, cuCap.RequestPolicy.Default)
 		}
+		if len(cuCap.RequestPolicy.ValidValues) != 1 || cuCap.RequestPolicy.ValidValues[0].Cmp(*expectedCUDefault) != 0 {
+			t.Errorf("computeUnits RequestPolicy.ValidValues: expected exactly [%v], got %v", expectedCUDefault, cuCap.RequestPolicy.ValidValues)
+		}
 	}
 
 	// Verify simdUnits capacity: Value = total (per-partition * count), Default = per-partition
@@ -473,6 +486,9 @@ func TestSyntheticPartitionDevice_GetDevice_CapacityAndPartitions(t *testing.T) 
 		expectedSIMDDefault := resource.NewQuantity(int64(simdUnits), resource.DecimalSI)
 		if simdCap.RequestPolicy.Default == nil || simdCap.RequestPolicy.Default.Cmp(*expectedSIMDDefault) != 0 {
 			t.Errorf("simdUnits RequestPolicy.Default: expected per-partition %v, got %v", expectedSIMDDefault, simdCap.RequestPolicy.Default)
+		}
+		if len(simdCap.RequestPolicy.ValidValues) != 1 || simdCap.RequestPolicy.ValidValues[0].Cmp(*expectedSIMDDefault) != 0 {
+			t.Errorf("simdUnits RequestPolicy.ValidValues: expected exactly [%v], got %v", expectedSIMDDefault, simdCap.RequestPolicy.ValidValues)
 		}
 	}
 }

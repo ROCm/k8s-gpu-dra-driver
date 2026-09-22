@@ -43,6 +43,14 @@ var nodeModulesConfigGVR = schema.GroupVersionResource{
 // handles the subsequent (slow) reload out of band; this only covers the unload.
 const modprobeTimeout = 30 * time.Second
 
+// triggerReloadTimeout bounds the entire TriggerReload call: the modprobe unload
+// plus the NodeModulesConfig delete. Without an overall bound, the delete (which
+// runs after modprobeTimeout has already elapsed for its own step) inherited
+// whatever deadline the caller's context happened to carry — often none — and
+// could hang indefinitely holding the partition/DeviceState lock. It is a
+// variable (like retryBackoff in pkg/amdsmi) so tests can shrink it.
+var triggerReloadTimeout = 1 * time.Minute
+
 // inboxReloadTimeout bounds the full unload+load cycle on the non-KMM path.
 // Unlike the KMM path, nothing else brings the driver back, so this covers
 // re-probing every GPU and is correspondingly longer.
@@ -82,6 +90,13 @@ func ReloadInboxDriver(ctx context.Context) error {
 	return nil
 }
 
+// unloadAmdgpuModule runs `modprobe -rv amdgpu`. It is a variable so tests can
+// stub the actual hardware call while still exercising TriggerReload's own
+// timeout/error handling around it.
+var unloadAmdgpuModule = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "modprobe", "-rv", "amdgpu").CombinedOutput()
+}
+
 // Recoverer triggers a KMM-managed amdgpu driver reload on the local node. It is
 // used instead of the amd-smi driver reload, which on a KMM node would restore
 // the inbox driver rather than the KMM-provisioned one.
@@ -112,11 +127,15 @@ func (r *Recoverer) TriggerReload(ctx context.Context) error {
 		return fmt.Errorf("kmm recoverer has empty node name")
 	}
 
-	// Step 1: unload the amdgpu module.
-	mctx, cancel := context.WithTimeout(ctx, modprobeTimeout)
+	// Bound the whole trigger operation (unload + API delete), not just the
+	// modprobe step, so a hung API call can't block forever.
+	ctx, cancel := context.WithTimeout(ctx, triggerReloadTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(mctx, "modprobe", "-rv", "amdgpu")
-	if out, err := cmd.CombinedOutput(); err != nil {
+
+	// Step 1: unload the amdgpu module.
+	mctx, mcancel := context.WithTimeout(ctx, modprobeTimeout)
+	defer mcancel()
+	if out, err := unloadAmdgpuModule(mctx); err != nil {
 		if mctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("timeout running 'modprobe -rv amdgpu'")
 		}
@@ -130,6 +149,9 @@ func (r *Recoverer) TriggerReload(ctx context.Context) error {
 	}
 	err := r.dynClient.Resource(nodeModulesConfigGVR).Delete(ctx, r.nodeName, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("timeout deleting NodeModulesConfig %q after %v", r.nodeName, triggerReloadTimeout)
+		}
 		return fmt.Errorf("failed to delete NodeModulesConfig %q: %v", r.nodeName, err)
 	}
 	klog.Infof("KMM recovery: deleted NodeModulesConfig %q, KMM will reload the managed driver", r.nodeName)

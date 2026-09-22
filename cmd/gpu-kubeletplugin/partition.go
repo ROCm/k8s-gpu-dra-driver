@@ -303,6 +303,42 @@ func (ps *PartitionState) ReleaseClaim(claimUID string, shares []PartitionShare)
 	return taintsChanged, nil
 }
 
+// HasReservation reports whether claimUID currently holds a partition
+// reservation, independent of whether that claim ever finished Prepare (i.e.
+// independent of PreparedClaims/CDI state). A claim can hold a reservation
+// without being "prepared" while a KMM reload is in-flight: ApplyPartition
+// returns errReloadInProgress and Prepare persists AssignedSlots and returns
+// before recording the claim as prepared. Callers use this to detect that case
+// so Unprepare's cleanup isn't skipped for a claim that never got far enough to
+// be recorded as prepared but still holds a live reservation.
+func (ps *PartitionState) HasReservation(claimUID string) bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.reservedClaims[claimUID]
+}
+
+// PartitionSharesFromAssignedSlots reconstructs the PartitionShares reserved by
+// claimUID from assignedSlots, for the case where Unprepare must release a
+// reservation that has no corresponding PreparedDevices entry to derive shares
+// from (see HasReservation). The claim UID and device name are recovered from
+// the share key's encoding (see ShareKey): "<claimUID>/<request>/<deviceName>/<shareID>".
+func (ps *PartitionState) PartitionSharesFromAssignedSlots(claimUID string) []PartitionShare {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	var shares []PartitionShare
+	for _, slots := range ps.assignedSlots {
+		for shareKey := range slots {
+			parts := strings.SplitN(shareKey, "/", 4)
+			if len(parts) != 4 || parts[0] != claimUID {
+				continue
+			}
+			shares = append(shares, PartitionShare{DeviceName: parts[2], ShareKey: shareKey})
+		}
+	}
+	return shares
+}
+
 // ReservePartition is phase 1 of a two-phase partition setup. It performs only
 // fast, in-memory bookkeeping: it validates the requested compute/memory modes
 // against any already-active modes, records the reservation, stamps memory-mode
@@ -458,7 +494,9 @@ func (ps *PartitionState) triggerMemoryReload(memoryMode string) error {
 			return fmt.Errorf("KMM enabled but no recoverer configured; cannot reload driver for memory mode %q", memoryMode)
 		}
 		klog.Infof("Triggering KMM-managed driver reload for memory mode %q", memoryMode)
-		if err := ps.recoverer.TriggerReload(context.TODO()); err != nil {
+		// TriggerReload bounds its own execution (modprobe + API delete) internally;
+		// context.Background() is deliberate here, not a placeholder.
+		if err := ps.recoverer.TriggerReload(context.Background()); err != nil {
 			return fmt.Errorf("failed to trigger KMM driver reload for memory mode %q: %v", memoryMode, err)
 		}
 	} else {

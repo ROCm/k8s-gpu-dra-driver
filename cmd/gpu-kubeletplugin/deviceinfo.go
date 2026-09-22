@@ -270,8 +270,15 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 		Value: *resource.NewQuantity(int64(d.PartitionCount), resource.DecimalSI),
 	}
 	if d.PartitionCount > 1 {
+		// ValidValues pins this to exactly one partition's worth: Default alone only
+		// supplies a value when a request omits the capacity, it does not cap an
+		// explicit request. Without it, a claim could request e.g. partitions: "2"
+		// in a single result and get one PartitionShare/CDI device for hardware the
+		// scheduler believes it allocated two of.
+		oneQty := resource.NewQuantity(1, resource.DecimalSI)
 		partitionsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
-			Default: resource.NewQuantity(1, resource.DecimalSI),
+			Default:     oneQty,
+			ValidValues: []resource.Quantity{*oneQty},
 		}
 	}
 
@@ -288,14 +295,23 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 		Value: *resource.NewQuantity(int64(d.SimdUnits)*int64(d.PartitionCount), resource.DecimalSI),
 	}
 	if d.PartitionCount > 1 {
+		// Same reasoning as partitionsCapacity above: ValidValues caps each of these
+		// at exactly the per-partition amount so an explicit request can't ask for
+		// more than one partition's worth of memory/computeUnits/simdUnits either.
+		memoryQty := resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)
 		memoryCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
-			Default: resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI),
+			Default:     memoryQty,
+			ValidValues: []resource.Quantity{*memoryQty},
 		}
+		computeUnitsQty := resource.NewQuantity(int64(d.ComputeUnits), resource.DecimalSI)
 		computeUnitsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
-			Default: resource.NewQuantity(int64(d.ComputeUnits), resource.DecimalSI),
+			Default:     computeUnitsQty,
+			ValidValues: []resource.Quantity{*computeUnitsQty},
 		}
+		simdUnitsQty := resource.NewQuantity(int64(d.SimdUnits), resource.DecimalSI)
 		simdUnitsCapacity.RequestPolicy = &resourceapi.CapacityRequestPolicy{
-			Default: resource.NewQuantity(int64(d.SimdUnits), resource.DecimalSI),
+			Default:     simdUnitsQty,
+			ValidValues: []resource.Quantity{*simdUnitsQty},
 		}
 	}
 

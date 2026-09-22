@@ -161,6 +161,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 // buildSyntheticPartitionResources builds DriverResources for synthetic-partition mode.
 // Counter sets and devices are placed in separate slices within the same pool.
 // The API requires that a ResourceSlice contains either sharedCounters or devices, not both.
+//
+// Both collections are chunked to the API's per-slice limits
+// (resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures devices,
+// resourceapi.ResourceSliceMaxCounterSets counter sets): synthetic-partition devices
+// consume shared counters, which counts as an "advanced feature," so the lower
+// 64-device limit applies, not the general 128. A node with more than 8
+// partitionable GPUs (more than 64 synthetic devices) would otherwise publish an
+// invalid ResourceSlice and fail to register any of them.
 func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResources {
 	// Build counter sets for partitionable GPUs
 	counterSets := make([]resourceapi.CounterSet, 0, len(d.partitionableGPUs))
@@ -172,14 +180,14 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 	// dynamically-updated per-device Taints field are synchronized with writes.
 	devices := d.state.partitionState.BuildDevices(d.state.allocatable)
 
-	// Use separate slices: one for shared counters, one for devices.
-	slices := []resourceslice.Slice{
-		{Devices: devices},
+	// Use separate slices: one (or more) for shared counters, one (or more) for
+	// devices — the API forbids mixing sharedCounters and devices in one slice.
+	var slices []resourceslice.Slice
+	for _, chunk := range chunkDevices(devices, resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures) {
+		slices = append(slices, resourceslice.Slice{Devices: chunk})
 	}
-	if len(counterSets) > 0 {
-		slices = append(slices, resourceslice.Slice{
-			SharedCounters: counterSets,
-		})
+	for _, chunk := range chunkCounterSets(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
+		slices = append(slices, resourceslice.Slice{SharedCounters: chunk})
 	}
 
 	return resourceslice.DriverResources{
@@ -189,6 +197,33 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 			},
 		},
 	}
+}
+
+// chunkDevices splits devices into groups of at most size, preserving order.
+// A nil/empty input yields no chunks (matching the previous unconditional
+// single-Devices-slice behavior only ever being skipped when there were no
+// devices at all, which the caller never hits in practice).
+func chunkDevices(devices []resourceapi.Device, size int) [][]resourceapi.Device {
+	var chunks [][]resourceapi.Device
+	for len(devices) > 0 {
+		n := min(size, len(devices))
+		chunks = append(chunks, devices[:n])
+		devices = devices[n:]
+	}
+	return chunks
+}
+
+// chunkCounterSets splits counterSets into groups of at most size, preserving
+// order. Mirrors chunkDevices; kept separate since the two chunk different
+// element types and are governed by different API limits.
+func chunkCounterSets(counterSets []resourceapi.CounterSet, size int) [][]resourceapi.CounterSet {
+	var chunks [][]resourceapi.CounterSet
+	for len(counterSets) > 0 {
+		n := min(size, len(counterSets))
+		chunks = append(chunks, counterSets[:n])
+		counterSets = counterSets[n:]
+	}
+	return chunks
 }
 
 // republishResources re-publishes ResourceSlices with updated taints.

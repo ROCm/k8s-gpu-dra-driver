@@ -101,6 +101,7 @@ type DeviceState struct {
 	partitionState       *PartitionState
 	driver               *driver // back-reference for re-publishing resources
 	syntheticPartition   bool    // whether synthetic-partition mode is enabled
+	nodeName             string  // this node's name, matched against allocation results' Pool
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -146,6 +147,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		vfioManager:        vfioMgr,
 		checkpointManager:  checkpointManager,
 		syntheticPartition: autoPartition,
+		nodeName:           config.flags.nodeName,
 	}
 
 	// Set up partition state for synthetic-partition mode
@@ -225,13 +227,19 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	// after it. On any failure we roll back the in-memory reservation (and taints)
 	// and fail the Prepare; the kubelet re-drives it and ApplyPartition reconciles
 	// against sysfs idempotently.
+	// Populated inside the synthetic-partition branch below and consulted by every
+	// error path from here to the end of Prepare, so that a failure after a
+	// successful reservation always rolls the reservation back rather than
+	// leaking it (see partitionShares' use after prepareDevices/CreateClaimSpecFile/
+	// CreateCheckpoint below).
+	var partitionShares []PartitionShare
 	if s.syntheticPartition && s.partitionState != nil && claim.Status.Allocation != nil {
 		// The partition shares for this claim are derivable from the allocation
 		// results on every call, so we rebuild the list each time Prepare is
 		// re-driven (kubelet retries it while an async memory reload converges).
 		// One entry per result, not per device: a claim may hold several shares of
 		// the same device, each of which needs its own partition slot.
-		partitionShares := partitionSharesForClaim(claim, s.allocatable)
+		partitionShares = partitionSharesForClaim(claim, s.allocatable, s.nodeName)
 
 		// Phase 1: reserve modes and stamp taints (fast, in-memory only). This is
 		// idempotent per claim: on a retry the claim is already reserved, so counts
@@ -275,10 +283,16 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 
 	preparedDevices, err := s.prepareDevices(claim)
 	if err != nil {
+		if s.syntheticPartition && s.partitionState != nil {
+			s.rollbackPartitions(claimUID, partitionShares)
+		}
 		return nil, fmt.Errorf("prepare failed: %v", err)
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		if s.syntheticPartition && s.partitionState != nil {
+			s.rollbackPartitions(claimUID, partitionShares)
+		}
 		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
 	}
 
@@ -288,6 +302,15 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	s.savePartitionCheckpoint(checkpoint)
 
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		// The CDI spec file was already written for this claim; without deleting it
+		// here, a claim we're about to roll back (and which kubelet will not learn
+		// succeeded) would leave an orphaned spec no Unprepare call is coming to clean up.
+		if delErr := s.cdi.DeleteClaimSpecFile(claimUID); delErr != nil {
+			klog.Warningf("failed to delete orphaned CDI spec file for claim %s after checkpoint failure: %v", claimUID, delErr)
+		}
+		if s.syntheticPartition && s.partitionState != nil {
+			s.rollbackPartitions(claimUID, partitionShares)
+		}
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
@@ -303,13 +326,22 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 // There is one entry per result rather than per device name: DRA allows a claim
 // to hold several concurrent shares of the same device (AllowMultipleAllocations),
 // distinguished only by ShareID, and each share needs its own partition slot.
-func partitionSharesForClaim(claim *resourceapi.ResourceClaim, allocatable AllocatableDevices) []PartitionShare {
+func partitionSharesForClaim(claim *resourceapi.ResourceClaim, allocatable AllocatableDevices, nodeName string) []PartitionShare {
 	if claim.Status.Allocation == nil {
 		return nil
 	}
 	claimUID := string(claim.UID)
 	var shares []PartitionShare
 	for _, result := range claim.Status.Allocation.Devices.Results {
+		// A DRA device is identified by (driver, pool, device), not device name
+		// alone. Without this check, a same-named device published by another
+		// driver instance or another pool (e.g. a different gpu.amd.com pool on
+		// a different node reusing the checkpoint, or another driver entirely)
+		// would be treated as a local partition device and reserved/repartitioned
+		// against this node's hardware.
+		if result.Driver != consts.DriverName || result.Pool != nodeName {
+			continue
+		}
 		device, exists := allocatable[result.Device]
 		if !exists || device.SyntheticPartition == nil {
 			continue
@@ -394,6 +426,29 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] == nil {
+		// A claim can hold a live partition reservation without ever having been
+		// recorded as prepared: the errReloadInProgress path in Prepare persists
+		// AssignedSlots and returns before preparedClaims[claimUID] is set. Without
+		// this check, kubelet's Unprepare call for such a claim (e.g. the pod was
+		// deleted while the reload was still converging) would return here and
+		// strand the reservation, taints, and mutex counters permanently.
+		if !s.syntheticPartition || s.partitionState == nil || !s.partitionState.HasReservation(claimUID) {
+			return nil
+		}
+		shares := s.partitionState.PartitionSharesFromAssignedSlots(claimUID)
+		changed, err := s.partitionState.ReleaseClaim(claimUID, shares)
+		if err != nil {
+			klog.Warningf("Error releasing partition for never-fully-prepared claim %s: %v", claimUID, err)
+		}
+		if changed && s.driver != nil {
+			if err := s.driver.republishResources(context.TODO()); err != nil {
+				klog.Warningf("Failed to re-publish resources after unprepare of never-fully-prepared claim %s: %v", claimUID, err)
+			}
+		}
+		s.savePartitionCheckpoint(checkpoint)
+		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			return fmt.Errorf("unable to sync to checkpoint: %v", err)
+		}
 		return nil
 	}
 
