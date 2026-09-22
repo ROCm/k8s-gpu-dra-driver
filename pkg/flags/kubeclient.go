@@ -37,6 +37,7 @@ import (
 
 	cli "github.com/urfave/cli/v2"
 
+	"k8s.io/client-go/dynamic"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -49,7 +50,8 @@ type KubeClientConfig struct {
 }
 
 type ClientSets struct {
-	Core coreclientset.Interface
+	Core    coreclientset.Interface
+	Dynamic dynamic.Interface
 }
 
 func (k *KubeClientConfig) Flags() []cli.Flag {
@@ -115,7 +117,13 @@ func (k *KubeClientConfig) NewClientSets() (ClientSets, error) {
 		return ClientSets{}, fmt.Errorf("create core client: %v", err)
 	}
 
+	dynClient, err := dynamic.NewForConfig(csconfig)
+	if err != nil {
+		return ClientSets{}, fmt.Errorf("create dynamic client: %v", err)
+	}
+
 	return ClientSets{
-		Core: coreclient,
+		Core:    coreclient,
+		Dynamic: dynClient,
 	}, nil
 }

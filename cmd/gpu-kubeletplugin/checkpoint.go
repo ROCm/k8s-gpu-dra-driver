@@ -42,8 +42,36 @@ type Checkpoint struct {
 	V1       *CheckpointV1     `json:"v1,omitempty"`
 }
 
+// CheckpointV1 is the persisted driver state.
+//
+// Every field must stay `omitempty`. VerifyChecksum re-marshals the decoded
+// struct rather than hashing the bytes on disk, so a binary that does not know a
+// field drops it and would compute a different checksum. With omitempty the JSON
+// is byte-identical whenever the field is unset, which is what lets a driver
+// predating these partition fields keep reading checkpoints written by this one.
 type CheckpointV1 struct {
-	PreparedClaims PreparedClaims `json:"preparedClaims,omitempty"`
+	PreparedClaims   PreparedClaims      `json:"preparedClaims,omitempty"`
+	ActiveMemoryMode string              `json:"activeMemoryMode,omitempty"`
+	GPUComputeModes  map[int]string      `json:"gpuComputeModes,omitempty"`
+	MemoryReload     *MemoryReloadMarker `json:"memoryReload,omitempty"`
+
+	// AssignedSlots records which partition slot each allocation share holds,
+	// keyed gpuIndex -> shareKey -> slot. Persisted at reservation time so a
+	// restart mid-Prepare (notably during an async memory reload) recovers the
+	// reservation and its slot rather than losing them.
+	AssignedSlots map[int]map[string]int `json:"assignedSlots,omitempty"`
+}
+
+// MemoryReloadMarker records that a KMM-managed driver reload has been triggered
+// for a memory partition change and is still converging. It persists across
+// driver restarts so that a restart mid-reload resumes in the "poll for
+// convergence" state instead of re-triggering the reload.
+type MemoryReloadMarker struct {
+	// Mode is the target memory partition mode (e.g. "nps4") being applied.
+	Mode string `json:"mode"`
+	// TriggeredAtUnix is the Unix timestamp (seconds) when the reload was
+	// triggered, used to enforce a convergence deadline.
+	TriggeredAtUnix int64 `json:"triggeredAtUnix"`
 }
 
 func newCheckpoint() *Checkpoint {

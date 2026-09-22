@@ -86,11 +86,56 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }
 
-func enumerateAllPossibleDevices() (AllocatableDevices, error) {
+// enumerateAllPossibleDevices discovers AMD GPUs and returns allocatable devices.
+//
+// When enableSyntheticPartition is false, it discovers physical GPUs and
+// partitions as-is (normal mode). The extra return values (gpuPCIAddresses,
+// partitionableGPUs) are nil/empty.
+//
+// When enableSyntheticPartition is true, it generates virtual synthetic-partition
+// devices for each valid compute+memory partition combination on partitionable
+// GPUs, while non-partitionable GPUs are advertised as normal full GPUs. It
+// also returns a map from GPU index to PCI address (for amd-smi targeting) and
+// the list of GPU indices that support partitioning (for building shared
+// counter sets).
+func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevices, map[int]string, []int, error) {
 	alldevices := make(AllocatableDevices)
 	allAMDGPUs := amdgpu.GetAMDGPUs()
 
-	for pciAddr, gpuInfoMap := range allAMDGPUs {
+	// Sort PCI addresses for deterministic GPU index assignment
+	// (needed for synthetic-partition mode, but harmless in normal mode)
+	pciAddrs := make([]string, 0, len(allAMDGPUs))
+	for pciAddr := range allAMDGPUs {
+		pciAddrs = append(pciAddrs, pciAddr)
+	}
+	sort.Strings(pciAddrs)
+
+	var gpuPCIAddresses map[int]string
+	var partitionableGPUs []int
+	gpuIndex := 0
+
+	if enableSyntheticPartition {
+		gpuPCIAddresses = make(map[int]string)
+	}
+
+	for _, pciAddr := range pciAddrs {
+		gpuInfoMap := allAMDGPUs[pciAddr]
+
+		// In synthetic-partition mode the driver owns partitioning and advertises
+		// from the physical-GPU baseline. When a GPU is already partitioned (CPX/DPX),
+		// amdgpu exposes each compute sub-partition as its own KFD entry (keyed by an
+		// amdgpu_xcp_* platform path whose pciAddr points at the parent). Counting
+		// those as separate GPUs multiplies the advertised device count and overruns
+		// the ResourceSlice limits (max 64 devices / 8 shared counters). Skip such
+		// sub-partition entries: a physical GPU's map key equals its own pciAddr,
+		// whereas a sub-partition's key (amdgpu_xcp_N) does not.
+		if enableSyntheticPartition {
+			if entryPciAddr, ok := gpuInfoMap["pciAddr"].(string); ok && entryPciAddr != pciAddr {
+				klog.Infof("Skipping sub-partition entry %q (parent GPU %s) for synthetic-partition discovery", pciAddr, entryPciAddr)
+				continue
+			}
+		}
+
 		// Get PCIe root attribute for this device using the PCI address from the device info
 		pcieRootAttr, pciBusIDAttr, pciAddrFromMap, err := getPcieInfo(gpuInfoMap)
 		if err != nil {
@@ -104,79 +149,142 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 
 		// Extract common topology information
 		simdUnits, computeUnits := extractTopologyInfo(gpuInfoMap)
+		totalMemory := getMemoryBytes(gpuInfoMap, "device", pciAddr)
 
-		if computePartitionType == consts.ComputePartitionSPX || computePartitionType == "" {
-			// This is a full AMD GPU (either explicitly "spx" or no partition support)
-			partitionProfile := ""
-			if computePartitionType != "" && memoryPartitionType != "" {
-				partitionProfile = fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType)
+		if enableSyntheticPartition {
+			// Record PCI address for this GPU index (needed for amd-smi targeting)
+			gpuPCIAddresses[gpuIndex] = pciAddr
+
+			supportsPartitioning := computePartitionType != ""
+
+			if !supportsPartitioning {
+				// GPU doesn't support partitioning - advertise as a normal full GPU
+				amdGpuInfo := &AmdGpuInfo{
+					PCIAddress:       pciAddr,
+					cardIndex:        gpuInfoMap["card"].(int),
+					renderIndex:      gpuInfoMap["renderD"].(int),
+					KFDID:            gpuInfoMap["kfdID"].(string),
+					DeviceID:         gpuInfoMap["deviceID"].(string),
+					DriverVersion:    gpuInfoMap["driverVersion"].(string),
+					PartitionProfile: "",
+					ProductName:      gpuInfoMap["productName"].(string),
+					pcieRootAttr:     pcieRootAttr,
+					pciBusIDAttr:     pciBusIDAttr,
+					SimdUnits:        simdUnits,
+					ComputeUnits:     computeUnits,
+					NumaNode:         gpuInfoMap["numaNode"].(int),
+					MemoryBytes:      totalMemory,
+				}
+				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
+				alldevices[device.CanonicalName()] = device
+				klog.Infof("GPU %d (%s) does not support partitioning, advertising as normal GPU: %s",
+					gpuIndex, pciAddr, device.CanonicalName())
+				gpuIndex++
+				continue
 			}
 
-			amdGpuInfo := &AmdGpuInfo{
-				PCIAddress:       pciAddr,
-				cardIndex:        gpuInfoMap["card"].(int),
-				renderIndex:      gpuInfoMap["renderD"].(int),
-				KFDID:            gpuInfoMap["kfdID"].(string),
-				DeviceID:         gpuInfoMap["deviceID"].(string),
-				DriverVersion:    gpuInfoMap["driverVersion"].(string),
-				PartitionProfile: partitionProfile,
-				ProductName:      gpuInfoMap["productName"].(string),
-				pcieRootAttr:     pcieRootAttr,
-				pciBusIDAttr:     pciBusIDAttr,
-				SimdUnits:        simdUnits,
-				ComputeUnits:     computeUnits,
-				NumaNode:         gpuInfoMap["numaNode"].(int),
-				MemoryBytes:      getMemoryBytes(gpuInfoMap, "device", pciAddr),
+			partitionableGPUs = append(partitionableGPUs, gpuIndex)
+
+			// Generate virtual partition devices for each valid compute+memory combination
+			for _, cfg := range consts.ValidPartitionConfigs {
+				apDevice := &SyntheticPartitionDevice{
+					GPUIndex:         gpuIndex,
+					ComputePartition: cfg.Compute,
+					MemoryPartition:  cfg.Memory,
+					PartitionCount:   cfg.PartitionCount,
+					PCIAddress:       pciAddr,
+					ProductName:      gpuInfoMap["productName"].(string),
+					DeviceID:         gpuInfoMap["deviceID"].(string),
+					DriverVersion:    gpuInfoMap["driverVersion"].(string),
+					MemoryBytes:      totalMemory / uint64(cfg.PartitionCount),
+					ComputeUnits:     computeUnits / cfg.PartitionCount,
+					SimdUnits:        simdUnits / cfg.PartitionCount,
+					NumaNode:         gpuInfoMap["numaNode"].(int),
+					pcieRootAttr:     pcieRootAttr,
+					pciBusIDAttr:     pciBusIDAttr,
+				}
+
+				device := &AllocatableDevice{SyntheticPartition: apDevice}
+				alldevices[device.CanonicalName()] = device
+				klog.Infof("Auto-partition device: %s (GPU %d, %s, %d partitions, %dMB each)",
+					device.CanonicalName(), gpuIndex, fmt.Sprintf("%s-%s", cfg.Compute, cfg.Memory),
+					cfg.PartitionCount, apDevice.MemoryBytes/(1024*1024))
 			}
 
-			// Create allocatable device for the full GPU
-			device := &AllocatableDevice{
-				AmdGpu: amdGpuInfo,
-			}
-			alldevices[device.CanonicalName()] = device
-
-			klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
-				device.CanonicalName(), computePartitionType, memoryPartitionType)
-		} else if computePartitionType != "" {
-			// This is a partition - create both parent GPU info and partition info
-
-			// Create parent GPU info
-			parentGpuInfo := &AmdGpuInfo{
-				PCIAddress:    pciAddrFromMap,
-				KFDID:         gpuInfoMap["kfdID"].(string),
-				DeviceID:      gpuInfoMap["deviceID"].(string),
-				DriverVersion: gpuInfoMap["driverVersion"].(string),
-				ProductName:   gpuInfoMap["productName"].(string),
-				pcieRootAttr:  pcieRootAttr,
-				pciBusIDAttr:  pciBusIDAttr,
-			}
-
-			// Create partition info
-			partitionInfo := &AmdPartitionInfo{
-				cardIndex:        gpuInfoMap["card"].(int),
-				renderIndex:      gpuInfoMap["renderD"].(int),
-				Parent:           parentGpuInfo,
-				PartitionProfile: fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType),
-				SimdUnits:        simdUnits,
-				ComputeUnits:     computeUnits,
-				NumaNode:         gpuInfoMap["numaNode"].(int),
-				MemoryBytes:      getMemoryBytes(gpuInfoMap, "partition", pciAddr),
-			}
-
-			// Create allocatable device for the partition
-			device := &AllocatableDevice{
-				AmdPartition: partitionInfo,
-			}
-			alldevices[device.CanonicalName()] = device
-
-			klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
-				device.CanonicalName(), computePartitionType, memoryPartitionType)
+			gpuIndex++
 		} else {
-			klog.Warningf("Unknown compute partition type '%s' for device %s, skipping", computePartitionType, pciAddr)
+			// Normal mode: discover devices as-is
+			if computePartitionType == consts.ComputePartitionSPX || computePartitionType == "" {
+				// This is a full AMD GPU (either explicitly "spx" or no partition support)
+				partitionProfile := ""
+				if computePartitionType != "" && memoryPartitionType != "" {
+					partitionProfile = fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType)
+				}
+
+				amdGpuInfo := &AmdGpuInfo{
+					PCIAddress:       pciAddr,
+					cardIndex:        gpuInfoMap["card"].(int),
+					renderIndex:      gpuInfoMap["renderD"].(int),
+					KFDID:            gpuInfoMap["kfdID"].(string),
+					DeviceID:         gpuInfoMap["deviceID"].(string),
+					DriverVersion:    gpuInfoMap["driverVersion"].(string),
+					PartitionProfile: partitionProfile,
+					ProductName:      gpuInfoMap["productName"].(string),
+					pcieRootAttr:     pcieRootAttr,
+					pciBusIDAttr:     pciBusIDAttr,
+					SimdUnits:        simdUnits,
+					ComputeUnits:     computeUnits,
+					NumaNode:         gpuInfoMap["numaNode"].(int),
+					MemoryBytes:      getMemoryBytes(gpuInfoMap, "device", pciAddr),
+				}
+
+				// Create allocatable device for the full GPU
+				device := &AllocatableDevice{
+					AmdGpu: amdGpuInfo,
+				}
+				alldevices[device.CanonicalName()] = device
+
+				klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
+					device.CanonicalName(), computePartitionType, memoryPartitionType)
+			} else if computePartitionType != "" {
+				// This is a partition - create both parent GPU info and partition info
+
+				// Create parent GPU info
+				parentGpuInfo := &AmdGpuInfo{
+					PCIAddress:    pciAddrFromMap,
+					KFDID:         gpuInfoMap["kfdID"].(string),
+					DeviceID:      gpuInfoMap["deviceID"].(string),
+					DriverVersion: gpuInfoMap["driverVersion"].(string),
+					ProductName:   gpuInfoMap["productName"].(string),
+					pcieRootAttr:  pcieRootAttr,
+					pciBusIDAttr:  pciBusIDAttr,
+				}
+
+				// Create partition info
+				partitionInfo := &AmdPartitionInfo{
+					cardIndex:        gpuInfoMap["card"].(int),
+					renderIndex:      gpuInfoMap["renderD"].(int),
+					Parent:           parentGpuInfo,
+					PartitionProfile: fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType),
+					SimdUnits:        simdUnits,
+					ComputeUnits:     computeUnits,
+					NumaNode:         gpuInfoMap["numaNode"].(int),
+					MemoryBytes:      getMemoryBytes(gpuInfoMap, "partition", pciAddr),
+				}
+
+				// Create allocatable device for the partition
+				device := &AllocatableDevice{
+					AmdPartition: partitionInfo,
+				}
+				alldevices[device.CanonicalName()] = device
+
+				klog.Infof("Found AMD GPU partition: %s, compute type: %s, memory type: %s",
+					device.CanonicalName(), computePartitionType, memoryPartitionType)
+			} else {
+				klog.Warningf("Unknown compute partition type '%s' for device %s, skipping", computePartitionType, pciAddr)
+			}
 		}
 	}
-
-	klog.Infof("Discovered %d AMD GPU devices", len(alldevices))
 
 	// Discover VFIO passthrough devices:
 	// - PFs already bound to vfio-pci by the GPU Operator (pf-passthrough mode)
@@ -269,5 +377,11 @@ func enumerateAllPossibleDevices() (AllocatableDevices, error) {
 		klog.Infof("Discovered %d VFIO passthrough devices", vfioIndex)
 	}
 
-	return alldevices, nil
+	if enableSyntheticPartition {
+		klog.Infof("Auto-partition mode: discovered %d physical GPUs (%d partitionable), %d virtual partition devices",
+			len(gpuPCIAddresses), len(partitionableGPUs), len(alldevices))
+	} else {
+		klog.Infof("Discovered %d AMD GPU devices", len(alldevices))
+	}
+	return alldevices, gpuPCIAddresses, partitionableGPUs, nil
 }
