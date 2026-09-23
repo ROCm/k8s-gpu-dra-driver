@@ -57,3 +57,4 @@ or `helm ... --set featureGates.ExampleFeature=true`.
 | Gate | Default | Stage | Description |
 |------|---------|-------|-------------|
 | `VFIOPassthrough` | `false` | Alpha | Enables VFIO passthrough support. Discovers GIM SR-IOV VFs, binds to `vfio-pci` on demand during Prepare, generates CDI specs for `/dev/vfio/*` device nodes. Required for VM passthrough via KubeVirt. |
+| `AutoPartition` | `false` | Alpha | Enable auto-partition mode. When enabled, the driver advertises all possible compute+memory partition configurations as virtual devices and dynamically partitions GPUs on demand via AMD SMI when a ResourceClaim is prepared. Requires Kubernetes 1.36+ with DRA beta features. GPUs that do not support partitioning are unaffected. |

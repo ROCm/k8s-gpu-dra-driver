@@ -14,3 +14,10 @@ rules:
 - apiGroups: ["resource.k8s.io"]
   resources: ["resourceslices"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if .Values.kubeletPlugin.kmmDriverEnabled }}
+# Auto-partition on a KMM-managed node reloads the driver by deleting the node's
+# NodeModulesConfig so the KMM operator re-provisions it.
+- apiGroups: ["kmm.sigs.x-k8s.io"]
+  resources: ["nodemodulesconfigs"]
+  verbs: ["get", "list", "delete"]
+{{- end }}

@@ -51,31 +51,53 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	klog "k8s.io/klog/v2"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdsmi"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 )
 
 type driver struct {
-	client      coreclientset.Interface
-	helper      *kubeletplugin.Helper
-	state       *DeviceState
-	healthcheck *healthcheck
-	cancelCtx   func(error)
-	nodeName    string
+	client                   coreclientset.Interface
+	helper                   *kubeletplugin.Helper
+	state                    *DeviceState
+	healthcheck              *healthcheck
+	cancelCtx                func(error)
+	enableSyntheticPartition bool
+	nodeName                 string
+	partitionableGPUs        []int
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
-	driver := &driver{
-		nodeName:  config.flags.nodeName,
-		client:    config.coreclient,
-		cancelCtx: config.cancelMainCtx,
+	d := &driver{
+		client:                   config.coreclient,
+		cancelCtx:                config.cancelMainCtx,
+		enableSyntheticPartition: featuregates.Enabled(featuregates.AutoPartition),
+		nodeName:                 config.flags.nodeName,
 	}
 
 	state, err := NewDeviceState(config)
 	if err != nil {
 		return nil, err
 	}
-	driver.state = state
+	d.state = state
+
+	// Copy partitionable GPU indices from partition state for counter set building
+	if state.partitionState != nil {
+		d.partitionableGPUs = state.partitionState.partitionableGPUs
+	}
+
+	// Initialize AMD SMI library for GPU partition operations. The discovered PCI
+	// addresses bind each GPU index to its processor handle, so partition calls
+	// target the same physical GPU that discovery and the sysfs fallbacks do.
+	if d.enableSyntheticPartition {
+		var gpuPCIAddresses map[int]string
+		if state.partitionState != nil {
+			gpuPCIAddresses = state.partitionState.gpuPCIAddresses
+		}
+		if err := amdsmi.Init(gpuPCIAddresses); err != nil {
+			return nil, fmt.Errorf("failed to initialize AMD SMI: %v", err)
+		}
+	}
 
 	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(config.coreclient),
@@ -91,13 +113,23 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		)
 		klog.Infof("DeviceMetadata feature gate enabled: KEP-5304 device metadata will be published")
 	}
-	helper, err := kubeletplugin.Start(ctx, driver, opts...)
+	helper, err := kubeletplugin.Start(ctx, d, opts...)
 	if err != nil {
 		return nil, err
 	}
-	driver.helper = helper
+	d.helper = helper
+	// Store helper reference in state for re-publishing from Prepare/Unprepare
+	d.state.driver = d
 
-	resources := driver.buildDriverResources(config.flags.nodeName)
+	var resources resourceslice.DriverResources
+
+	if d.enableSyntheticPartition && d.state.partitionState != nil {
+		// Synthetic-partition mode: build two slices (shared counters + devices)
+		resources = d.buildSyntheticPartitionResources()
+	} else {
+		// Standard mode: single slice with all devices, in a deterministic order.
+		resources = d.buildDriverResources(config.flags.nodeName)
+	}
 
 	if resourcesJSON, err := json.MarshalIndent(resources, "", "  "); err != nil {
 		klog.Warningf("Failed to marshal ResourceSlice to JSON: %v", err)
@@ -105,7 +137,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		klog.Infof("Publishing ResourceSlice:\n%s", string(resourcesJSON))
 	}
 
-	driver.healthcheck, err = startHealthcheck(ctx, config)
+	d.healthcheck, err = startHealthcheck(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
@@ -114,7 +146,133 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
-	return driver, nil
+	return d, nil
+}
+
+// buildSyntheticPartitionResources builds DriverResources for synthetic-partition mode.
+// Counter sets and devices are placed in separate slices within the same pool.
+// The API requires that a ResourceSlice contains either sharedCounters or devices, not both.
+//
+// Both collections are chunked to the API's per-slice limits
+// (resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures devices,
+// resourceapi.ResourceSliceMaxCounterSets counter sets): synthetic-partition devices
+// consume shared counters, which counts as an "advanced feature," so the lower
+// 64-device limit applies, not the general 128. A node with more than 8
+// partitionable GPUs (more than 64 synthetic devices) would otherwise publish an
+// invalid ResourceSlice and fail to register any of them.
+func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResources {
+	// Build counter sets for partitionable GPUs
+	counterSets := make([]resourceapi.CounterSet, 0, len(d.partitionableGPUs))
+	for _, gpuIndex := range d.partitionableGPUs {
+		counterSets = append(counterSets, buildMutexCounterSet(gpuIndex))
+	}
+
+	// Build device list. Snapshot under the partition-state lock so reads of the
+	// dynamically-updated per-device Taints field are synchronized with writes.
+	devices := d.state.partitionState.BuildDevices(d.state.allocatable)
+
+	// Use separate slices: one (or more) for shared counters, one (or more) for
+	// devices — the API forbids mixing sharedCounters and devices in one slice.
+	var slices []resourceslice.Slice
+	for _, chunk := range chunkDevices(devices, resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures) {
+		slices = append(slices, resourceslice.Slice{Devices: chunk})
+	}
+	for _, chunk := range chunkCounterSets(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
+		slices = append(slices, resourceslice.Slice{SharedCounters: chunk})
+	}
+
+	return resourceslice.DriverResources{
+		Pools: map[string]resourceslice.Pool{
+			d.nodeName: {
+				Slices: slices,
+			},
+		},
+	}
+}
+
+// chunkDevices splits devices into groups of at most size, preserving order.
+// A nil/empty input yields no chunks (matching the previous unconditional
+// single-Devices-slice behavior only ever being skipped when there were no
+// devices at all, which the caller never hits in practice).
+func chunkDevices(devices []resourceapi.Device, size int) [][]resourceapi.Device {
+	var chunks [][]resourceapi.Device
+	for len(devices) > 0 {
+		n := min(size, len(devices))
+		chunks = append(chunks, devices[:n])
+		devices = devices[n:]
+	}
+	return chunks
+}
+
+// chunkCounterSets splits counterSets into groups of at most size, preserving
+// order. Mirrors chunkDevices; kept separate since the two chunk different
+// element types and are governed by different API limits.
+func chunkCounterSets(counterSets []resourceapi.CounterSet, size int) [][]resourceapi.CounterSet {
+	var chunks [][]resourceapi.CounterSet
+	for len(counterSets) > 0 {
+		n := min(size, len(counterSets))
+		chunks = append(chunks, counterSets[:n])
+		counterSets = counterSets[n:]
+	}
+	return chunks
+}
+
+// republishResources re-publishes ResourceSlices with updated taints.
+// Called from Prepare (to add memory partition conflict taints) and
+// Unprepare (to remove taints when all allocations are released).
+func (d *driver) republishResources(ctx context.Context) error {
+	var resources resourceslice.DriverResources
+	if d.enableSyntheticPartition && d.state.partitionState != nil {
+		resources = d.buildSyntheticPartitionResources()
+	} else {
+		resources = d.buildDriverResources(d.nodeName)
+	}
+	if err := d.helper.PublishResources(ctx, resources); err != nil {
+		return fmt.Errorf("error re-publishing resources: %v", err)
+	}
+	klog.Infof("Re-published ResourceSlices with updated taints")
+	return nil
+}
+
+func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
+	devices := resourceSliceDevices(d.state.allocatable)
+	counterSets := d.collectCounterSets()
+	slicesOut := []resourceslice.Slice{{Devices: devices}}
+	if len(counterSets) > 0 {
+		slicesOut = []resourceslice.Slice{{SharedCounters: counterSets}, {Devices: devices}}
+	}
+	return resourceslice.DriverResources{Pools: map[string]resourceslice.Pool{
+		nodeName: {Slices: slicesOut},
+	}}
+}
+
+func (d *driver) collectCounterSets() []resourceapi.CounterSet {
+	counterSetsByPF := make(map[string]*resourceapi.CounterSet)
+	for _, device := range d.state.allocatable {
+		var cs *resourceapi.CounterSet
+		var parentPF string
+		switch device.Type() {
+		case consts.VfioDeviceType:
+			cs = device.Vfio.GetSharedCounterSet()
+			parentPF = device.Vfio.ParentPFAddress
+		case consts.AmdGpuDeviceType:
+			cs = getSharedCounterSet(device.AmdGpu.ParentPFAddress, device.AmdGpu.TotalVFs)
+			parentPF = device.AmdGpu.ParentPFAddress
+		}
+		if cs != nil {
+			counterSetsByPF[parentPF] = cs
+		}
+	}
+	addrs := make([]string, 0, len(counterSetsByPF))
+	for addr := range counterSetsByPF {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+	result := make([]resourceapi.CounterSet, 0, len(addrs))
+	for _, addr := range addrs {
+		result = append(result, *counterSetsByPF[addr])
+	}
+	return result
 }
 
 // resourceSliceDevices returns the allocatable devices sorted by name. Go map
@@ -133,68 +291,12 @@ func resourceSliceDevices(allocatable AllocatableDevices) []resourceapi.Device {
 	return devices
 }
 
-func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
-	devices := resourceSliceDevices(d.state.allocatable)
-	counterSets := d.collectCounterSets()
-
-	if len(counterSets) == 0 {
-		return resourceslice.DriverResources{
-			Pools: map[string]resourceslice.Pool{
-				nodeName: {
-					Slices: []resourceslice.Slice{
-						{Devices: devices},
-					},
-				},
-			},
-		}
-	}
-	return resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			nodeName: {
-				Slices: []resourceslice.Slice{
-					{SharedCounters: counterSets},
-					{Devices: devices},
-				},
-			},
-		},
-	}
-}
-
-func (d *driver) collectCounterSets() []resourceapi.CounterSet {
-	counterSetsByPF := make(map[string]*resourceapi.CounterSet)
-	for _, device := range d.state.allocatable {
-		var cs *resourceapi.CounterSet
-		var parentPF string
-		switch device.Type() {
-		case consts.VfioDeviceType:
-			cs = device.Vfio.GetSharedCounterSet()
-			parentPF = device.Vfio.ParentPFAddress
-		case consts.AmdGpuDeviceType:
-			cs = getSharedCounterSet(device.AmdGpu.ParentPFAddress, device.AmdGpu.TotalVFs)
-			parentPF = device.AmdGpu.ParentPFAddress
-		}
-		if cs == nil {
-			continue
-		}
-		if _, seen := counterSetsByPF[parentPF]; !seen {
-			counterSetsByPF[parentPF] = cs
-		}
-	}
-	pfAddrs := make([]string, 0, len(counterSetsByPF))
-	for addr := range counterSetsByPF {
-		pfAddrs = append(pfAddrs, addr)
-	}
-	sort.Strings(pfAddrs)
-	var result []resourceapi.CounterSet
-	for _, addr := range pfAddrs {
-		result = append(result, *counterSetsByPF[addr])
-	}
-	return result
-}
-
 func (d *driver) Shutdown(logger klog.Logger) error {
 	if d.healthcheck != nil {
 		d.healthcheck.Stop(logger)
+	}
+	if d.enableSyntheticPartition {
+		amdsmi.Shutdown()
 	}
 	d.helper.Stop()
 	return nil
@@ -219,7 +321,9 @@ func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.Re
 		}
 	}
 	if siblingChanged {
-		d.republishResources(ctx)
+		if err := d.republishResources(ctx); err != nil {
+			klog.Warningf("failed to re-publish resources after sibling exclusion: %v", err)
+		}
 	}
 	var prepared []kubeletplugin.Device
 	for _, preparedPB := range preparedPBs {
@@ -269,20 +373,12 @@ func (d *driver) unprepareResourceClaim(ctx context.Context, claim kubeletplugin
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claim.UID, err)
 	}
 	if siblingChanged {
-		d.republishResources(ctx)
+		if err := d.republishResources(ctx); err != nil {
+			klog.Warningf("failed to re-publish resources after sibling restoration: %v", err)
+		}
 	}
-	return nil
-}
 
-func (d *driver) republishResources(ctx context.Context) {
-	d.state.Lock()
-	resources := d.buildDriverResources(d.nodeName)
-	d.state.Unlock()
-	if err := d.helper.PublishResources(ctx, resources); err != nil {
-		klog.Warningf("Failed to republish resources after sibling change: %v", err)
-	} else {
-		klog.Infof("Republished ResourceSlice after sibling change")
-	}
+	return nil
 }
 
 func (d *driver) HandleError(ctx context.Context, err error, msg string) {
