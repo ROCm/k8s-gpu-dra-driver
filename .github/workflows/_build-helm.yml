@@ -1,0 +1,45 @@
+name: Build Helm Chart
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      suffix:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+
+  build-helm:
+    name: Build Helm Chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and rename Helm chart with final name
+        env:
+          DRA_VERSION: ${{ inputs.version }}
+          SUFFIX:      ${{ inputs.suffix }}
+        run: |
+          set -euo pipefail
+          make helm CHART_VERSION="${DRA_VERSION}"
+          mkdir -p staging
+          mv "helm-charts-k8s/k8s-gpu-dra-driver-helm-k8s-${DRA_VERSION}.tgz" \
+             "staging/k8s-gpu-dra-driver-helm-k8s-${DRA_VERSION}-${SUFFIX}.tgz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-helm-${{ inputs.image_tag }}
+          retention-days: 1
+          path: staging/
