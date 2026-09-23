@@ -42,10 +42,12 @@ import (
 	"slices"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
+	drametadatav1beta1 "k8s.io/dynamic-resource-allocation/api/metadata/v1beta1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	klog "k8s.io/klog/v2"
@@ -107,8 +109,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
 		opts = append(opts,
-			kubeletplugin.EnableDeviceMetadata(true),
-			kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion),
+			kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{
+				drametadatav1beta1.SchemeGroupVersion,
+				drametadatav1alpha1.SchemeGroupVersion,
+			}),
 		)
 		klog.Infof("DeviceMetadata feature gate enabled: KEP-5304 device metadata will be published")
 	}
@@ -335,6 +339,10 @@ func (d *driver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.N
 	}
 
 	return nil
+}
+
+func (d *driver) WatchHealthStatus(_ context.Context, _ chan<- kubeletplugin.DeviceHealthReport) error {
+	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) HandleError(ctx context.Context, err error, msg string) {
