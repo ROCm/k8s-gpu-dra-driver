@@ -42,6 +42,9 @@ IMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME):$(DRIVER_IMAGE_TAG)
 
 ubi-minimal-9.6: BASE_IMAGE = registry.access.redhat.com/ubi9/ubi-minimal:9.6
 
+# The prebuilt AMD SMI libraries are vendored under third_party/amd_smi and are
+# already part of the docker build context; no pre-build staging is needed.
+
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
 	@echo "Building image: $(IMAGE) using base image: $(BASE_IMAGE)"

@@ -31,30 +31,27 @@ import (
 	"github.com/golang/glog"
 )
 
-// GetDriverVersion reads the AMDGPU driver version
+// GetDriverVersion reads the AMDGPU driver version from the amdgpu kernel
+// module. Reading /sys/module/amdgpu/version directly (rather than globbing
+// every DRM card's driver) keeps the result specific to amdgpu on mixed-vendor
+// nodes, where another vendor's module would otherwise report its own version.
+//
+// Returns "" when the version is unavailable (e.g. the in-kernel amdgpu module
+// does not set a version string) so the caller omits the driverVersion
+// attribute entirely rather than publishing a synthetic value.
 func GetDriverVersion() string {
-	matches, _ := filepath.Glob("/sys/class/drm/card*/device/driver/module/version")
-	if len(matches) == 0 {
-		glog.Warningf("No AMD GPU cards found for driver version reading; driverVersion attribute will be omitted")
+	b, err := os.ReadFile("/sys/module/amdgpu/version")
+	if err != nil {
+		glog.Warningf("Failed to read amdgpu module version: %s; driverVersion attribute will be omitted", err)
 		return ""
 	}
 
-	for _, versionPath := range matches {
-		b, err := os.ReadFile(versionPath)
-		if err != nil {
-			continue
-		}
-		driverVersion := strings.TrimSpace(string(b))
-		if driverVersion != "" {
-			return driverVersion
-		}
+	driverVersion := strings.TrimSpace(string(b))
+	if driverVersion == "" {
+		glog.Warningf("amdgpu module reports no version string; driverVersion attribute will be omitted")
 	}
 
-	// In-kernel amdgpu module may not set a version string (empty /sys/module/amdgpu/version).
-	// Return empty so the caller omits the driverVersion attribute entirely rather than
-	// publishing a synthetic value; the ResourceSlice is still valid without it.
-	glog.Warningf("Failed to read AMDGPU driver version from any card; driverVersion attribute will be omitted")
-	return ""
+	return driverVersion
 }
 
 // SemverDriverVersion trims the AMDGPU version to MAJOR.MINOR.PATCH. The

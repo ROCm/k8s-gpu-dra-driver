@@ -19,8 +19,12 @@ image:
 deviceClass:
   # -- Create the gpu.amd.com DeviceClass resource. Set to false if deploying via gpu-operator.
   create: true
-  # -- Maps classic extended-resource requests to this DeviceClass.
+  # -- Maps classic extended-resource requests to a DeviceClass.
   # Override to another name, or set "" to omit the field.
+  # When featureGates.AutoPartition is enabled, this is applied to a second class,
+  # gpu.amd.com-spx, constrained to whole-GPU (spx) devices only, so classic
+  # requests can't resolve to a leftover partition fraction. When AutoPartition is
+  # disabled, it stays on the single gpu.amd.com class as before.
   extendedResourceName: amd.com/gpu
 
 serviceAccount:
@@ -33,6 +37,13 @@ serviceAccount:
   name: ""
 
 kubeletPlugin:
+  # Set to true when the amdgpu kernel driver on the node is managed by Kernel
+  # Module Management (KMM). This changes how the driver reloads amdgpu after an
+  # auto-partition memory-mode change: on a KMM-managed node the amd-smi reload
+  # is skipped (it would restore the inbox driver) and the KMM reload path is
+  # used instead. When deploying via the GPU operator, the operator sets this;
+  # set it here for standalone Helm deployments.
+  kmmDriverEnabled: false
   priorityClassName: "system-node-critical"
   updateStrategy:
     type: RollingUpdate
@@ -91,5 +102,5 @@ cdi:
 # ContextualLogging) are also accepted here.
 # Example:
 #   featureGates:
-#     ExampleFeature: true
+#     AutoPartition: true
 featureGates: {}
