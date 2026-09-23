@@ -47,6 +47,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
+	drametadatav1beta1 "k8s.io/dynamic-resource-allocation/api/metadata/v1beta1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	klog "k8s.io/klog/v2"
@@ -108,7 +109,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
 		opts = append(opts,
-			kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{drametadatav1alpha1.SchemeGroupVersion}),
+			kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{
+				drametadatav1beta1.SchemeGroupVersion,
+				drametadatav1alpha1.SchemeGroupVersion,
+			}),
 		)
 		klog.Infof("DeviceMetadata feature gate enabled: KEP-5304 device metadata will be published")
 	}
