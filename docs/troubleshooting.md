@@ -184,20 +184,20 @@ will fail.
 
 ### GPU unavailable after VFIO allocation
 
-**Symptom:** A compute GPU (`type=amdgpu`) disappears from the ResourceSlice
-after a VFIO device on the same physical GPU is allocated.
+**Symptom:** A claim for a compute GPU (`type=amdgpu`) stays Pending even
+though the GPU is listed in the ResourceSlice, while the VFIO entry of the same
+physical GPU (or vice versa) is allocated.
 
 **Cause:** This is expected behavior. Dual-entry advertising creates both a
-compute and a VFIO entry for each GPU. Sibling exclusion is bidirectional:
-allocating either type removes the other from the ResourceSlice to prevent
-the same physical GPU from being used for both compute and passthrough
-simultaneously.
+compute and a VFIO entry for each GPU that is not an SR-IOV VF. Both entries
+consume the same capacity-1 `fn-<pci-addr>` counter, so the scheduler never
+allocates the same physical GPU for compute and passthrough at once.
 
-**Resolution:** The sibling returns to the ResourceSlice when the claim is
-released. No action is needed. To verify:
+**Resolution:** The other entry becomes allocatable again when the claim is
+released. No action is needed. To see which counter the entries share:
 
 ```bash
-kubectl get resourceslices -o json | jq '.items[].spec.devices[].basic.attributes["gpu.amd.com"].type'
+kubectl get resourceslices -o json | jq '.items[].spec.devices[]? | {name, consumesCounters}'
 ```
 
 ### VFIO device cannot be allocated — VF slots exhausted

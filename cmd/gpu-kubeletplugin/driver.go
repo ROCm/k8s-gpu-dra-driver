@@ -66,6 +66,10 @@ type driver struct {
 	enableSyntheticPartition bool
 	nodeName                 string
 	partitionableGPUs        []int
+
+	// publish hands ResourceSlices to the kubelet plugin helper; a field so
+	// tests can observe publishes without a running helper.
+	publish func(context.Context, resourceslice.DriverResources) error
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
@@ -119,31 +123,27 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 	d.helper = helper
+	d.publish = helper.PublishResources
 	// Store helper reference in state for re-publishing from Prepare/Unprepare
 	d.state.driver = d
-
-	var resources resourceslice.DriverResources
-
-	if d.enableSyntheticPartition && d.state.partitionState != nil {
-		// Synthetic-partition mode: build two slices (shared counters + devices)
-		resources = d.buildSyntheticPartitionResources()
-	} else {
-		// Standard mode: single slice with all devices, in a deterministic order.
-		resources = d.buildDriverResources(config.flags.nodeName)
-	}
-
-	if resourcesJSON, err := json.MarshalIndent(resources, "", "  "); err != nil {
-		klog.Warningf("Failed to marshal ResourceSlice to JSON: %v", err)
-	} else {
-		klog.Infof("Publishing ResourceSlice:\n%s", string(resourcesJSON))
-	}
 
 	d.healthcheck, err = startHealthcheck(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
 
-	if err := helper.PublishResources(ctx, resources); err != nil {
+	// The plugin is already registered, so Prepare/Unprepare may be running.
+	// Build and publish under the state lock like every republish, so this
+	// initial publish cannot overwrite a newer one.
+	d.state.Lock()
+	defer d.state.Unlock()
+	resources := d.buildResources()
+	if resourcesJSON, err := json.MarshalIndent(resources, "", "  "); err != nil {
+		klog.Warningf("Failed to marshal ResourceSlice to JSON: %v", err)
+	} else {
+		klog.Infof("Publishing ResourceSlice:\n%s", string(resourcesJSON))
+	}
+	if err := d.publish(ctx, resources); err != nil {
 		return nil, err
 	}
 
@@ -207,21 +207,28 @@ func chunk[T any](items []T, size int) [][]T {
 	return chunks
 }
 
-// republishResources re-publishes ResourceSlices with updated taints.
-// Called from Prepare (to add memory partition conflict taints) and
-// Unprepare (to remove taints when all allocations are released).
-func (d *driver) republishResources(ctx context.Context) error {
-	var resources resourceslice.DriverResources
-	if d.enableSyntheticPartition && d.state.partitionState != nil {
-		resources = d.buildSyntheticPartitionResources()
-	} else {
-		resources = d.buildDriverResources(d.nodeName)
-	}
-	if err := d.helper.PublishResources(ctx, resources); err != nil {
+// republishResourcesLocked re-publishes ResourceSlices from the current device
+// state, e.g. when partition taints change. The caller must hold the
+// DeviceState lock: building and publishing under it keeps the reads of
+// allocatable consistent with Prepare/Unprepare, which modify its devices,
+// and orders publishes so an older snapshot never replaces a newer one.
+// PublishResources only hands the desired state to the ResourceSlice
+// controller, so holding the lock across it is cheap.
+func (d *driver) republishResourcesLocked(ctx context.Context) error {
+	if err := d.publish(ctx, d.buildResources()); err != nil {
 		return fmt.Errorf("error re-publishing resources: %v", err)
 	}
-	klog.Infof("Re-published ResourceSlices with updated taints")
+	klog.Infof("Re-published ResourceSlices")
 	return nil
+}
+
+// buildResources builds the DriverResources for the current mode. The caller
+// must hold the DeviceState lock.
+func (d *driver) buildResources() resourceslice.DriverResources {
+	if d.enableSyntheticPartition && d.state.partitionState != nil {
+		return d.buildSyntheticPartitionResources()
+	}
+	return d.buildDriverResources(d.nodeName)
 }
 
 // buildDriverResources builds normal-mode DriverResources. Like the synthetic
@@ -351,15 +358,10 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 }
 
 func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
-	preparedPBs, siblingChanged, err := d.state.Prepare(claim)
+	preparedPBs, err := d.state.Prepare(claim)
 	if err != nil {
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
-		}
-	}
-	if siblingChanged {
-		if err := d.republishResources(ctx); err != nil {
-			klog.Warningf("failed to re-publish resources after sibling exclusion: %v", err)
 		}
 	}
 	var prepared []kubeletplugin.Device
@@ -372,8 +374,15 @@ func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.Re
 		}
 
 		if featuregates.Enabled(featuregates.DeviceMetadata) {
-			if allocDev, exists := d.state.allocatable[preparedPB.GetDeviceName()]; exists {
-				device := allocDev.GetDevice()
+			// allocatable is mutated by concurrent Prepare/Unprepare calls.
+			d.state.Lock()
+			allocDev, exists := d.state.allocatable[preparedPB.GetDeviceName()]
+			var device resourceapi.Device
+			if exists {
+				device = allocDev.GetDevice()
+			}
+			d.state.Unlock()
+			if exists {
 				if len(device.Attributes) > 0 {
 					attrs := make(map[string]resourceapi.DeviceAttribute, len(device.Attributes))
 					for k, v := range device.Attributes {
@@ -405,16 +414,9 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletpl
 }
 
 func (d *driver) unprepareResourceClaim(ctx context.Context, claim kubeletplugin.NamespacedObject) error {
-	siblingChanged, err := d.state.Unprepare(string(claim.UID))
-	if err != nil {
+	if err := d.state.Unprepare(string(claim.UID)); err != nil {
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claim.UID, err)
 	}
-	if siblingChanged {
-		if err := d.republishResources(ctx); err != nil {
-			klog.Warningf("failed to re-publish resources after sibling restoration: %v", err)
-		}
-	}
-
 	return nil
 }
 

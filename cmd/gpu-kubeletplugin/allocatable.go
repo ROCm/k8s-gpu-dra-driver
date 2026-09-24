@@ -82,22 +82,6 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 	return ""
 }
 
-// GetSiblingLookupPCIAddress returns the PCI address for finding sibling
-// devices (compute and VFIO on the same physical GPU). GIM VFs return ""
-// because they have different PCI addresses from the compute PF.
-func (d *AllocatableDevice) GetSiblingLookupPCIAddress() string {
-	switch d.Type() {
-	case consts.AmdGpuDeviceType:
-		return d.AmdGpu.PCIAddress
-	case consts.VfioDeviceType:
-		if d.Vfio.IsVF {
-			return ""
-		}
-		return d.Vfio.PCIAddress
-	}
-	return ""
-}
-
 // markSiblingPairs flags every PCI function that is advertised both as a
 // compute GPU and as a VFIO device (dual-entry advertising). Flagged entries
 // consume a capacity-1 counter for their function (see deviceCounters), so

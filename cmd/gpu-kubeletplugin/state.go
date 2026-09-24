@@ -102,8 +102,6 @@ type DeviceState struct {
 	driver               *driver // back-reference for re-publishing resources
 	syntheticPartition   bool    // whether synthetic-partition mode is enabled
 	nodeName             string  // this node's name, matched against allocation results' Pool
-	byPCIAddress         map[string][]string
-	siblingCache         map[string]*AllocatableDevice
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -152,7 +150,6 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		checkpointManager:  checkpointManager,
 		syntheticPartition: autoPartition,
 		nodeName:           config.flags.nodeName,
-		siblingCache:       make(AllocatableDevices),
 	}
 
 	// Set up partition state for synthetic-partition mode
@@ -168,7 +165,6 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		}
 		state.partitionState = NewPartitionState(gpuPCIAddresses, partitionableGPUs, allocatable, kmmEnabled, recoverer)
 	}
-	state.buildPCIIndex()
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
@@ -187,17 +183,6 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		checkpoint := newCheckpoint()
 		if err := state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 			return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
-		}
-
-		// Restore sibling exclusion before the first ResourceSlice is published.
-		// The sibling cache is intentionally rebuilt from the checkpoint because it
-		// is an in-memory view and is not persisted separately.
-		for _, prepared := range checkpoint.V1.PreparedClaims {
-			for _, device := range prepared {
-				if allocDev, exists := state.allocatable[device.DeviceName]; exists && allocDev.GetSiblingLookupPCIAddress() != "" {
-					state.RemoveSiblingDevices(device.DeviceName, allocDev)
-				}
-			}
 		}
 
 		// Recover partition state from checkpoint if synthetic-partition is enabled
@@ -221,55 +206,7 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
-func (s *DeviceState) buildPCIIndex() {
-	s.byPCIAddress = make(map[string][]string)
-	for name, dev := range s.allocatable {
-		pci := dev.GetSiblingLookupPCIAddress()
-		if pci != "" {
-			s.byPCIAddress[pci] = append(s.byPCIAddress[pci], name)
-		}
-	}
-}
-
-func (s *DeviceState) RemoveSiblingDevices(devName string, device *AllocatableDevice) bool {
-	pci := device.GetSiblingLookupPCIAddress()
-	if pci == "" {
-		return false
-	}
-	if s.siblingCache == nil {
-		s.siblingCache = make(AllocatableDevices)
-	}
-	changed := false
-	for _, name := range s.byPCIAddress[pci] {
-		if name == devName {
-			continue
-		}
-		if sibling, exists := s.allocatable[name]; exists {
-			s.siblingCache[name] = sibling
-			delete(s.allocatable, name)
-			changed = true
-			klog.Infof("Removed sibling %s (type %s) for prepared device %s", name, sibling.Type(), devName)
-		}
-	}
-	return changed
-}
-
-func (s *DeviceState) RestoreSiblingDevices(device *AllocatableDevice) {
-	pci := device.GetSiblingLookupPCIAddress()
-	if pci == "" {
-		return
-	}
-	for name, cached := range s.siblingCache {
-		if cached.GetSiblingLookupPCIAddress() == pci {
-			s.allocatable[name] = cached
-			delete(s.siblingCache, name)
-			klog.Infof("Restored sibling %s (type %s) after unprepare", name, cached.Type())
-		}
-	}
-	s.buildPCIIndex()
-}
-
-func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, bool, error) {
+func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -277,12 +214,12 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, false, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), false, nil
+		return preparedClaims[claimUID].GetDevices(), nil
 	}
 
 	// If synthetic-partition mode is enabled, set up partitions in two phases so
@@ -311,15 +248,15 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		// are not re-incremented and taintsChanged is false.
 		taintsChanged, err := s.partitionState.ReserveClaim(claimUID, partitionShares)
 		if err != nil {
-			return nil, false, fmt.Errorf("error reserving partition for claim %s: %v", claimUID, err)
+			return nil, fmt.Errorf("error reserving partition for claim %s: %v", claimUID, err)
 		}
 
 		// Phase 1.5: publish taints before the slow apply. If this fails we have no
 		// scheduler-visible protection for the reload window, so roll back and fail.
 		if taintsChanged && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				s.rollbackPartitions(claimUID, partitionShares)
-				return nil, false, fmt.Errorf("failed to publish partition taints before apply: %v", err)
+				return nil, fmt.Errorf("failed to publish partition taints before apply: %v", err)
 			}
 		}
 
@@ -338,10 +275,10 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 					if cperr := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); cperr != nil {
 						klog.Warningf("failed to checkpoint in-flight KMM reload marker: %v", cperr)
 					}
-					return nil, false, fmt.Errorf("partition apply for device %s pending: %w", deviceName, err)
+					return nil, fmt.Errorf("partition apply for device %s pending: %w", deviceName, err)
 				}
 				s.rollbackPartitions(claimUID, partitionShares)
-				return nil, false, fmt.Errorf("error applying partition for device %s: %v", deviceName, err)
+				return nil, fmt.Errorf("error applying partition for device %s: %v", deviceName, err)
 			}
 		}
 	}
@@ -351,23 +288,14 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
-		return nil, false, fmt.Errorf("prepare failed: %v", err)
+		return nil, fmt.Errorf("prepare failed: %v", err)
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
-		return nil, false, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
-	}
-
-	siblingChanged := false
-	for _, pd := range preparedDevices {
-		if allocDev, exists := s.allocatable[pd.DeviceName]; exists && allocDev.GetSiblingLookupPCIAddress() != "" {
-			if s.RemoveSiblingDevices(pd.DeviceName, allocDev) {
-				siblingChanged = true
-			}
-		}
+		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
 	}
 
 	preparedClaims[claimUID] = preparedDevices
@@ -385,18 +313,13 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
-		for _, pd := range preparedDevices {
-			if allocDev, exists := s.allocatable[pd.DeviceName]; exists && allocDev.GetSiblingLookupPCIAddress() != "" {
-				s.RestoreSiblingDevices(allocDev)
-			}
-		}
-		return nil, false, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
 	// Note: memory-mode conflict taints were already published in Phase 1.5 above,
 	// before the hardware apply, so no re-publish is needed here.
 
-	return preparedClaims[claimUID].GetDevices(), siblingChanged, nil
+	return preparedClaims[claimUID].GetDevices(), nil
 }
 
 // partitionSharesForClaim returns one PartitionShare per allocation result that
@@ -488,19 +411,19 @@ func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShar
 		klog.Warningf("Error rolling back partition reservation for claim %s: %v", claimUID, err)
 	}
 	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition rollback: %v", err)
 		}
 	}
 }
 
-func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
+func (s *DeviceState) Unprepare(claimUID string) error {
 	s.Lock()
 	defer s.Unlock()
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return false, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
@@ -512,7 +435,7 @@ func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
 		// deleted while the reload was still converging) would return here and
 		// strand the reservation, taints, and mutex counters permanently.
 		if !s.syntheticPartition || s.partitionState == nil || !s.partitionState.HasReservation(claimUID) {
-			return false, nil
+			return nil
 		}
 		shares := s.partitionState.PartitionSharesFromAssignedSlots(claimUID)
 		changed, err := s.partitionState.ReleaseClaim(claimUID, shares)
@@ -520,15 +443,15 @@ func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
 			klog.Warningf("Error releasing partition for never-fully-prepared claim %s: %v", claimUID, err)
 		}
 		if changed && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				klog.Warningf("Failed to re-publish resources after unprepare of never-fully-prepared claim %s: %v", claimUID, err)
 			}
 		}
 		s.savePartitionCheckpoint(checkpoint)
 		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-			return false, fmt.Errorf("unable to sync to checkpoint: %v", err)
+			return fmt.Errorf("unable to sync to checkpoint: %v", err)
 		}
-		return false, nil
+		return nil
 	}
 
 	// Track whether taints changed for re-publishing
@@ -566,23 +489,12 @@ func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
 	}
 
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
-		return false, fmt.Errorf("unprepare failed: %v", err)
-	}
-
-	siblingChanged := false
-	for _, pd := range preparedClaims[claimUID] {
-		if allocDev, exists := s.allocatable[pd.DeviceName]; exists && allocDev.GetSiblingLookupPCIAddress() != "" {
-			before := len(s.siblingCache)
-			s.RestoreSiblingDevices(allocDev)
-			if len(s.siblingCache) != before {
-				siblingChanged = true
-			}
-		}
+		return fmt.Errorf("unprepare failed: %v", err)
 	}
 
 	err := s.cdi.DeleteClaimSpecFile(claimUID)
 	if err != nil {
-		return siblingChanged, fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
+		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
 	}
 
 	delete(preparedClaims, claimUID)
@@ -591,17 +503,17 @@ func (s *DeviceState) Unprepare(claimUID string) (bool, error) {
 	s.savePartitionCheckpoint(checkpoint)
 
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return siblingChanged, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
 	// Re-publish resources if taints changed (all allocations released)
 	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition unprepare: %v", err)
 		}
 	}
 
-	return siblingChanged, nil
+	return nil
 }
 
 func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
