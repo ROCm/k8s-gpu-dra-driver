@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/dynamic-resource-allocation/resourceslice"
 )
 
 func deviceNames(devices []resourceapi.Device) []string {
@@ -301,4 +303,105 @@ func TestChunkCounterSets(t *testing.T) {
 			}
 		})
 	}
+}
+
+// vfioVFs returns allocatable VFIO VFs spread over numPFs SR-IOV PFs,
+// vfsPerPF each. Every VF consumes its PF's vf-slots counter.
+func vfioVFs(numPFs, vfsPerPF int) AllocatableDevices {
+	devs := make(AllocatableDevices)
+	idx := 0
+	for pf := 0; pf < numPFs; pf++ {
+		pfAddr := fmt.Sprintf("0000:%02x:00.0", 0x10+pf)
+		for vf := 0; vf < vfsPerPF; vf++ {
+			devs[fmt.Sprintf("gpu-vfio-%d", idx)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+				Index:           idx,
+				PCIAddress:      fmt.Sprintf("0000:%02x:00.%d", 0x10+pf, vf+1),
+				IsVF:            true,
+				ParentPFAddress: pfAddr,
+				TotalVFs:        vfsPerPF,
+				NumVFs:          vfsPerPF,
+			}}
+			idx++
+		}
+	}
+	return devs
+}
+
+// checkSliceLimits asserts that every slice respects the API limits, that
+// slices hold either counters or devices, that every device is published
+// exactly once, and that every consumed counter set is published.
+func checkSliceLimits(t *testing.T, pool resourceslice.Pool, wantDevices int) (counterSlices, deviceSlices int) {
+	t.Helper()
+	counterSets := map[string]bool{}
+	seen := map[string]bool{}
+	var devices []resourceapi.Device
+	for _, sl := range pool.Slices {
+		require.False(t, len(sl.SharedCounters) > 0 && len(sl.Devices) > 0, "slice mixes counters and devices")
+		if len(sl.SharedCounters) > 0 {
+			counterSlices++
+			assert.LessOrEqual(t, len(sl.SharedCounters), resourceapi.ResourceSliceMaxCounterSets)
+			for _, cs := range sl.SharedCounters {
+				counterSets[cs.Name] = true
+			}
+			continue
+		}
+		deviceSlices++
+		limit := resourceapi.ResourceSliceMaxDevices
+		for _, d := range sl.Devices {
+			if len(d.ConsumesCounters) > 0 {
+				limit = resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures
+			}
+		}
+		assert.LessOrEqual(t, len(sl.Devices), limit)
+		devices = append(devices, sl.Devices...)
+	}
+	for _, d := range devices {
+		assert.False(t, seen[d.Name], "device %s published twice", d.Name)
+		seen[d.Name] = true
+		for _, c := range d.ConsumesCounters {
+			assert.True(t, counterSets[c.CounterSet], "device %s consumes unpublished counter set %s", d.Name, c.CounterSet)
+		}
+	}
+	assert.Len(t, devices, wantDevices)
+	return counterSlices, deviceSlices
+}
+
+func TestBuildDriverResources_SliceLimits(t *testing.T) {
+	build := func(devs AllocatableDevices) resourceslice.Pool {
+		d := &driver{state: &DeviceState{allocatable: devs}}
+		return d.buildDriverResources("test-node").Pools["test-node"]
+	}
+
+	t.Run("9 SR-IOV PFs split counter sets across slices", func(t *testing.T) {
+		counterSlices, deviceSlices := checkSliceLimits(t, build(vfioVFs(9, 1)), 9)
+		assert.Equal(t, 2, counterSlices, "8 + 1 counter sets")
+		assert.Equal(t, 1, deviceSlices)
+	})
+
+	t.Run("65 counter-consuming devices split at 64", func(t *testing.T) {
+		counterSlices, deviceSlices := checkSliceLimits(t, build(vfioVFs(5, 13)), 65)
+		assert.Equal(t, 1, counterSlices)
+		assert.Equal(t, 2, deviceSlices, "64 + 1 devices")
+	})
+
+	t.Run("64 counter-consuming devices fit one slice", func(t *testing.T) {
+		_, deviceSlices := checkSliceLimits(t, build(vfioVFs(8, 8)), 64)
+		assert.Equal(t, 1, deviceSlices)
+	})
+
+	t.Run("devices without counters keep the 128 limit", func(t *testing.T) {
+		devs := make(AllocatableDevices)
+		for i := 0; i < 129; i++ {
+			devs[fmt.Sprintf("gpu-%d-%d", i, 128+i)] = &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: i, renderIndex: 128 + i}}
+		}
+		counterSlices, deviceSlices := checkSliceLimits(t, build(devs), 129)
+		assert.Equal(t, 0, counterSlices)
+		assert.Equal(t, 2, deviceSlices, "128 + 1 devices")
+	})
+
+	t.Run("no devices still publishes one empty device slice", func(t *testing.T) {
+		pool := build(AllocatableDevices{})
+		require.Len(t, pool.Slices, 1)
+		assert.Empty(t, pool.Slices[0].Devices)
+	})
 }
