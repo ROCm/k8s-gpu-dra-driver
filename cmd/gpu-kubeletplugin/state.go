@@ -97,7 +97,7 @@ type DeviceState struct {
 	allocatable          AllocatableDevices
 	checkpointManager    checkpointmanager.CheckpointManager
 	vfioManager          *VfioPciManager
-	claimVfioConversions map[string]*AmdGpuInfo
+	claimVfioConversions map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU
 	partitionState       *PartitionState
 	driver               *driver // back-reference for re-publishing resources
 	syntheticPartition   bool    // whether synthetic-partition mode is enabled
@@ -141,6 +141,8 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		}
 	}
 
+	markSiblingPairs(allocatable)
+
 	state := &DeviceState{
 		cdi:                cdi,
 		allocatable:        allocatable,
@@ -178,20 +180,20 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	}
 
 	if checkpointExists {
+		checkpoint := newCheckpoint()
+		if err := state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		}
+
 		// Recover partition state from checkpoint if synthetic-partition is enabled
 		if autoPartition && state.partitionState != nil {
-			checkpoint := newCheckpoint()
-			if err := state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-				klog.Warningf("Failed to read checkpoint for partition state recovery: %v", err)
-			} else {
-				state.partitionState.RecoverFromCheckpoint(
-					checkpoint.V1.ActiveMemoryMode,
-					checkpoint.V1.GPUComputeModes,
-					checkpoint.V1.MemoryReload,
-					checkpoint.V1.PreparedClaims,
-					checkpoint.V1.AssignedSlots,
-				)
-			}
+			state.partitionState.RecoverFromCheckpoint(
+				checkpoint.V1.ActiveMemoryMode,
+				checkpoint.V1.GPUComputeModes,
+				checkpoint.V1.MemoryReload,
+				checkpoint.V1.PreparedClaims,
+				checkpoint.V1.AssignedSlots,
+			)
 		}
 		return state, nil
 	}
@@ -252,7 +254,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		// Phase 1.5: publish taints before the slow apply. If this fails we have no
 		// scheduler-visible protection for the reload window, so roll back and fail.
 		if taintsChanged && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				s.rollbackPartitions(claimUID, partitionShares)
 				return nil, fmt.Errorf("failed to publish partition taints before apply: %v", err)
 			}
@@ -409,7 +411,7 @@ func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShar
 		klog.Warningf("Error rolling back partition reservation for claim %s: %v", claimUID, err)
 	}
 	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition rollback: %v", err)
 		}
 	}
@@ -441,7 +443,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 			klog.Warningf("Error releasing partition for never-fully-prepared claim %s: %v", claimUID, err)
 		}
 		if changed && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				klog.Warningf("Failed to re-publish resources after unprepare of never-fully-prepared claim %s: %v", claimUID, err)
 			}
 		}
@@ -506,7 +508,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 
 	// Re-publish resources if taints changed (all allocations released)
 	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition unprepare: %v", err)
 		}
 	}
@@ -530,20 +532,28 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 	klog.V(2).Infof("Decoded %d opaque configs for driver %s", len(configs), consts.DriverName)
 
-	// Add a default GPU config at the front with lowest precedence. No
-	// default VfioDeviceConfig — VFIO conversion requires an explicit config
-	// in the claim to avoid accidentally routing regular GPUs into vfio-pci.
+	// Add a default GPU config at the front with lowest precedence. There is no
+	// default VfioDeviceConfig in this list: converting a regular GPU to VFIO
+	// requires an explicit config in the claim, to avoid accidentally routing
+	// regular GPUs into vfio-pci. Devices that are already VFIO get a default
+	// VFIO config below instead.
 	configs = slices.Insert(configs, 0,
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
 
-	// Track per-claim VFIO conversions so the long-lived allocatable entry
-	// stays immutable. Restored on unprepare or rollback.
-	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
+	// Record GPU->VFIO conversions per claim, so the original GPU can be
+	// restored on unprepare or rollback. Records are keyed by claim UID and
+	// are never reset here: other claims may still hold converted devices.
+	claimUID := string(claim.UID)
 
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
+	// A device that is already VFIO (a pre-bound device, or the type=vfio
+	// dual-entry sibling of a compute GPU) may be claimed directly without a
+	// VfioDeviceConfig. It gets this default config; it is only created when
+	// needed. Regular GPUs are never converted without an explicit config.
+	var defaultVfioConfig *configapi.VfioDeviceConfig
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver != consts.DriverName {
 			continue
@@ -553,6 +563,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
 		isVFIO := allocDev.Type() == consts.VfioDeviceType
+		matched := false
 		for _, c := range slices.Backward(configs) {
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
@@ -572,14 +583,20 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 							VendorID:           consts.AMDVendorID,
 							ProductName:        allocDev.AmdGpu.ProductName,
 							NumaNode:           allocDev.AmdGpu.NumaNode,
+							ParentPFAddress:    allocDev.AmdGpu.ParentPFAddress,
+							TotalVFs:           allocDev.AmdGpu.TotalVFs,
 							IsVF:               isVF,
+							MemoryBytes:        allocDev.AmdGpu.MemoryBytes,
+							ComputeUnits:       allocDev.AmdGpu.ComputeUnits,
+							SimdUnits:          allocDev.AmdGpu.SimdUnits,
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
-							preConfigureDriver: "amdgpu",
+							preConfigureDriver: consts.AMDGPUDriverName,
+							siblingExclusive:   allocDev.AmdGpu.siblingExclusive,
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
-						s.claimVfioConversions[result.Device] = allocDev.AmdGpu
+						s.recordVfioConversion(claimUID, result.Device, allocDev.AmdGpu)
 						allocDev.Vfio = vfioInfo
 						allocDev.AmdGpu = nil
 						isVFIO = true
@@ -595,8 +612,18 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			}
 			if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
 				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+				matched = true
 				break
 			}
+		}
+		if !matched && isVFIO {
+			if !featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return nil, fmt.Errorf("device %s is a VFIO device but the %s feature gate is disabled", result.Device, featuregates.VFIOPassthrough)
+			}
+			if defaultVfioConfig == nil {
+				defaultVfioConfig = configapi.DefaultVfioDeviceConfig()
+			}
+			configResultsMap[defaultVfioConfig] = append(configResultsMap[defaultVfioConfig], &result)
 		}
 	}
 
@@ -640,7 +667,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
 							}
 						}
-						s.restoreFromVfio(name)
+						s.restoreFromVfio(claimUID, name)
 					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
@@ -654,7 +681,6 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 
 	// Walk through each config and its associated device allocation results
 	// and construct the list of prepared devices to return.
-	claimUID := string(claim.UID)
 	var preparedDevices PreparedDevices
 	for _, results := range configResultsMap {
 		for _, result := range results {
@@ -698,18 +724,30 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
 				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			} else {
-				s.restoreFromVfio(device.DeviceName)
+				s.restoreFromVfio(claimUID, device.DeviceName)
 			}
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (s *DeviceState) restoreFromVfio(deviceName string) {
+// recordVfioConversion notes that deviceName was converted from original to
+// VFIO for claimUID.
+func (s *DeviceState) recordVfioConversion(claimUID, deviceName string, original *AmdGpuInfo) {
 	if s.claimVfioConversions == nil {
-		return
+		s.claimVfioConversions = make(map[string]map[string]*AmdGpuInfo)
 	}
-	original, ok := s.claimVfioConversions[deviceName]
+	if s.claimVfioConversions[claimUID] == nil {
+		s.claimVfioConversions[claimUID] = make(map[string]*AmdGpuInfo)
+	}
+	s.claimVfioConversions[claimUID][deviceName] = original
+}
+
+// restoreFromVfio swaps a device claimUID converted to VFIO back to its
+// original GPU and drops the record. It is a no-op for devices the claim did
+// not convert, such as pre-bound VFIO devices.
+func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
+	original, ok := s.claimVfioConversions[claimUID][deviceName]
 	if !ok {
 		return
 	}
@@ -718,7 +756,10 @@ func (s *DeviceState) restoreFromVfio(deviceName string) {
 		allocDev.Vfio = nil
 		klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
 	}
-	delete(s.claimVfioConversions, deviceName)
+	delete(s.claimVfioConversions[claimUID], deviceName)
+	if len(s.claimVfioConversions[claimUID]) == 0 {
+		delete(s.claimVfioConversions, claimUID)
+	}
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.
