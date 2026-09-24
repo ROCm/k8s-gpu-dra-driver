@@ -191,6 +191,7 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 				pciBusIDAttr:       pciBusIDAttr,
 				pcieRootAttr:       pcieRootAttr,
 				preConfigureDriver: "amdgpu",
+				convertedFrom:      original,
 			}}
 			s.recordVfioConversion(claimUID, name, original)
 			klog.Infof("Recovered VFIO conversion of %s (%s) for claim %s", name, rec.PCIAddress, claimUID)

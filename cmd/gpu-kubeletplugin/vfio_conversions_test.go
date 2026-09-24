@@ -54,6 +54,19 @@ func breakVfioUnbind(t *testing.T, root string) (fix func()) {
 	return fix
 }
 
+// assertPublished checks the ResourceSlice devices built from allocatable:
+// exactly the expected names, each with the expected "type" attribute.
+func assertPublished(t *testing.T, allocatable AllocatableDevices, want map[string]string) {
+	t.Helper()
+	got := make(map[string]string)
+	for _, d := range resourceSliceDevices(allocatable) {
+		_, dup := got[d.Name]
+		assert.False(t, dup, "duplicate device name %q in ResourceSlice", d.Name)
+		got[d.Name] = *d.Attributes["type"].StringValue
+	}
+	assert.Equal(t, want, got)
+}
+
 func readCheckpoint(t *testing.T, state *DeviceState) *Checkpoint {
 	t.Helper()
 	cp := newCheckpoint()
@@ -204,6 +217,7 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	require.NotNil(t, dev.Vfio)
 	assert.Equal(t, "amdgpu", dev.Vfio.preConfigureDriver)
 	assert.Equal(t, "42", dev.Vfio.IOMMUGroup)
+	assertPublished(t, restarted.allocatable, map[string]string{"gpu-0-128": consts.AmdGpuDeviceType})
 
 	require.NoError(t, restarted.Unprepare("claim-uid"))
 	bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/amdgpu/bind"))
@@ -212,4 +226,29 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	assertRestoredGPU(t, restarted, "gpu-0-128")
 	assert.Equal(t, 128, restarted.allocatable["gpu-0-128"].AmdGpu.renderIndex)
 	assert.Empty(t, readCheckpoint(t, restarted).V1.VfioConversions)
+}
+
+// TestConvertedGPU_AdvertisedAsOriginal checks that a GPU converted to VFIO
+// for a claim keeps being published under its own name and attributes, and
+// does not collide with a pre-bound VFIO device.
+func TestConvertedGPU_AdvertisedAsOriginal(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, _ := setupConvertibleGPU(t, true, allVfioNodes...)
+	state.cdi = &CDIHandler{}
+	state.allocatable["gpu-vfio-0"] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress: "0000:0e:00.0", Index: 0, preConfigureDriver: consts.VFIODriverName,
+	}}
+	want := map[string]string{
+		"gpu-0-128":  consts.AmdGpuDeviceType,
+		"gpu-vfio-0": consts.VfioDeviceType,
+	}
+	assertPublished(t, state.allocatable, want)
+
+	pd, err := state.prepareDevices(vfioClaim("gpu-0-128", ""))
+	require.NoError(t, err)
+	require.Equal(t, consts.VfioDeviceType, state.allocatable["gpu-0-128"].Type())
+	assertPublished(t, state.allocatable, want)
+
+	require.NoError(t, state.unprepareDevices("claim-uid", pd))
+	assertPublished(t, state.allocatable, want)
 }

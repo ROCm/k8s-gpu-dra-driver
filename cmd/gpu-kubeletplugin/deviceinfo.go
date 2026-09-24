@@ -114,15 +114,27 @@ type AmdGpuVFIOInfo struct {
 	pcieRootAttr       deviceattribute.DeviceAttribute
 	preConfigureDriver string
 	IommuFDCdev        string
+	// convertedFrom is the original GPU when this entry is a regular GPU
+	// converted to VFIO for a claim. The device keeps being advertised as that
+	// GPU, since the conversion is an implementation detail of the claim the
+	// scheduler already allocated it to.
+	convertedFrom *AmdGpuInfo
 }
 
 // CanonicalName returns the canonical name for this VFIO device
 func (d *AmdGpuVFIOInfo) CanonicalName() string {
+	if d.convertedFrom != nil {
+		return d.convertedFrom.CanonicalName()
+	}
 	return fmt.Sprintf("gpu-vfio-%d", d.Index)
 }
 
-// GetDevice returns the DRA Device representation for a VFIO passthrough GPU
+// GetDevice returns the DRA Device representation for a VFIO passthrough GPU.
+// A converted GPU is represented as its original GPU.
 func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
+	if d.convertedFrom != nil {
+		return d.convertedFrom.GetDevice()
+	}
 	attributes := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		"type":       {StringValue: ptr.To(consts.VfioDeviceType)},
 		"numaNode":   {IntValue: ptr.To(int64(d.NumaNode))},
