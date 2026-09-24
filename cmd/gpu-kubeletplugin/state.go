@@ -740,8 +740,8 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 		if !exists {
 			continue
 		}
-		if allocDev.Type() == consts.VfioDeviceType && allocDev.Vfio != nil && s.vfioManager != nil {
-			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
+		if allocDev.Type() == consts.VfioDeviceType && allocDev.Vfio != nil {
+			if err := s.returnToOriginalDriver(allocDev.Vfio); err != nil {
 				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			} else {
 				s.restoreFromVfio(claimUID, device.DeviceName)
