@@ -46,6 +46,9 @@ type AmdGpuInfo struct {
 	ParentPFAddress  string
 	TotalVFs         int
 	IsVF             bool
+	// siblingExclusive is set when this GPU also has a type=vfio entry; both
+	// entries then consume the function's exclusion counter.
+	siblingExclusive bool
 	cardIndex        int // unexported: for CanonicalName and CDI path derivation
 	renderIndex      int // unexported: for CanonicalName and CDI path derivation
 	pcieRootAttr     deviceattribute.DeviceAttribute
@@ -96,7 +99,7 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	return resourceapi.Device{
 		Name:             d.CanonicalName(),
 		Attributes:       attributes,
-		ConsumesCounters: getConsumesCounters(d.ParentPFAddress, d.TotalVFs, d.IsVF),
+		ConsumesCounters: consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive),
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"memory":       {Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)},
 			"computeUnits": {Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)},
@@ -105,46 +108,81 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 }
 
-// AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
+// KEP-4815 counters.
+//
+// Counters live in one counter set per PCI device family: the parent PF for
+// SR-IOV functions, or the GPU itself otherwise. A family set holds:
+//   - vf-slots (capacity TotalVFs) when the PF supports SR-IOV: a VF entry
+//     consumes one slot and a PF entry consumes all of them, so PF and VF
+//     allocations exclude each other;
+//   - fn-<bdf> (capacity 1) for each PCI function advertised both as a compute
+//     GPU and as a VFIO device. Both entries consume it, so the scheduler can
+//     allocate at most one of them. This exclusion is enforced at allocation
+//     time; nothing has to be withdrawn from the ResourceSlice afterwards.
+
+// VFSlotCounterName is the per-PF counter that bounds VF allocations.
 const VFSlotCounterName = "vf-slots"
 
-func getSharedCounterSetName(parentPFAddress string, totalVFs int) string {
-	if totalVFs == 0 || parentPFAddress == "" {
-		return ""
-	}
-	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(parentPFAddress))
+// functionCounterName names the capacity-1 exclusion counter shared by the
+// compute and VFIO entries of one PCI function.
+func functionCounterName(pciAddr string) string {
+	return "fn-" + pciAddrToDNSLabel(pciAddr)
 }
 
-func getSharedCounterSet(parentPFAddress string, totalVFs int) *resourceapi.CounterSet {
-	name := getSharedCounterSetName(parentPFAddress, totalVFs)
-	if name == "" {
-		return nil
+// counterFamily returns the address whose counter set holds a device's
+// counters: its parent PF when known, otherwise the device itself.
+func counterFamily(parentPFAddress, pciAddress string) string {
+	if parentPFAddress != "" {
+		return parentPFAddress
 	}
-	return &resourceapi.CounterSet{
-		Name: name,
-		Counters: map[string]resourceapi.Counter{
-			VFSlotCounterName: {Value: *resource.NewQuantity(int64(totalVFs), resource.BinarySI)},
-		},
-	}
+	return pciAddress
 }
 
-func getConsumesCounters(parentPFAddress string, totalVFs int, isVF bool) []resourceapi.DeviceCounterConsumption {
-	name := getSharedCounterSetName(parentPFAddress, totalVFs)
-	if name == "" {
+// counterSetName names the counter set of a device family.
+func counterSetName(familyAddr string) string {
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(familyAddr))
+}
+
+// deviceCounters returns, for one advertised device, the amount it consumes
+// of each counter in its family's set, and the capacity the set must publish
+// for each of those counters. Both maps are empty when the device consumes
+// nothing.
+func deviceCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) (consumed, capacity map[string]int64) {
+	consumed = make(map[string]int64)
+	capacity = make(map[string]int64)
+	if parentPFAddress != "" && totalVFs > 0 {
+		capacity[VFSlotCounterName] = int64(totalVFs)
+		consumed[VFSlotCounterName] = int64(totalVFs)
+		if isVF {
+			consumed[VFSlotCounterName] = 1
+		}
+	}
+	if siblingExclusive {
+		name := functionCounterName(pciAddress)
+		capacity[name] = 1
+		consumed[name] = 1
+	}
+	return consumed, capacity
+}
+
+// consumesCounters returns the ConsumesCounters of one advertised device.
+func consumesCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) []resourceapi.DeviceCounterConsumption {
+	consumed, _ := deviceCounters(parentPFAddress, pciAddress, totalVFs, isVF, siblingExclusive)
+	if len(consumed) == 0 {
 		return nil
 	}
-	consumed := int64(totalVFs)
-	if isVF {
-		consumed = 1
+	counters := make(map[string]resourceapi.Counter, len(consumed))
+	for name, amount := range consumed {
+		counters[name] = resourceapi.Counter{Value: *resource.NewQuantity(amount, resource.BinarySI)}
 	}
 	return []resourceapi.DeviceCounterConsumption{{
-		CounterSet: name,
-		Counters: map[string]resourceapi.Counter{
-			VFSlotCounterName: {Value: *resource.NewQuantity(consumed, resource.BinarySI)},
-		},
+		CounterSet: counterSetName(counterFamily(parentPFAddress, pciAddress)),
+		Counters:   counters,
 	}}
 }
 
+// AmdGpuVFIOInfo represents a VFIO passthrough device: a GIM SR-IOV VF, a
+// pre-bound PF, or the type=vfio sibling of a compute GPU.
 type AmdGpuVFIOInfo struct {
 	PCIAddress         string
 	DeviceID           string
@@ -163,6 +201,9 @@ type AmdGpuVFIOInfo struct {
 	MemoryBytes        uint64
 	ComputeUnits       int
 	SimdUnits          int
+	// siblingExclusive is set when this device is the type=vfio sibling of a
+	// compute GPU; both entries then consume the function's exclusion counter.
+	siblingExclusive bool
 }
 
 func (d *AmdGpuVFIOInfo) partitionMode() string {
@@ -191,21 +232,10 @@ func pciAddrToDNSLabel(addr string) string {
 	return strings.NewReplacer(":", "-", ".", "-").Replace(addr)
 }
 
-// GetSharedCounterSetName returns the KEP-4815 counter set name for the parent
-// PF of this VFIO device. Returns "" if this device has no SR-IOV capability.
-func (d *AmdGpuVFIOInfo) GetSharedCounterSetName() string {
-	return getSharedCounterSetName(d.ParentPFAddress, d.TotalVFs)
-}
-
-// GetSharedCounterSet returns the KEP-4815 CounterSet for the parent PF.
-func (d *AmdGpuVFIOInfo) GetSharedCounterSet() *resourceapi.CounterSet {
-	return getSharedCounterSet(d.ParentPFAddress, d.TotalVFs)
-}
-
-// GetConsumesCounters returns the KEP-4815 counter consumption for this device.
-// VFs consume 1 vf-slot; PFs consume all vf-slots (mutually exclusive with VFs).
+// GetConsumesCounters returns the KEP-4815 counter consumption for this
+// device (see deviceCounters).
 func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
-	return getConsumesCounters(d.ParentPFAddress, d.TotalVFs, d.IsVF)
+	return consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive)
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU

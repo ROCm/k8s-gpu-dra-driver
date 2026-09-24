@@ -143,6 +143,8 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		}
 	}
 
+	markSiblingPairs(allocatable)
+
 	state := &DeviceState{
 		cdi:                cdi,
 		allocatable:        allocatable,
@@ -677,6 +679,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
 							preConfigureDriver: consts.AMDGPUDriverName,
+							siblingExclusive:   allocDev.AmdGpu.siblingExclusive,
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
