@@ -210,6 +210,32 @@ func TestScheduler_SiblingExclusion(t *testing.T) {
 	})
 }
 
+// TestScheduler_MixedComputeVFIOAllocationForOneVF covers the scenario the
+// review explicitly asked for: a single SR-IOV VF advertised as both a
+// compute device (IsVF=true) and a VFIO device (IsVF=true) sharing one PCI
+// address. The scheduler must not allocate both to different claims.
+func TestScheduler_MixedComputeVFIOAllocationForOneVF(t *testing.T) {
+	const pf, vf = "0000:0a:00.0", "0000:0b:00.1"
+	build := func() AllocatableDevices {
+		return AllocatableDevices{
+			"gpu-1-129":  {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
+			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true, Index: 1}},
+		}
+	}
+
+	t.Run("compute claimed first blocks VFIO", func(t *testing.T) {
+		s := newScheduler(t, build())
+		require.Equal(t, []string{"gpu-1-129"}, s.allocate(schedClaim("a", selCompute)))
+		require.Nil(t, s.allocate(schedClaim("b", selVFIOVF)), "the VF's VFIO entry must not be allocatable once its compute entry is")
+	})
+
+	t.Run("VFIO claimed first blocks compute", func(t *testing.T) {
+		s := newScheduler(t, build())
+		require.Equal(t, []string{"gpu-vfio-1"}, s.allocate(schedClaim("a", selVFIOVF)))
+		require.Nil(t, s.allocate(schedClaim("b", selCompute)), "the VF's compute entry must not be allocatable once its VFIO entry is")
+	})
+}
+
 func TestScheduler_PFVFExclusion(t *testing.T) {
 	pf := gpuPCI(0)
 	build := func() AllocatableDevices {
