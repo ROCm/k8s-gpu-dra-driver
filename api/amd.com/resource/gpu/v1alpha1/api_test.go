@@ -51,14 +51,6 @@ func TestIOMMUConfig_ShouldPreferIommuFD(t *testing.T) {
 	assert.False(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyLegacyOnly}).ShouldPreferIommuFD())
 }
 
-func TestIOMMUConfig_ShouldEnableAPIDevice(t *testing.T) {
-	tr := true
-	fa := false
-	assert.True(t, (&IOMMUConfig{EnableAPIDevice: &tr}).ShouldEnableAPIDevice())
-	assert.False(t, (&IOMMUConfig{EnableAPIDevice: &fa}).ShouldEnableAPIDevice())
-	assert.False(t, (&IOMMUConfig{EnableAPIDevice: nil}).ShouldEnableAPIDevice())
-}
-
 func TestIOMMUConfig_Validate(t *testing.T) {
 	assert.NoError(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyLegacyOnly}).Validate())
 	assert.NoError(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}).Validate())
@@ -70,8 +62,6 @@ func TestVfioDeviceConfig_Normalize_DefaultsIommu(t *testing.T) {
 	assert.NoError(t, c.Normalize())
 	assert.NotNil(t, c.Iommu)
 	assert.Equal(t, IOMMUBackendPolicyLegacyOnly, c.Iommu.BackendPolicy)
-	assert.NotNil(t, c.Iommu.EnableAPIDevice)
-	assert.False(t, *c.Iommu.EnableAPIDevice)
 }
 
 func TestVfioDeviceConfig_Normalize_EmptyPolicy(t *testing.T) {
@@ -80,11 +70,10 @@ func TestVfioDeviceConfig_Normalize_EmptyPolicy(t *testing.T) {
 	assert.Equal(t, IOMMUBackendPolicyLegacyOnly, c.Iommu.BackendPolicy)
 }
 
-func TestVfioDeviceConfig_Normalize_NilEnableAPIDevice(t *testing.T) {
+func TestVfioDeviceConfig_Normalize_KeepsPolicy(t *testing.T) {
 	c := &VfioDeviceConfig{Iommu: &IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}}
 	assert.NoError(t, c.Normalize())
-	assert.NotNil(t, c.Iommu.EnableAPIDevice)
-	assert.False(t, *c.Iommu.EnableAPIDevice)
+	assert.Equal(t, IOMMUBackendPolicyPreferIommuFD, c.Iommu.BackendPolicy)
 }
 
 func TestVfioDeviceConfig_Validate_WithIommu(t *testing.T) {

@@ -39,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -98,20 +97,15 @@ func (p IOMMUBackendPolicy) Validate() error {
 }
 
 // IOMMUConfig holds parameters for configuring the IOMMU backend for VFIO devices.
+// The IOMMU API device matching the selected backend (/dev/iommu or
+// /dev/vfio/vfio) is always exposed, since VMMs require it to use VFIO.
 type IOMMUConfig struct {
-	BackendPolicy   IOMMUBackendPolicy `json:"backendPolicy"`
-	EnableAPIDevice *bool              `json:"enableAPIDevice,omitempty"`
+	BackendPolicy IOMMUBackendPolicy `json:"backendPolicy"`
 }
 
 // ShouldPreferIommuFD returns true if the IOMMU backend policy is PreferIommuFD.
 func (c *IOMMUConfig) ShouldPreferIommuFD() bool {
 	return c.BackendPolicy == IOMMUBackendPolicyPreferIommuFD
-}
-
-// ShouldEnableAPIDevice returns true if the IOMMU API device should be
-// made available to the workload.
-func (c *IOMMUConfig) ShouldEnableAPIDevice() bool {
-	return c.EnableAPIDevice != nil && *c.EnableAPIDevice
 }
 
 // Validate ensures that IOMMUConfig has a valid set of values.
@@ -135,8 +129,7 @@ func DefaultVfioDeviceConfig() *VfioDeviceConfig {
 			Kind:       VfioDeviceConfigKind,
 		},
 		Iommu: &IOMMUConfig{
-			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			BackendPolicy: IOMMUBackendPolicyLegacyOnly,
 		},
 	}
 }
@@ -148,16 +141,12 @@ func (c *VfioDeviceConfig) Normalize() error {
 	}
 	if c.Iommu == nil {
 		c.Iommu = &IOMMUConfig{
-			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			BackendPolicy: IOMMUBackendPolicyLegacyOnly,
 		}
 		return nil
 	}
 	if c.Iommu.BackendPolicy == "" {
 		c.Iommu.BackendPolicy = IOMMUBackendPolicyLegacyOnly
-	}
-	if c.Iommu.EnableAPIDevice == nil {
-		c.Iommu.EnableAPIDevice = ptr.To(false)
 	}
 	return nil
 }

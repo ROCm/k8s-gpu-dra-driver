@@ -1027,12 +1027,17 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 
 	preferIommuFD := config.Iommu != nil && config.Iommu.ShouldPreferIommuFD()
 
-	deviceEdits, usingIommuFD := GetVfioDeviceCDIEdits(device.Vfio, preferIommuFD)
-	commonEdits := GetVfioCommonCDIEdits(usingIommuFD, s.vfioManager.iommuFDEnabled)
+	useIommuFD := UseIommuFD(device.Vfio, preferIommuFD, s.vfioManager.iommuFDEnabled)
+
+	deviceEdits, err := GetVfioDeviceCDIEdits(device.Vfio, useIommuFD)
+	if err != nil {
+		return nil, fmt.Errorf("error building CDI edits for %s: %w", result.Device, err)
+	}
+	commonEdits := GetVfioCommonCDIEdits(useIommuFD)
 	deviceEdits.ContainerEdits.DeviceNodes = append(deviceEdits.ContainerEdits.DeviceNodes, commonEdits.ContainerEdits.DeviceNodes...)
 
 	backend := "legacy"
-	if usingIommuFD {
+	if useIommuFD {
 		backend = "iommufd"
 	}
 	klog.Infof("Applied VFIO config for %s: iommuGroup=%s, backend=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup, backend)
