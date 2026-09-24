@@ -59,12 +59,12 @@ func TestRestoreFromVfio(t *testing.T) {
 		allocatable: AllocatableDevices{
 			"gpu-0-128": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{
-			"gpu-0-128": original,
+		vfioConversions: map[string]map[string]*AmdGpuInfo{
+			"claim-a": {"gpu-0-128": original},
 		},
 	}
 
-	state.restoreFromVfio("gpu-0-128")
+	state.restoreFromVfio("claim-a", "gpu-0-128")
 
 	allocDev := state.allocatable["gpu-0-128"]
 	assert.NotNil(t, allocDev.AmdGpu, "AmdGpu should be restored")
@@ -73,8 +73,7 @@ func TestRestoreFromVfio(t *testing.T) {
 	assert.Equal(t, 0, allocDev.AmdGpu.cardIndex)
 	assert.Equal(t, 128, allocDev.AmdGpu.renderIndex)
 	assert.Equal(t, consts.AmdGpuDeviceType, allocDev.Type())
-	_, inMap := state.claimVfioConversions["gpu-0-128"]
-	assert.False(t, inMap, "device should be removed from claimVfioConversions")
+	assert.Empty(t, state.vfioConversions, "record should be removed once restored")
 }
 
 func TestRestoreFromVfio_NoConversion(t *testing.T) {
@@ -82,10 +81,10 @@ func TestRestoreFromVfio_NoConversion(t *testing.T) {
 		allocatable: AllocatableDevices{
 			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{},
+		vfioConversions: map[string]map[string]*AmdGpuInfo{},
 	}
 
-	state.restoreFromVfio("gpu-vfio-0")
+	state.restoreFromVfio("claim-a", "gpu-vfio-0")
 
 	allocDev := state.allocatable["gpu-vfio-0"]
 	assert.NotNil(t, allocDev.Vfio, "pre-discovered VFIO device should stay as VFIO")
@@ -100,7 +99,7 @@ func TestRestoreFromVfio_NilMap(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		state.restoreFromVfio("gpu-vfio-0")
+		state.restoreFromVfio("claim-a", "gpu-vfio-0")
 	})
 }
 
@@ -179,8 +178,8 @@ func TestUnprepareDevices_RestoresConvertedDevice(t *testing.T) {
 				preConfigureDriver: "vfio-pci",
 			}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{
-			"gpu-0-128": original,
+		vfioConversions: map[string]map[string]*AmdGpuInfo{
+			"test-claim": {"gpu-0-128": original},
 		},
 		vfioManager: &VfioPciManager{},
 	}
@@ -205,8 +204,7 @@ func TestUnprepareDevices_PreDiscoveredVfioNotRestored(t *testing.T) {
 				preConfigureDriver: "vfio-pci",
 			}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{},
-		vfioManager:          &VfioPciManager{},
+		vfioManager: &VfioPciManager{},
 	}
 	devices := PreparedDevices{
 		{Device: drapbv1.Device{DeviceName: "gpu-vfio-0"}},
@@ -525,7 +523,7 @@ func assertRestoredGPU(t *testing.T, state *DeviceState, name string) {
 	assert.NotNil(t, dev.AmdGpu, "device should be restored to AmdGpu")
 	assert.Nil(t, dev.Vfio, "device should not remain VFIO")
 	assert.Equal(t, consts.AmdGpuDeviceType, dev.Type())
-	assert.Empty(t, state.claimVfioConversions)
+	assert.Empty(t, state.vfioConversions)
 }
 
 // TestPrepareDevices_ConvertedGPU covers claims that convert a regular GPU to
