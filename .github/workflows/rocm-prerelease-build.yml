@@ -1,0 +1,134 @@
+name: DRA Pre-Release Build
+
+# Builds DRA container image and Helm chart against a ROCm RC or GA tarball.
+# Provide dra_version (e.g. v0.1.0) and rocm_version (e.g. 10.1.0rc4 or 10.1.0).
+# When rocm_version contains rc (e.g. 10.1.0rc4), uses rc.repo.amd.com.
+# When rocm_version has no rc suffix (e.g. 10.1.0), uses stable.repo.amd.com (GA build).
+# Artifacts land at: k8s-gpu-dra-driver/pre-release/{dra_version}-{rocm_version}-{N}/
+# Image tag format:  {dra_version}-{rocm_version}-{N}  e.g. v0.1.0-10.1.0rc4-1
+#
+# Job graph: resolve → build-dra + build-helm → publish → results
+
+on:
+  workflow_dispatch:
+    inputs:
+      dra_version:
+        description: 'DRA version (e.g. v0.1.0)'
+        required: true
+        type: string
+      rocm_version:
+        description: 'ROCm version (e.g. 10.1.0rc4 for RC build, or 10.1.0 for GA build)'
+        required: true
+        type: string
+      force_rebuild:
+        description: 'Force rebuild even if already built for this tarball + SHA'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: dra-prerelease-${{ inputs.dra_version }}-${{ inputs.rocm_version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+
+jobs:
+
+  resolve:
+    name: Resolve
+    uses: ROCm/common-infra-operator/.github/workflows/rocm-resolve.yml@d2e10a71e2af56af1fa0177901570daa75e8ac2b
+    with:
+      component: dra
+      version: ${{ inputs.dra_version }}
+      rocm_version: ${{ inputs.rocm_version }}
+      s3_component_prefix: k8s-gpu-dra-driver
+      s3_bucket: ${{ vars.THEROCK_BUCKET_NAME }}
+      trigger_event: pre-release
+      trigger_sha: ${{ github.sha }}
+      force_rebuild: ${{ inputs.force_rebuild || false }}
+    secrets:
+      ROCK_CI_S3_SECRET: ${{ secrets.ROCK_CI_S3_SECRET }}
+
+  build-dra:
+    name: Build DRA
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    uses: ./.github/workflows/_build-dra.yml
+    with:
+      image_tag:        ${{ needs.resolve.outputs.image_tag }}
+      rocm_tarball_url: ${{ needs.resolve.outputs.rocm_tarball_url }}
+      version:          ${{ needs.resolve.outputs.version }}
+      suffix:           ${{ needs.resolve.outputs.suffix }}
+
+  build-helm:
+    name: Build Helm Chart
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    uses: ./.github/workflows/_build-helm.yml
+    with:
+      image_tag: ${{ needs.resolve.outputs.image_tag }}
+      version:   ${{ needs.resolve.outputs.version }}
+      suffix:    ${{ needs.resolve.outputs.suffix }}
+
+  publish:
+    name: Publish
+    needs: [resolve, build-dra, build-helm]
+    if: >-
+      always() && needs.resolve.outputs.build_needed == 'true'
+      && (needs.build-dra.result == 'success'
+      || needs.build-helm.result == 'success')
+    uses: ROCm/common-infra-operator/.github/workflows/rocm-publish.yml@d2e10a71e2af56af1fa0177901570daa75e8ac2b
+    with:
+      component: dra
+      image_tag:            ${{ needs.resolve.outputs.image_tag }}
+      rocm_tarball_version: ${{ needs.resolve.outputs.rocm_tarball_version }}
+      all_builds_succeeded: ${{ needs.build-dra.result == 'success' && needs.build-helm.result == 'success' }}
+      version:              ${{ needs.resolve.outputs.version }}
+      suffix:               ${{ needs.resolve.outputs.suffix }}
+      s3_prefix:            ${{ needs.resolve.outputs.s3_prefix }}
+      trigger_sha:          ${{ github.sha }}
+      s3_bucket:            ${{ vars.THEROCK_BUCKET_NAME }}
+      artifact_names: >-
+        build-dra-${{ needs.resolve.outputs.image_tag }},
+        build-helm-${{ needs.resolve.outputs.image_tag }}
+      s3_file_globs: "*.tar.gz,*.tgz"
+      docker_images: |
+        k8s-gpu-dra-driver-${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.suffix }}.tar.gz|rocm/k8s-gpu-dra-driver:${{ needs.resolve.outputs.image_tag }}|amdpsdo/k8s-gpu-dra-driver:${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.suffix }}|true
+    secrets:
+      ROCK_CI_S3_SECRET: ${{ secrets.ROCK_CI_S3_SECRET }}
+      DOCKER_TOKEN:      ${{ secrets.DOCKER_TOKEN }}
+      DOCKER_USERNAME:   ${{ vars.DOCKER_USERNAME }}
+
+  results:
+    name: Results
+    needs: [resolve, build-dra, build-helm, publish]
+    if: always() && needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Post summary
+        env:
+          IMAGE_TAG:      ${{ needs.resolve.outputs.image_tag }}
+          VERSION:        ${{ needs.resolve.outputs.version }}
+          SUFFIX:         ${{ needs.resolve.outputs.suffix }}
+          S3_PREFIX:      ${{ needs.resolve.outputs.s3_prefix }}
+          S3_BUCKET:      ${{ vars.THEROCK_BUCKET_NAME }}
+          DRA_RESULT:     ${{ needs.build-dra.result }}
+          HELM_RESULT:    ${{ needs.build-helm.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          {
+            echo "## DRA Pre-Release Build Results"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image tag | \`${IMAGE_TAG}\` |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Suffix | \`${SUFFIX}\` |"
+            echo "| Build DRA | ${DRA_RESULT} |"
+            echo "| Build Helm | ${HELM_RESULT} |"
+            echo "| Publish | ${PUBLISH_RESULT} |"
+            [ -n "${S3_PREFIX}" ] && [ "${PUBLISH_RESULT}" = "success" ] && echo "| S3 location | \`s3://${S3_BUCKET}/${S3_PREFIX}/\` |" || true
+          } >> "$GITHUB_STEP_SUMMARY"

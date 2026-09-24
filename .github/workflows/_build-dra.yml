@@ -1,0 +1,62 @@
+name: Build DRA
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      rocm_tarball_url:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      suffix:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+
+  build-dra:
+    name: Build DRA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free up runner disk space
+        uses: ROCm/common-infra-operator/.github/actions/free-disk-space@d2e10a71e2af56af1fa0177901570daa75e8ac2b
+
+      - name: Fetch ROCm tarball
+        env:
+          ROCM_TARBALL_URL: ${{ inputs.rocm_tarball_url }}
+          ROCM_TARBALL_FORCE: "1"
+        run: make rocm-tarball-fetch
+
+      - name: Build and archive DRA driver image
+        env:
+          DRIVER_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: make archive
+
+      - name: Stage artifact with final name
+        env:
+          DRA_VERSION: ${{ inputs.version }}
+          IMAGE_TAG:   ${{ inputs.image_tag }}
+          SUFFIX:      ${{ inputs.suffix }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          mv "build/k8s-gpu-dra-driver-${IMAGE_TAG}.tar.gz" \
+             "staging/k8s-gpu-dra-driver-${DRA_VERSION}-${SUFFIX}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-dra-${{ inputs.image_tag }}
+          retention-days: 1
+          path: staging/
