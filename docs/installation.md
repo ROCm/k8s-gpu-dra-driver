@@ -205,8 +205,10 @@ This is the simpler path for VFIO allocation. The `VfioDeviceConfig` approach
 it is the only way to use a compute VF (an SR-IOV VF bound to `amdgpu`) for
 VFIO: compute VFs have no direct `type=vfio` entry.
 
-When either the compute or VFIO entry is allocated, the other is temporarily
-removed from the ResourceSlice. It returns when the claim is released.
+The compute and VFIO entries of a GPU share a capacity-1 KEP-4815 counter, so
+the scheduler allocates at most one of them at a time. Both stay listed in
+the ResourceSlice; the other entry becomes allocatable again when the claim
+is released.
 
 ### Key values
 
