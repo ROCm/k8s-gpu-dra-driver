@@ -101,6 +101,35 @@ func getVFIOParentInfo(pciAddr string) (isVF bool, parentPFAddress string, total
 	return true, parent, amdgpu.ReadSRIOVTotalVFs(parent), amdgpu.ReadSRIOVNumVFs(parent)
 }
 
+// newVFIOSibling returns the direct type=vfio entry advertised alongside a
+// compute GPU (dual-entry advertising). SR-IOV VFs get no such entry; callers
+// only use it for non-VF GPUs. The GPU is bound to amdgpu at discovery, so
+// that is the driver Unconfigure must rebind it to when the claim is released:
+// an empty preConfigureDriver would mean "originally unbound" and leave the GPU
+// without a driver.
+func newVFIOSibling(gpu *AmdGpuInfo, index, numVFs int) *AllocatableDevice {
+	iommuGroup, _ := amdgpu.GetIOMMUGroup(gpu.PCIAddress)
+	return &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress:         gpu.PCIAddress,
+		DeviceID:           gpu.DeviceID,
+		VendorID:           consts.AMDVendorID,
+		ProductName:        gpu.ProductName,
+		NumaNode:           gpu.NumaNode,
+		IsVF:               gpu.IsVF,
+		Index:              index,
+		IOMMUGroup:         iommuGroup,
+		pciBusIDAttr:       gpu.pciBusIDAttr,
+		pcieRootAttr:       gpu.pcieRootAttr,
+		ParentPFAddress:    gpu.ParentPFAddress,
+		TotalVFs:           gpu.TotalVFs,
+		NumVFs:             numVFs,
+		MemoryBytes:        gpu.MemoryBytes,
+		ComputeUnits:       gpu.ComputeUnits,
+		SimdUnits:          gpu.SimdUnits,
+		preConfigureDriver: consts.AMDGPUDriverName,
+	}}
+}
+
 // enumerateAllPossibleDevices discovers AMD GPUs and returns allocatable devices.
 //
 // When enableSyntheticPartition is false, it discovers physical GPUs and
@@ -203,16 +232,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
 				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					iommuGroup, _ := amdgpu.GetIOMMUGroup(pciAddr)
-					vfioInfo := &AmdGpuVFIOInfo{
-						PCIAddress: pciAddr, DeviceID: amdGpuInfo.DeviceID, VendorID: consts.AMDVendorID,
-						ProductName: amdGpuInfo.ProductName, NumaNode: amdGpuInfo.NumaNode, IsVF: isVF,
-						Index: vfioIndex, IOMMUGroup: iommuGroup, pciBusIDAttr: pciBusIDAttr,
-						pcieRootAttr: pcieRootAttr, ParentPFAddress: parentPFAddress, TotalVFs: totalVFs,
-						NumVFs: numVFs, MemoryBytes: amdGpuInfo.MemoryBytes,
-						ComputeUnits: amdGpuInfo.ComputeUnits, SimdUnits: amdGpuInfo.SimdUnits,
-					}
-					vfioDev := &AllocatableDevice{Vfio: vfioInfo}
+					vfioDev := newVFIOSibling(amdGpuInfo, vfioIndex, numVFs)
 					alldevices[vfioDev.CanonicalName()] = vfioDev
 					vfioIndex++
 				}
@@ -296,16 +316,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					device.CanonicalName(), computePartitionType, memoryPartitionType)
 
 				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					iommuGroup, _ := amdgpu.GetIOMMUGroup(pciAddr)
-					vfioInfo := &AmdGpuVFIOInfo{
-						PCIAddress: pciAddr, DeviceID: amdGpuInfo.DeviceID, VendorID: consts.AMDVendorID,
-						ProductName: amdGpuInfo.ProductName, NumaNode: amdGpuInfo.NumaNode, IsVF: isVF,
-						Index: vfioIndex, IOMMUGroup: iommuGroup, pciBusIDAttr: pciBusIDAttr,
-						pcieRootAttr: pcieRootAttr, ParentPFAddress: parentPFAddress, TotalVFs: totalVFs,
-						NumVFs: numVFs, MemoryBytes: amdGpuInfo.MemoryBytes,
-						ComputeUnits: amdGpuInfo.ComputeUnits, SimdUnits: amdGpuInfo.SimdUnits,
-					}
-					vfioDev := &AllocatableDevice{Vfio: vfioInfo}
+					vfioDev := newVFIOSibling(amdGpuInfo, vfioIndex, numVFs)
 					alldevices[vfioDev.CanonicalName()] = vfioDev
 					vfioIndex++
 				}
