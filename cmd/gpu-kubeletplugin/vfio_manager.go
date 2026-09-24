@@ -330,6 +330,8 @@ func GetVfioCommonCDIEdits(useIommuFD bool) (*cdiapi.ContainerEdits, error) {
 
 // GetVfioDeviceCDIEdits returns CDI edits for a specific VFIO device.
 // With IOMMUFD: /dev/vfio/devices/<cdev>. With legacy: /dev/vfio/<group>.
+// The node must exist, so a missing one fails Prepare instead of producing a
+// CDI device the container cannot open.
 func GetVfioDeviceCDIEdits(info *AmdGpuVFIOInfo, useIommuFD bool) (*cdiapi.ContainerEdits, error) {
 	var node *cdispec.DeviceNode
 	if useIommuFD {
@@ -351,13 +353,10 @@ func GetVfioDeviceCDIEdits(info *AmdGpuVFIOInfo, useIommuFD bool) (*cdiapi.Conta
 		if _, err := strconv.Atoi(iommuGroup); err != nil {
 			return nil, fmt.Errorf("invalid IOMMU group format for %s: %q", info.PCIAddress, iommuGroup)
 		}
-		groupPath := filepath.Join(amdgpu.VFIODevicesRoot, iommuGroup)
 		var err error
-		node, err = newDeviceNode(groupPath)
+		node, err = newDeviceNode(filepath.Join(amdgpu.VFIODevicesRoot, iommuGroup))
 		if err != nil {
-			// Fallback: create spec without major/minor (some runtimes handle this).
-			klog.Warningf("Could not read device attrs for %s, using path-only CDI spec: %v", groupPath, err)
-			node = &cdispec.DeviceNode{Path: groupPath, HostPath: groupPath, Type: "c"}
+			return nil, err
 		}
 	}
 	return &cdiapi.ContainerEdits{

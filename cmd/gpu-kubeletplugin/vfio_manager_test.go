@@ -470,6 +470,7 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		createPCIDevice(t, root, "0000:0d:00.0", "")
 		require.NoError(t, os.Symlink("../../../kernel/iommu_groups/17",
 			filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/iommu_group")))
+		createDevNode(t, root, "dev/vfio/17")
 
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 		edits, err := GetVfioDeviceCDIEdits(info, false)
@@ -490,15 +491,11 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("legacy group node falls back to path-only", func(t *testing.T) {
+	t.Run("legacy errors when group node missing", func(t *testing.T) {
 		setupFakeVfioSysfs(t)
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42"}
-		edits, err := GetVfioDeviceCDIEdits(info, false)
-		require.NoError(t, err)
-		node := edits.ContainerEdits.DeviceNodes[0]
-		assert.Equal(t, node.Path, node.HostPath)
-		assert.Equal(t, "c", node.Type)
-		assert.Zero(t, node.Major)
+		_, err := GetVfioDeviceCDIEdits(info, false)
+		assert.Error(t, err)
 	})
 }
 
