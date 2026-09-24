@@ -177,6 +177,30 @@ spec:
 The driver binds the allocated VF to `vfio-pci` during Prepare and unbinds
 on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 
+**IOMMU backend:**
+
+`VfioDeviceConfig` takes an optional `iommu.backendPolicy`:
+
+| Policy | Behavior |
+|--------|----------|
+| `LegacyOnly` (default) | Legacy VFIO: exposes `/dev/vfio/<group>` and `/dev/vfio/vfio` |
+| `PreferIommuFD` | IOMMUFD (`/dev/vfio/devices/vfioN` and `/dev/iommu`) when the host has `/dev/iommu` and the device has a vfio cdev; otherwise falls back to legacy with a warning in the plugin log |
+| `RequireIommuFD` | IOMMUFD only; Prepare fails if it is unavailable. Use when per-device isolation is mandatory, e.g. confidential VMs (SEV-SNP) |
+
+```yaml
+    config:
+    - opaque:
+        driver: gpu.amd.com
+        parameters:
+          apiVersion: gpu.resource.amd.com/v1alpha1
+          kind: VfioDeviceConfig
+          iommu:
+            backendPolicy: RequireIommuFD
+```
+
+The legacy group node grants access to every function in the IOMMU group,
+while an IOMMUFD cdev is scoped to the single allocated device.
+
 ### Key values
 
 | Value | Default | Description |

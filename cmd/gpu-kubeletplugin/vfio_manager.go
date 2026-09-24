@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	klog "k8s.io/klog/v2"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
@@ -85,11 +86,7 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 
 	if currentDriver == consts.VFIODriverName {
 		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
-		if cdev, err := amdgpu.GetIommuFDCdev(info.PCIAddress); err == nil {
-			info.IommuFDCdev = cdev
-		} else {
-			klog.Warningf("IOMMUFD cdev lookup failed for %s: %v", info.PCIAddress, err)
-		}
+		vm.recordIommuFDCdev(info)
 		return nil
 	}
 
@@ -115,11 +112,7 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return fmt.Errorf("failed to bind %s to vfio-pci: %w", info.PCIAddress, err)
 	}
 
-	if cdev, err := amdgpu.GetIommuFDCdev(info.PCIAddress); err == nil {
-		info.IommuFDCdev = cdev
-	} else {
-		klog.Warningf("IOMMUFD cdev lookup failed for %s: %v", info.PCIAddress, err)
-	}
+	vm.recordIommuFDCdev(info)
 
 	klog.Infof("Configured %s for VFIO passthrough (isVF=%v)", info.PCIAddress, info.IsVF)
 	return nil
@@ -131,6 +124,9 @@ func (vm *VfioPciManager) Unconfigure(info *AmdGpuVFIOInfo) error {
 	gpuMu := perGpuLock.Get(info.PCIAddress)
 	gpuMu.Lock()
 	defer gpuMu.Unlock()
+
+	// The cdev is only valid while bound to vfio-pci; Configure re-reads it.
+	info.IommuFDCdev = ""
 
 	if info.preConfigureDriver == consts.VFIODriverName {
 		klog.Infof("Device %s was pre-bound to vfio-pci, leaving on vfio-pci", info.PCIAddress)
@@ -237,23 +233,54 @@ func clearDriverOverride(pciAddr string) error {
 	return os.WriteFile(overridePath, []byte("\n"), 0200)
 }
 
+// recordIommuFDCdev refreshes the device's IOMMUFD cdev name on info. It must
+// run after the device is bound to vfio-pci, since vfio-dev only exists then.
+// The value is cleared first so a failed lookup never leaves a stale cdev.
+//
+// info may be a long-lived entry in DeviceState.allocatable; writing to it is
+// safe only because DeviceState.Prepare/Unprepare hold the state lock.
+func (vm *VfioPciManager) recordIommuFDCdev(info *AmdGpuVFIOInfo) {
+	info.IommuFDCdev = ""
+	if !vm.iommuFDEnabled {
+		return
+	}
+	cdev, err := amdgpu.GetIommuFDCdev(info.PCIAddress)
+	if err != nil {
+		klog.Warningf("IOMMUFD cdev lookup failed for %s: %v", info.PCIAddress, err)
+		return
+	}
+	info.IommuFDCdev = cdev
+}
+
 // UseIommuFD decides the IOMMU backend for a device allocation. IOMMUFD is
-// used only when the claim prefers it, the host exposes /dev/iommu, and the
-// device has a vfio cdev. The result must drive both the per-device and the
-// common CDI edits so the spec never mixes backends.
-func UseIommuFD(info *AmdGpuVFIOInfo, preferIommuFD, iommuFDEnabled bool) bool {
-	if !preferIommuFD {
-		return false
+// used only when the policy asks for it, the host exposes /dev/iommu, and the
+// device has a vfio cdev. PreferIommuFD falls back to legacy VFIO otherwise;
+// RequireIommuFD returns an error instead. The result must drive both the
+// per-device and the common CDI edits so the spec never mixes backends.
+func UseIommuFD(info *AmdGpuVFIOInfo, policy configapi.IOMMUBackendPolicy, iommuFDEnabled bool) (bool, error) {
+	switch policy {
+	case configapi.IOMMUBackendPolicyLegacyOnly:
+		return false, nil
+	case configapi.IOMMUBackendPolicyPreferIommuFD, configapi.IOMMUBackendPolicyRequireIommuFD:
+	default:
+		return false, fmt.Errorf("unknown IOMMU backend policy %q", policy)
 	}
-	if !iommuFDEnabled {
-		klog.Warningf("IOMMUFD preferred but /dev/iommu unavailable on host, falling back to legacy VFIO for %s", info.PCIAddress)
-		return false
+
+	var reason string
+	switch {
+	case !iommuFDEnabled:
+		reason = "/dev/iommu unavailable on host"
+	case info.IommuFDCdev == "":
+		reason = "no vfio cdev for device"
+	default:
+		return true, nil
 	}
-	if info.IommuFDCdev == "" {
-		klog.Warningf("IOMMUFD preferred but cdev unavailable for %s, falling back to legacy VFIO", info.PCIAddress)
-		return false
+
+	if policy == configapi.IOMMUBackendPolicyRequireIommuFD {
+		return false, fmt.Errorf("IOMMUFD required for %s but %s", info.PCIAddress, reason)
 	}
-	return true
+	klog.Warningf("IOMMUFD preferred for %s but %s, falling back to legacy VFIO", info.PCIAddress, reason)
+	return false, nil
 }
 
 // vfioDeviceNode builds a CDI device node for path, reading major/minor from

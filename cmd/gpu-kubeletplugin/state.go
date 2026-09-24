@@ -1025,9 +1025,14 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 		return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
 	}
 
-	preferIommuFD := config.Iommu != nil && config.Iommu.ShouldPreferIommuFD()
-
-	useIommuFD := UseIommuFD(device.Vfio, preferIommuFD, s.vfioManager.iommuFDEnabled)
+	policy := configapi.IOMMUBackendPolicyLegacyOnly
+	if config.Iommu != nil {
+		policy = config.Iommu.BackendPolicy
+	}
+	useIommuFD, err := UseIommuFD(device.Vfio, policy, s.vfioManager.iommuFDEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("error selecting IOMMU backend for %s: %w", result.Device, err)
+	}
 
 	deviceEdits, err := GetVfioDeviceCDIEdits(device.Vfio, useIommuFD)
 	if err != nil {
