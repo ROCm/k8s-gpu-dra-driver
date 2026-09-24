@@ -350,7 +350,10 @@ func ReadPFCapacity(pfAddr string) [3]uint64 {
 	var mem uint64
 	memStr, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "mem_info_vram_total"))
 	if memStr != "" {
-		fmt.Sscanf(memStr, "%d", &mem)
+		if _, err := fmt.Sscanf(memStr, "%d", &mem); err != nil {
+			glog.Warningf("Invalid mem_info_vram_total %q for %s: %v", memStr, pfAddr, err)
+			mem = 0
+		}
 	}
 	deviceID, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "device"))
 	cu, simd := gpuCapacityByDeviceID(deviceID)
