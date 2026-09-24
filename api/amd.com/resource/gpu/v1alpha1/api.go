@@ -82,14 +82,21 @@ func (c *GpuConfig) Normalize() error {
 type IOMMUBackendPolicy string
 
 const (
-	IOMMUBackendPolicyLegacyOnly    IOMMUBackendPolicy = "LegacyOnly"
+	// IOMMUBackendPolicyLegacyOnly always uses the legacy VFIO group/container API.
+	IOMMUBackendPolicyLegacyOnly IOMMUBackendPolicy = "LegacyOnly"
+	// IOMMUBackendPolicyPreferIommuFD uses IOMMUFD when the host and device
+	// support it, and falls back to legacy VFIO otherwise.
 	IOMMUBackendPolicyPreferIommuFD IOMMUBackendPolicy = "PreferIommuFD"
+	// IOMMUBackendPolicyRequireIommuFD uses IOMMUFD and fails the claim if
+	// it is unavailable. Use it where per-device isolation is mandatory,
+	// e.g. confidential VMs.
+	IOMMUBackendPolicyRequireIommuFD IOMMUBackendPolicy = "RequireIommuFD"
 )
 
 // Validate ensures that IOMMUBackendPolicy has a valid value.
 func (p IOMMUBackendPolicy) Validate() error {
 	switch p {
-	case IOMMUBackendPolicyLegacyOnly, IOMMUBackendPolicyPreferIommuFD:
+	case IOMMUBackendPolicyLegacyOnly, IOMMUBackendPolicyPreferIommuFD, IOMMUBackendPolicyRequireIommuFD:
 		return nil
 	default:
 		return fmt.Errorf("unknown IOMMU backend policy: %v", p)
@@ -101,11 +108,6 @@ func (p IOMMUBackendPolicy) Validate() error {
 // /dev/vfio/vfio) is always exposed, since VMMs require it to use VFIO.
 type IOMMUConfig struct {
 	BackendPolicy IOMMUBackendPolicy `json:"backendPolicy"`
-}
-
-// ShouldPreferIommuFD returns true if the IOMMU backend policy is PreferIommuFD.
-func (c *IOMMUConfig) ShouldPreferIommuFD() bool {
-	return c.BackendPolicy == IOMMUBackendPolicyPreferIommuFD
 }
 
 // Validate ensures that IOMMUConfig has a valid set of values.
@@ -140,10 +142,7 @@ func (c *VfioDeviceConfig) Normalize() error {
 		return fmt.Errorf("config is 'nil'")
 	}
 	if c.Iommu == nil {
-		c.Iommu = &IOMMUConfig{
-			BackendPolicy: IOMMUBackendPolicyLegacyOnly,
-		}
-		return nil
+		c.Iommu = &IOMMUConfig{}
 	}
 	if c.Iommu.BackendPolicy == "" {
 		c.Iommu.BackendPolicy = IOMMUBackendPolicyLegacyOnly

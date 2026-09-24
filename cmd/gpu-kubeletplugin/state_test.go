@@ -33,14 +33,19 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 )
@@ -232,4 +237,138 @@ func TestPartitionSharesForClaim_DriverAndPoolMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// enableVFIOPassthrough turns on the VFIOPassthrough gate for one test.
+func enableVFIOPassthrough(t *testing.T) {
+	t.Helper()
+	require.NoError(t, featuregates.FeatureGates().Set("VFIOPassthrough=true"))
+	t.Cleanup(func() {
+		_ = featuregates.FeatureGates().Set("VFIOPassthrough=false")
+	})
+}
+
+// vfioClaim builds an allocated claim for device carrying an opaque
+// VfioDeviceConfig. iommuJSON is the raw "iommu" field, or "" to omit it.
+func vfioClaim(device, iommuJSON string) *resourceapi.ResourceClaim {
+	params := `{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"`
+	if iommuJSON != "" {
+		params += `,"iommu":` + iommuJSON
+	}
+	params += `}`
+	return &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: device},
+					},
+					Config: []resourceapi.DeviceAllocationConfiguration{{
+						Source: resourceapi.AllocationConfigSourceClaim,
+						DeviceConfiguration: resourceapi.DeviceConfiguration{
+							Opaque: &resourceapi.OpaqueDeviceConfiguration{
+								Driver:     consts.DriverName,
+								Parameters: runtime.RawExtension{Raw: []byte(params)},
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// TestPrepareDevices_IOMMUBackend drives a claim with an opaque
+// VfioDeviceConfig through decode, Normalize, Validate and applyVFIOConfig for
+// a pre-bound (discovery-created) VFIO device.
+func TestPrepareDevices_IOMMUBackend(t *testing.T) {
+	enableVFIOPassthrough(t)
+
+	const dev = "gpu-vfio-0"
+	setup := func(t *testing.T, iommuFDEnabled bool) (*DeviceState, string) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
+		createDriverDir(t, root, "vfio-pci")
+		require.NoError(t, os.MkdirAll(
+			filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio5"), 0755))
+		state := &DeviceState{
+			cdi: &CDIHandler{},
+			allocatable: AllocatableDevices{
+				dev: {Vfio: &AmdGpuVFIOInfo{
+					PCIAddress:         "0000:0d:00.0",
+					IOMMUGroup:         "42",
+					preConfigureDriver: "vfio-pci",
+				}},
+			},
+			vfioManager: &VfioPciManager{iommuFDEnabled: iommuFDEnabled},
+		}
+		return state, root
+	}
+	nodePaths := func(pd PreparedDevices) []string {
+		require.Len(t, pd, 1)
+		var paths []string
+		for _, n := range pd[0].ContainerEdits.ContainerEdits.DeviceNodes {
+			paths = append(paths, n.Path)
+		}
+		return paths
+	}
+
+	t.Run("no iommu field defaults to legacy", func(t *testing.T) {
+		state, root := setup(t, true)
+		pd, err := state.prepareDevices(vfioClaim(dev, ""))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/42"), filepath.Join(root, "dev/vfio/vfio"),
+		}, nodePaths(pd))
+	})
+
+	t.Run("PreferIommuFD then legacy re-prepare does not reuse cdev", func(t *testing.T) {
+		state, root := setup(t, true)
+		pd, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"PreferIommuFD"}`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+		}, nodePaths(pd))
+
+		require.NoError(t, state.unprepareDevices("claim-uid", pd))
+		assert.Equal(t, "", state.allocatable[dev].Vfio.IommuFDCdev)
+
+		pd, err = state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"LegacyOnly"}`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/42"), filepath.Join(root, "dev/vfio/vfio"),
+		}, nodePaths(pd))
+	})
+
+	t.Run("PreferIommuFD falls back when host lacks IOMMUFD", func(t *testing.T) {
+		state, root := setup(t, false)
+		pd, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"PreferIommuFD"}`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/42"), filepath.Join(root, "dev/vfio/vfio"),
+		}, nodePaths(pd))
+	})
+
+	t.Run("RequireIommuFD fails when host lacks IOMMUFD", func(t *testing.T) {
+		state, _ := setup(t, false)
+		_, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"RequireIommuFD"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "IOMMUFD required")
+		assert.NotNil(t, state.allocatable[dev].Vfio, "pre-bound device stays VFIO after rollback")
+	})
+
+	t.Run("invalid policy is rejected by Validate", func(t *testing.T) {
+		state, _ := setup(t, true)
+		_, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"Bogus"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error validating VFIO config")
+	})
+
+	t.Run("unknown iommu field is rejected by strict decoding", func(t *testing.T) {
+		state, _ := setup(t, true)
+		_, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"LegacyOnly","enableAPIDevice":true}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error getting opaque device configs")
+	})
 }

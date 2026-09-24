@@ -42,13 +42,9 @@ import (
 func TestIOMMUBackendPolicy_Validate(t *testing.T) {
 	assert.NoError(t, IOMMUBackendPolicyLegacyOnly.Validate())
 	assert.NoError(t, IOMMUBackendPolicyPreferIommuFD.Validate())
+	assert.NoError(t, IOMMUBackendPolicyRequireIommuFD.Validate())
 	assert.Error(t, IOMMUBackendPolicy("InvalidPolicy").Validate())
 	assert.Error(t, IOMMUBackendPolicy("").Validate())
-}
-
-func TestIOMMUConfig_ShouldPreferIommuFD(t *testing.T) {
-	assert.True(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}).ShouldPreferIommuFD())
-	assert.False(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyLegacyOnly}).ShouldPreferIommuFD())
 }
 
 func TestIOMMUConfig_Validate(t *testing.T) {

@@ -198,7 +198,7 @@ func TestConfigure(t *testing.T) {
 		vfioDevDir := filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio99")
 		require.NoError(t, os.MkdirAll(vfioDevDir, 0755))
 
-		vm := &VfioPciManager{}
+		vm := &VfioPciManager{iommuFDEnabled: true}
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 
 		err := vm.Configure(info)
@@ -211,13 +211,44 @@ func TestConfigure(t *testing.T) {
 		createPCIDevice(t, root, "0000:0d:00.0", "")
 		createDriverDir(t, root, "vfio-pci")
 
-		vm := &VfioPciManager{}
+		vm := &VfioPciManager{iommuFDEnabled: true}
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IommuFDCdev: "vfio7"}
+
+		err := vm.Configure(info)
+		assert.NoError(t, err)
+		assert.Equal(t, "", info.IommuFDCdev, "stale cdev must be cleared when lookup fails")
+	})
+
+	t.Run("skips cdev lookup when host lacks IOMMUFD", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
+		createDriverDir(t, root, "vfio-pci")
+		require.NoError(t, os.MkdirAll(
+			filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio99"), 0755))
+
+		vm := &VfioPciManager{iommuFDEnabled: false}
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 
 		err := vm.Configure(info)
 		assert.NoError(t, err)
 		assert.Equal(t, "", info.IommuFDCdev)
 	})
+}
+
+func TestUnconfigure_ClearsIommuFDCdev(t *testing.T) {
+	root := setupFakeVfioSysfs(t)
+	createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
+	createDriverDir(t, root, "vfio-pci")
+
+	vm := &VfioPciManager{iommuFDEnabled: true}
+	info := &AmdGpuVFIOInfo{
+		PCIAddress:         "0000:0d:00.0",
+		preConfigureDriver: "vfio-pci",
+		IommuFDCdev:        "vfio5",
+	}
+
+	require.NoError(t, vm.Unconfigure(info))
+	assert.Equal(t, "", info.IommuFDCdev)
 }
 
 func TestVfioPciManager_IommuFDEnabled(t *testing.T) {
@@ -322,21 +353,36 @@ func TestUnconfigure(t *testing.T) {
 func TestUseIommuFD(t *testing.T) {
 	withCdev := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IommuFDCdev: "vfio5"}
 	noCdev := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
+	legacy := configapi.IOMMUBackendPolicyLegacyOnly
+	prefer := configapi.IOMMUBackendPolicyPreferIommuFD
+	requireFD := configapi.IOMMUBackendPolicyRequireIommuFD
 
 	tests := map[string]struct {
 		info           *AmdGpuVFIOInfo
-		preferIommuFD  bool
+		policy         configapi.IOMMUBackendPolicy
 		iommuFDEnabled bool
 		expected       bool
+		expectErr      bool
 	}{
-		"legacy policy":                          {info: withCdev, preferIommuFD: false, iommuFDEnabled: true, expected: false},
-		"preferred, host enabled, cdev present":  {info: withCdev, preferIommuFD: true, iommuFDEnabled: true, expected: true},
-		"preferred, host disabled, cdev present": {info: withCdev, preferIommuFD: true, iommuFDEnabled: false, expected: false},
-		"preferred, host enabled, no cdev":       {info: noCdev, preferIommuFD: true, iommuFDEnabled: true, expected: false},
+		"legacy policy ignores IOMMUFD":        {info: withCdev, policy: legacy, iommuFDEnabled: true, expected: false},
+		"prefer, fully available":              {info: withCdev, policy: prefer, iommuFDEnabled: true, expected: true},
+		"prefer, host disabled, cdev present":  {info: withCdev, policy: prefer, iommuFDEnabled: false, expected: false},
+		"prefer, host enabled, no cdev":        {info: noCdev, policy: prefer, iommuFDEnabled: true, expected: false},
+		"require, fully available":             {info: withCdev, policy: requireFD, iommuFDEnabled: true, expected: true},
+		"require, host disabled, cdev present": {info: withCdev, policy: requireFD, iommuFDEnabled: false, expectErr: true},
+		"require, host enabled, no cdev":       {info: noCdev, policy: requireFD, iommuFDEnabled: true, expectErr: true},
+		"unknown policy":                       {info: withCdev, policy: "Bogus", iommuFDEnabled: true, expectErr: true},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, UseIommuFD(tc.info, tc.preferIommuFD, tc.iommuFDEnabled))
+			got, err := UseIommuFD(tc.info, tc.policy, tc.iommuFDEnabled)
+			if tc.expectErr {
+				assert.Error(t, err)
+				assert.False(t, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
 		})
 	}
 }
@@ -408,13 +454,15 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 }
 
 // TestApplyVFIOConfig_BackendConsistency checks that the per-device node and
-// the common API node always come from the same IOMMU backend.
+// the common API node always come from the same IOMMU backend, and that
+// RequireIommuFD fails instead of falling back.
 func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 	tests := map[string]struct {
 		policy         configapi.IOMMUBackendPolicy
 		iommuFDEnabled bool
 		hasCdev        bool
 		expectedNodes  []string
+		expectErr      bool
 	}{
 		"legacy policy": {
 			policy: configapi.IOMMUBackendPolicyLegacyOnly, iommuFDEnabled: true, hasCdev: true,
@@ -431,6 +479,17 @@ func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 		"host capable, no cdev": {
 			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, hasCdev: false,
 			expectedNodes: []string{"dev/vfio/42", "dev/vfio/vfio"},
+		}, "require, fully available": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, hasCdev: true,
+			expectedNodes: []string{"dev/vfio/devices/vfio5", "dev/iommu"},
+		},
+		"require, host capability false": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: false, hasCdev: true,
+			expectErr: true,
+		},
+		"require, no cdev": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, hasCdev: false,
+			expectErr: true,
 		},
 	}
 	for name, tc := range tests {
@@ -452,6 +511,10 @@ func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 			config := &configapi.VfioDeviceConfig{Iommu: &configapi.IOMMUConfig{BackendPolicy: tc.policy}}
 
 			edits, err := state.applyVFIOConfig(&resourceapi.DeviceRequestAllocationResult{Device: "gpu-vfio-0"}, config)
+			if tc.expectErr {
+				assert.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 
 			var paths []string
