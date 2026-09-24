@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	klog "k8s.io/klog/v2"
@@ -69,6 +70,26 @@ func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
 	}
 }
 
+// returnToOriginalDriver rebinds a VFIO device to its pre-configure driver.
+// Without a VFIO manager (initialization failed or the feature is disabled
+// after a restart) nothing can be rebound, so it succeeds only when sysfs
+// shows the device already on that driver, e.g. a GPU converted but never
+// bound. Otherwise it fails, so callers keep the device and its record until
+// a rebind is possible.
+func (s *DeviceState) returnToOriginalDriver(info *AmdGpuVFIOInfo) error {
+	if s.vfioManager != nil {
+		return s.vfioManager.Unconfigure(info)
+	}
+	current, err := amdgpu.GetPCIDriver(info.PCIAddress)
+	if err != nil {
+		return fmt.Errorf("VFIO manager unavailable and current driver of %s unknown: %w", info.PCIAddress, err)
+	}
+	if current != info.preConfigureDriver {
+		return fmt.Errorf("VFIO manager unavailable; cannot rebind %s from %q to %q", info.PCIAddress, current, info.preConfigureDriver)
+	}
+	return nil
+}
+
 // releaseClaimVfio unconfigures the named devices that are currently VFIO and
 // then restores every conversion recorded for claimUID whose device was
 // rebound successfully (or never bound). Devices whose rebind fails stay VFIO
@@ -78,10 +99,10 @@ func (s *DeviceState) releaseClaimVfio(claimUID string, devices []string) error 
 	failed := make(map[string]bool)
 	for _, name := range devices {
 		dev := s.allocatable[name]
-		if dev == nil || dev.Vfio == nil || s.vfioManager == nil {
+		if dev == nil || dev.Vfio == nil {
 			continue
 		}
-		if err := s.vfioManager.Unconfigure(dev.Vfio); err != nil {
+		if err := s.returnToOriginalDriver(dev.Vfio); err != nil {
 			failed[name] = true
 			errs = append(errs, fmt.Errorf("failed to return %s (%s) to its original driver: %w", name, dev.Vfio.PCIAddress, err))
 		}

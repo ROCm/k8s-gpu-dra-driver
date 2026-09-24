@@ -252,3 +252,79 @@ func TestConvertedGPU_AdvertisedAsOriginal(t *testing.T) {
 	require.NoError(t, state.unprepareDevices("claim-uid", pd))
 	assertPublished(t, state.allocatable, want)
 }
+
+// restartWithoutVfioManager simulates a restart whose VFIO manager failed to
+// initialize: fresh state over the same checkpoint and CDI dir, the converted
+// GPU still on vfio-pci, and conversion records recovered from the checkpoint.
+func restartWithoutVfioManager(t *testing.T, state *DeviceState, root string) *DeviceState {
+	t.Helper()
+	setPCIDriver(t, root, convertAddr, "vfio-pci")
+	restarted := &DeviceState{
+		cdi:               state.cdi,
+		checkpointManager: state.checkpointManager,
+		allocatable:       AllocatableDevices{},
+	}
+	restarted.recoverVfioConversions(readCheckpoint(t, state).V1.VfioConversions)
+	return restarted
+}
+
+// TestUnprepare_NilVfioManagerKeepsConversion checks that without a VFIO
+// manager, Unprepare of a prepared claim fails and keeps the converted device
+// and its record, instead of completing with the GPU still on vfio-pci.
+func TestUnprepare_NilVfioManagerKeepsConversion(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, _ := newLifecycleState(t, true, allVfioNodes...)
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+	require.NoError(t, err)
+
+	restarted := restartWithoutVfioManager(t, state, root)
+	err = restarted.Unprepare("claim-uid")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VFIO manager unavailable")
+	assertStrandedVFIO(t, restarted, "claim-uid", "gpu-0-128")
+	cp := readCheckpoint(t, restarted)
+	assert.Contains(t, cp.V1.PreparedClaims, "claim-uid", "claim must stay prepared so kubelet retries")
+	assert.Contains(t, cp.V1.VfioConversions["claim-uid"], "gpu-0-128")
+
+	// Once VFIO is available again, the retried Unprepare rebinds the GPU.
+	restarted.vfioManager = &VfioPciManager{}
+	require.NoError(t, restarted.Unprepare("claim-uid"))
+	bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/amdgpu/bind"))
+	require.NoError(t, err)
+	assert.Equal(t, convertAddr, string(bound))
+	assertRestoredGPU(t, restarted, "gpu-0-128")
+}
+
+// TestUnprepare_NilVfioManagerKeepsStrandedConversion covers the same for a
+// claim whose Prepare never completed but left a device converted.
+func TestUnprepare_NilVfioManagerKeepsStrandedConversion(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, _ := newLifecycleState(t, true, allVfioNodes...)
+	cp := newCheckpoint()
+	cp.V1.VfioConversions = map[string]map[string]*VfioConversionRecord{
+		"claim-uid": {"gpu-0-128": {PCIAddress: convertAddr, IOMMUGroup: "42", CardIndex: 0, RenderIndex: 128}},
+	}
+	require.NoError(t, state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, cp))
+
+	restarted := restartWithoutVfioManager(t, state, root)
+	err := restarted.Unprepare("claim-uid")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VFIO manager unavailable")
+	assertStrandedVFIO(t, restarted, "claim-uid", "gpu-0-128")
+	assert.Contains(t, readCheckpoint(t, restarted).V1.VfioConversions["claim-uid"], "gpu-0-128")
+}
+
+// TestPrepare_NilVfioManagerRestoresUnboundConversion checks that without a
+// VFIO manager a GPU converted during matching but never bound is restored
+// cleanly: sysfs shows it still on amdgpu, so there is nothing to rebind.
+func TestPrepare_NilVfioManagerRestoresUnboundConversion(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, _ := setupConvertibleGPU(t, true, allVfioNodes...)
+	state.vfioManager = nil
+
+	_, err := state.prepareDevices(vfioClaim("gpu-0-128", ""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VFIO manager not available")
+	assert.NotContains(t, err.Error(), "rollback incomplete")
+	assertRestoredGPU(t, state, "gpu-0-128")
+}
