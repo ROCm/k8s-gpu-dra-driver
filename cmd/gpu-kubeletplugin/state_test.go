@@ -394,6 +394,13 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 		assert.Contains(t, err.Error(), "cdev node")
 	})
 
+	t.Run("PreferIommuFD fallback fails when legacy group node is missing", func(t *testing.T) {
+		state, _ := setup(t, false, "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu")
+		_, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"PreferIommuFD"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dev/vfio/42")
+	})
+
 	t.Run("LegacyOnly fails when /dev/vfio/vfio is missing", func(t *testing.T) {
 		state, _ := setup(t, true, "dev/vfio/42")
 		_, err := state.prepareDevices(vfioClaim(dev, ""))
