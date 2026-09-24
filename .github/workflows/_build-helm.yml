@@ -29,6 +29,7 @@ jobs:
 
       - name: Build and rename Helm chart with final name
         env:
+          VERSION:     ${{ inputs.version }}
           DRA_VERSION: ${{ inputs.version }}
           SUFFIX:      ${{ inputs.suffix }}
         run: |
