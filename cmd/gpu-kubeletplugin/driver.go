@@ -234,16 +234,44 @@ func (d *driver) republishResources(ctx context.Context) error {
 	return nil
 }
 
+// buildDriverResources builds normal-mode DriverResources. Like the synthetic
+// path, it splits counter sets and devices into separate slices within the
+// pool and chunks both to the API's per-slice limits: at most
+// ResourceSliceMaxCounterSets counter sets per slice, and at most
+// ResourceSliceMaxDevicesWithAdvancedFeatures devices per slice once any
+// device consumes counters (ResourceSliceMaxDevices otherwise). A node with
+// more than 8 SR-IOV PFs or more than 64 dual/VF entries would otherwise
+// publish an invalid ResourceSlice.
 func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
 	devices := resourceSliceDevices(d.state.allocatable)
 	counterSets := d.collectCounterSets()
-	slicesOut := []resourceslice.Slice{{Devices: devices}}
-	if len(counterSets) > 0 {
-		slicesOut = []resourceslice.Slice{{SharedCounters: counterSets}, {Devices: devices}}
+
+	var slicesOut []resourceslice.Slice
+	for _, part := range chunkCounterSets(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
+		slicesOut = append(slicesOut, resourceslice.Slice{SharedCounters: part})
+	}
+	for _, part := range chunkDevices(devices, maxDevicesPerSlice(devices)) {
+		slicesOut = append(slicesOut, resourceslice.Slice{Devices: part})
+	}
+	if len(devices) == 0 {
+		// Publish an empty device slice rather than no slice at all, as before.
+		slicesOut = append(slicesOut, resourceslice.Slice{Devices: devices})
 	}
 	return resourceslice.DriverResources{Pools: map[string]resourceslice.Pool{
 		nodeName: {Slices: slicesOut},
 	}}
+}
+
+// maxDevicesPerSlice returns the API's per-slice device limit for devices:
+// the lower limit applies as soon as any device consumes counters or carries
+// taints.
+func maxDevicesPerSlice(devices []resourceapi.Device) int {
+	for _, dev := range devices {
+		if len(dev.ConsumesCounters) > 0 || len(dev.Taints) > 0 {
+			return resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures
+		}
+	}
+	return resourceapi.ResourceSliceMaxDevices
 }
 
 func (d *driver) collectCounterSets() []resourceapi.CounterSet {
