@@ -237,7 +237,7 @@ func TestChunkDevices(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			chunks := chunkDevices(makeDevices(test.count), test.size)
+			chunks := chunk(makeDevices(test.count), test.size)
 			if len(chunks) != len(test.wantChunks) {
 				t.Fatalf("got %d chunks, want %d (%v)", len(chunks), len(test.wantChunks), test.wantChunks)
 			}
@@ -284,7 +284,7 @@ func TestChunkCounterSets(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			chunks := chunkCounterSets(makeCounterSets(test.count), test.size)
+			chunks := chunk(makeCounterSets(test.count), test.size)
 			if len(chunks) != len(test.wantChunks) {
 				t.Fatalf("got %d chunks, want %d (%v)", len(chunks), len(test.wantChunks), test.wantChunks)
 			}

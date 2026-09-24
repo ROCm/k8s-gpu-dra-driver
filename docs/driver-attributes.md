@@ -448,9 +448,16 @@ selectors:
 
 ### Dual-entry advertising and sibling exclusion
 
-When `VFIOPassthrough` is enabled, each compute GPU appears in the ResourceSlice
-as both a compute device (`type=amdgpu`) and a VFIO device (`type=vfio`). The
-scheduler allocates whichever type the claim requests.
+When `VFIOPassthrough` is enabled, each compute GPU that is not an SR-IOV VF (a
+PF, or a GPU without SR-IOV) appears in the ResourceSlice as both a compute
+device (`type=amdgpu`) and a VFIO device (`type=vfio`). The scheduler allocates
+whichever type the claim requests. A `type=vfio` entry claimed without a
+`VfioDeviceConfig` gets the default VFIO configuration.
+
+Compute VFs (SR-IOV VFs bound to `amdgpu`) are advertised only as
+`type=amdgpu`. Unbound GIM VFs are discovered separately and advertised only as
+`type=vfio`. To use a compute VF for passthrough, claim it with a
+`VfioDeviceConfig`, which converts it during Prepare.
 
 Sibling exclusion is bidirectional: allocating either type removes the other
 from the ResourceSlice until the claim is released. For example, allocating a

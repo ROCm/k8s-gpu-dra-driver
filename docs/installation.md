@@ -179,9 +179,10 @@ on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 
 **Dual-entry advertising:**
 
-When `VFIOPassthrough` is enabled, each compute GPU also appears as a
-`type=vfio` device in the ResourceSlice. You can claim a VFIO GPU directly
-by selecting `type=vfio` without using a `VfioDeviceConfig`:
+When `VFIOPassthrough` is enabled, each compute GPU that is not an SR-IOV
+VF (a PF, or a GPU without SR-IOV) also appears as a `type=vfio` device in
+the ResourceSlice. You can claim such a GPU for VFIO directly by selecting
+`type=vfio` without using a `VfioDeviceConfig`:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -200,7 +201,9 @@ spec:
 ```
 
 This is the simpler path for VFIO allocation. The `VfioDeviceConfig` approach
-(shown above) is still supported for on-demand conversion of compute GPUs.
+(shown above) is still supported for on-demand conversion of compute GPUs, and
+it is the only way to use a compute VF (an SR-IOV VF bound to `amdgpu`) for
+VFIO: compute VFs have no direct `type=vfio` entry.
 
 When either the compute or VFIO entry is allocated, the other is temporarily
 removed from the ResourceSlice. It returns when the claim is released.

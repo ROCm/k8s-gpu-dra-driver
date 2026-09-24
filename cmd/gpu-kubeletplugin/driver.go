@@ -174,11 +174,11 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 	// Use separate slices: one (or more) for shared counters, one (or more) for
 	// devices — the API forbids mixing sharedCounters and devices in one slice.
 	var slices []resourceslice.Slice
-	for _, chunk := range chunkDevices(devices, resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures) {
-		slices = append(slices, resourceslice.Slice{Devices: chunk})
+	for _, part := range chunk(devices, resourceapi.ResourceSliceMaxDevicesWithAdvancedFeatures) {
+		slices = append(slices, resourceslice.Slice{Devices: part})
 	}
-	for _, chunk := range chunkCounterSets(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
-		slices = append(slices, resourceslice.Slice{SharedCounters: chunk})
+	for _, part := range chunk(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
+		slices = append(slices, resourceslice.Slice{SharedCounters: part})
 	}
 
 	return resourceslice.DriverResources{
@@ -190,29 +190,15 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 	}
 }
 
-// chunkDevices splits devices into groups of at most size, preserving order.
-// A nil/empty input yields no chunks (matching the previous unconditional
-// single-Devices-slice behavior only ever being skipped when there were no
-// devices at all, which the caller never hits in practice).
-func chunkDevices(devices []resourceapi.Device, size int) [][]resourceapi.Device {
-	var chunks [][]resourceapi.Device
-	for len(devices) > 0 {
-		n := min(size, len(devices))
-		chunks = append(chunks, devices[:n])
-		devices = devices[n:]
-	}
-	return chunks
-}
-
-// chunkCounterSets splits counterSets into groups of at most size, preserving
-// order. Mirrors chunkDevices; kept separate since the two chunk different
-// element types and are governed by different API limits.
-func chunkCounterSets(counterSets []resourceapi.CounterSet, size int) [][]resourceapi.CounterSet {
-	var chunks [][]resourceapi.CounterSet
-	for len(counterSets) > 0 {
-		n := min(size, len(counterSets))
-		chunks = append(chunks, counterSets[:n])
-		counterSets = counterSets[n:]
+// chunk splits items into groups of at most size, preserving order. It is
+// used for both devices and counter sets, which the API caps per ResourceSlice
+// at different limits. A nil/empty input yields no chunks.
+func chunk[T any](items []T, size int) [][]T {
+	var chunks [][]T
+	for len(items) > 0 {
+		n := min(size, len(items))
+		chunks = append(chunks, items[:n])
+		items = items[n:]
 	}
 	return chunks
 }
@@ -247,10 +233,10 @@ func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResou
 	counterSets := d.collectCounterSets()
 
 	var slicesOut []resourceslice.Slice
-	for _, part := range chunkCounterSets(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
+	for _, part := range chunk(counterSets, resourceapi.ResourceSliceMaxCounterSets) {
 		slicesOut = append(slicesOut, resourceslice.Slice{SharedCounters: part})
 	}
-	for _, part := range chunkDevices(devices, maxDevicesPerSlice(devices)) {
+	for _, part := range chunk(devices, maxDevicesPerSlice(devices)) {
 		slicesOut = append(slicesOut, resourceslice.Slice{Devices: part})
 	}
 	if len(devices) == 0 {

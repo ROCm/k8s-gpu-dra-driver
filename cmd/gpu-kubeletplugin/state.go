@@ -618,9 +618,11 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 	klog.V(2).Infof("Decoded %d opaque configs for driver %s", len(configs), consts.DriverName)
 
-	// Add a default GPU config at the front with lowest precedence. No
-	// default VfioDeviceConfig — VFIO conversion requires an explicit config
-	// in the claim to avoid accidentally routing regular GPUs into vfio-pci.
+	// Add a default GPU config at the front with lowest precedence. There is no
+	// default VfioDeviceConfig in this list: converting a regular GPU to VFIO
+	// requires an explicit config in the claim, to avoid accidentally routing
+	// regular GPUs into vfio-pci. Devices that are already VFIO get a default
+	// VFIO config below instead.
 	configs = slices.Insert(configs, 0,
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
@@ -632,6 +634,11 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
+	// A device that is already VFIO (a pre-bound device, or the type=vfio
+	// dual-entry sibling of a compute GPU) may be claimed directly without a
+	// VfioDeviceConfig. It gets this default config; it is only created when
+	// needed. Regular GPUs are never converted without an explicit config.
+	var defaultVfioConfig *configapi.VfioDeviceConfig
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver != consts.DriverName {
 			continue
@@ -641,6 +648,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
 		isVFIO := allocDev.Type() == consts.VfioDeviceType
+		matched := false
 		for _, c := range slices.Backward(configs) {
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
@@ -668,7 +676,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 							SimdUnits:          allocDev.AmdGpu.SimdUnits,
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
-							preConfigureDriver: "amdgpu",
+							preConfigureDriver: consts.AMDGPUDriverName,
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
@@ -688,8 +696,18 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			}
 			if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
 				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+				matched = true
 				break
 			}
+		}
+		if !matched && isVFIO {
+			if !featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return nil, fmt.Errorf("device %s is a VFIO device but the %s feature gate is disabled", result.Device, featuregates.VFIOPassthrough)
+			}
+			if defaultVfioConfig == nil {
+				defaultVfioConfig = configapi.DefaultVfioDeviceConfig()
+			}
+			configResultsMap[defaultVfioConfig] = append(configResultsMap[defaultVfioConfig], &result)
 		}
 	}
 
