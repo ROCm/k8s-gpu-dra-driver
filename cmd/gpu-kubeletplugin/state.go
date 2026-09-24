@@ -1038,7 +1038,10 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 	if err != nil {
 		return nil, fmt.Errorf("error building CDI edits for %s: %w", result.Device, err)
 	}
-	commonEdits := GetVfioCommonCDIEdits(useIommuFD)
+	commonEdits, err := GetVfioCommonCDIEdits(useIommuFD)
+	if err != nil {
+		return nil, fmt.Errorf("error building common VFIO CDI edits for %s: %w", result.Device, err)
+	}
 	deviceEdits.ContainerEdits.DeviceNodes = append(deviceEdits.ContainerEdits.DeviceNodes, commonEdits.ContainerEdits.DeviceNodes...)
 
 	backend := "legacy"

@@ -254,9 +254,10 @@ func (vm *VfioPciManager) recordIommuFDCdev(info *AmdGpuVFIOInfo) {
 
 // UseIommuFD decides the IOMMU backend for a device allocation. IOMMUFD is
 // used only when the policy asks for it, the host exposes /dev/iommu, and the
-// device has a vfio cdev. PreferIommuFD falls back to legacy VFIO otherwise;
-// RequireIommuFD returns an error instead. The result must drive both the
-// per-device and the common CDI edits so the spec never mixes backends.
+// device has a vfio cdev whose /dev/vfio/devices node exists. PreferIommuFD
+// falls back to legacy VFIO otherwise; RequireIommuFD returns an error
+// instead. The result must drive both the per-device and the common CDI edits
+// so the spec never mixes backends.
 func UseIommuFD(info *AmdGpuVFIOInfo, policy configapi.IOMMUBackendPolicy, iommuFDEnabled bool) (bool, error) {
 	switch policy {
 	case configapi.IOMMUBackendPolicyLegacyOnly:
@@ -268,10 +269,12 @@ func UseIommuFD(info *AmdGpuVFIOInfo, policy configapi.IOMMUBackendPolicy, iommu
 
 	var reason string
 	switch {
-	case !iommuFDEnabled:
-		reason = "/dev/iommu unavailable on host"
+	case !iommuFDEnabled || !isCharDevice(amdgpu.IommuDevicePath):
+		reason = amdgpu.IommuDevicePath + " unavailable on host"
 	case info.IommuFDCdev == "":
 		reason = "no vfio cdev for device"
+	case !isCharDevice(filepath.Join(amdgpu.VFIODevicesPath, info.IommuFDCdev)):
+		reason = fmt.Sprintf("cdev node %s missing", filepath.Join(amdgpu.VFIODevicesPath, info.IommuFDCdev))
 	default:
 		return true, nil
 	}
@@ -283,13 +286,18 @@ func UseIommuFD(info *AmdGpuVFIOInfo, policy configapi.IOMMUBackendPolicy, iommu
 	return false, nil
 }
 
-// vfioDeviceNode builds a CDI device node for path, reading major/minor from
-// the host. Falls back to a path-only node if the attrs can't be read.
-func vfioDeviceNode(path string) *cdispec.DeviceNode {
+// isCharDevice reports whether path resolves to a character device.
+func isCharDevice(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// newDeviceNode builds a CDI device node for path, reading type and
+// major/minor from the host. The node must exist.
+func newDeviceNode(path string) (*cdispec.DeviceNode, error) {
 	major, minor, devType, permissions, err := getDeviceAttrs(path)
 	if err != nil {
-		klog.Warningf("Could not read device attrs for %s, using path-only CDI spec: %v", path, err)
-		return &cdispec.DeviceNode{Path: path, HostPath: path, Type: "c"}
+		return nil, fmt.Errorf("failed to read device attrs for %s: %w", path, err)
 	}
 	return &cdispec.DeviceNode{
 		Path:        path,
@@ -298,29 +306,38 @@ func vfioDeviceNode(path string) *cdispec.DeviceNode {
 		Major:       major,
 		Minor:       minor,
 		Permissions: permissions,
-	}
+	}, nil
 }
 
 // GetVfioCommonCDIEdits returns CDI edits for the common IOMMU API device.
-// With IOMMUFD: /dev/iommu. With legacy: /dev/vfio/vfio.
-func GetVfioCommonCDIEdits(useIommuFD bool) *cdiapi.ContainerEdits {
+// With IOMMUFD: /dev/iommu. With legacy: /dev/vfio/vfio. The container can't
+// use VFIO without it, so a missing node fails Prepare.
+func GetVfioCommonCDIEdits(useIommuFD bool) (*cdiapi.ContainerEdits, error) {
 	path := filepath.Join(amdgpu.VFIODevicesRoot, "vfio")
 	if useIommuFD {
 		path = amdgpu.IommuDevicePath
 	}
+	node, err := newDeviceNode(path)
+	if err != nil {
+		return nil, err
+	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			DeviceNodes: []*cdispec.DeviceNode{vfioDeviceNode(path)},
+			DeviceNodes: []*cdispec.DeviceNode{node},
 		},
-	}
+	}, nil
 }
 
 // GetVfioDeviceCDIEdits returns CDI edits for a specific VFIO device.
 // With IOMMUFD: /dev/vfio/devices/<cdev>. With legacy: /dev/vfio/<group>.
 func GetVfioDeviceCDIEdits(info *AmdGpuVFIOInfo, useIommuFD bool) (*cdiapi.ContainerEdits, error) {
-	var path string
+	var node *cdispec.DeviceNode
 	if useIommuFD {
-		path = filepath.Join(amdgpu.VFIODevicesPath, info.IommuFDCdev)
+		var err error
+		node, err = newDeviceNode(filepath.Join(amdgpu.VFIODevicesPath, info.IommuFDCdev))
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		iommuGroup := info.IOMMUGroup
 		if iommuGroup == "" {
@@ -334,11 +351,18 @@ func GetVfioDeviceCDIEdits(info *AmdGpuVFIOInfo, useIommuFD bool) (*cdiapi.Conta
 		if _, err := strconv.Atoi(iommuGroup); err != nil {
 			return nil, fmt.Errorf("invalid IOMMU group format for %s: %q", info.PCIAddress, iommuGroup)
 		}
-		path = filepath.Join(amdgpu.VFIODevicesRoot, iommuGroup)
+		groupPath := filepath.Join(amdgpu.VFIODevicesRoot, iommuGroup)
+		var err error
+		node, err = newDeviceNode(groupPath)
+		if err != nil {
+			// Fallback: create spec without major/minor (some runtimes handle this).
+			klog.Warningf("Could not read device attrs for %s, using path-only CDI spec: %v", groupPath, err)
+			node = &cdispec.DeviceNode{Path: groupPath, HostPath: groupPath, Type: "c"}
+		}
 	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			DeviceNodes: []*cdispec.DeviceNode{vfioDeviceNode(path)},
+			DeviceNodes: []*cdispec.DeviceNode{node},
 		},
 	}, nil
 }

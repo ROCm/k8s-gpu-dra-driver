@@ -350,32 +350,51 @@ func TestUnconfigure(t *testing.T) {
 	})
 }
 
+// createDevNode creates a fake device node at root/rel as a symlink to
+// /dev/null, which os.Stat resolves to a real character device (1:3).
+func createDevNode(t *testing.T, root, rel string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.Symlink("/dev/null", path))
+}
+
 func TestUseIommuFD(t *testing.T) {
-	withCdev := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IommuFDCdev: "vfio5"}
-	noCdev := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 	legacy := configapi.IOMMUBackendPolicyLegacyOnly
 	prefer := configapi.IOMMUBackendPolicyPreferIommuFD
 	requireFD := configapi.IOMMUBackendPolicyRequireIommuFD
+	allNodes := []string{"dev/iommu", "dev/vfio/devices/vfio5"}
 
 	tests := map[string]struct {
-		info           *AmdGpuVFIOInfo
+		cdev           string
+		nodes          []string
 		policy         configapi.IOMMUBackendPolicy
 		iommuFDEnabled bool
 		expected       bool
 		expectErr      bool
 	}{
-		"legacy policy ignores IOMMUFD":        {info: withCdev, policy: legacy, iommuFDEnabled: true, expected: false},
-		"prefer, fully available":              {info: withCdev, policy: prefer, iommuFDEnabled: true, expected: true},
-		"prefer, host disabled, cdev present":  {info: withCdev, policy: prefer, iommuFDEnabled: false, expected: false},
-		"prefer, host enabled, no cdev":        {info: noCdev, policy: prefer, iommuFDEnabled: true, expected: false},
-		"require, fully available":             {info: withCdev, policy: requireFD, iommuFDEnabled: true, expected: true},
-		"require, host disabled, cdev present": {info: withCdev, policy: requireFD, iommuFDEnabled: false, expectErr: true},
-		"require, host enabled, no cdev":       {info: noCdev, policy: requireFD, iommuFDEnabled: true, expectErr: true},
-		"unknown policy":                       {info: withCdev, policy: "Bogus", iommuFDEnabled: true, expectErr: true},
+		"legacy policy ignores IOMMUFD": {cdev: "vfio5", nodes: allNodes, policy: legacy, iommuFDEnabled: true},
+		"prefer, fully available":       {cdev: "vfio5", nodes: allNodes, policy: prefer, iommuFDEnabled: true, expected: true},
+		"prefer, host disabled":         {cdev: "vfio5", nodes: allNodes, policy: prefer, iommuFDEnabled: false},
+		"prefer, no sysfs cdev":         {cdev: "", nodes: allNodes, policy: prefer, iommuFDEnabled: true},
+		"prefer, cdev node missing":     {cdev: "vfio5", nodes: []string{"dev/iommu"}, policy: prefer, iommuFDEnabled: true},
+		"prefer, /dev/iommu missing":    {cdev: "vfio5", nodes: []string{"dev/vfio/devices/vfio5"}, policy: prefer, iommuFDEnabled: true},
+		"require, fully available":      {cdev: "vfio5", nodes: allNodes, policy: requireFD, iommuFDEnabled: true, expected: true},
+		"require, host disabled":        {cdev: "vfio5", nodes: allNodes, policy: requireFD, iommuFDEnabled: false, expectErr: true},
+		"require, no sysfs cdev":        {cdev: "", nodes: allNodes, policy: requireFD, iommuFDEnabled: true, expectErr: true},
+		"require, cdev node missing":    {cdev: "vfio5", nodes: []string{"dev/iommu"}, policy: requireFD, iommuFDEnabled: true, expectErr: true},
+		"require, /dev/iommu missing":   {cdev: "vfio5", nodes: []string{"dev/vfio/devices/vfio5"}, policy: requireFD, iommuFDEnabled: true, expectErr: true},
+		"unknown policy":                {cdev: "vfio5", nodes: allNodes, policy: "Bogus", iommuFDEnabled: true, expectErr: true},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			got, err := UseIommuFD(tc.info, tc.policy, tc.iommuFDEnabled)
+			root := setupFakeVfioSysfs(t)
+			for _, n := range tc.nodes {
+				createDevNode(t, root, n)
+			}
+			info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IommuFDCdev: tc.cdev}
+
+			got, err := UseIommuFD(info, tc.policy, tc.iommuFDEnabled)
 			if tc.expectErr {
 				assert.Error(t, err)
 				assert.False(t, got)
@@ -388,34 +407,62 @@ func TestUseIommuFD(t *testing.T) {
 }
 
 func TestGetVfioCommonCDIEdits(t *testing.T) {
-	t.Run("legacy uses /dev/vfio/vfio", func(t *testing.T) {
-		edits := GetVfioCommonCDIEdits(false)
-		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, "/dev/vfio/vfio", edits.ContainerEdits.DeviceNodes[0].Path)
-	})
+	for name, tc := range map[string]struct {
+		useIommuFD bool
+		node       string
+	}{
+		"legacy uses /dev/vfio/vfio": {useIommuFD: false, node: "dev/vfio/vfio"},
+		"iommufd uses /dev/iommu":    {useIommuFD: true, node: "dev/iommu"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := setupFakeVfioSysfs(t)
+			createDevNode(t, root, tc.node)
 
-	t.Run("iommufd uses /dev/iommu", func(t *testing.T) {
-		edits := GetVfioCommonCDIEdits(true)
-		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, "/dev/iommu", edits.ContainerEdits.DeviceNodes[0].Path)
-	})
+			edits, err := GetVfioCommonCDIEdits(tc.useIommuFD)
+			require.NoError(t, err)
+			require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
+			node := edits.ContainerEdits.DeviceNodes[0]
+			assert.Equal(t, filepath.Join(root, tc.node), node.Path)
+			assert.Equal(t, "c", node.Type)
+			assert.Equal(t, int64(1), node.Major)
+			assert.Equal(t, int64(3), node.Minor)
+		})
+
+		t.Run(name+" errors when node missing", func(t *testing.T) {
+			setupFakeVfioSysfs(t)
+			_, err := GetVfioCommonCDIEdits(tc.useIommuFD)
+			assert.Error(t, err)
+		})
+	}
 }
 
 func TestGetVfioDeviceCDIEdits(t *testing.T) {
 	t.Run("legacy group path", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createDevNode(t, root, "dev/vfio/42")
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42"}
 		edits, err := GetVfioDeviceCDIEdits(info, false)
 		require.NoError(t, err)
 		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, "/dev/vfio/42", edits.ContainerEdits.DeviceNodes[0].Path)
+		assert.Equal(t, filepath.Join(root, "dev/vfio/42"), edits.ContainerEdits.DeviceNodes[0].Path)
+		assert.Equal(t, int64(1), edits.ContainerEdits.DeviceNodes[0].Major)
 	})
 
 	t.Run("iommufd cdev path", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createDevNode(t, root, "dev/vfio/devices/vfio5")
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42", IommuFDCdev: "vfio5"}
 		edits, err := GetVfioDeviceCDIEdits(info, true)
 		require.NoError(t, err)
 		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, "/dev/vfio/devices/vfio5", edits.ContainerEdits.DeviceNodes[0].Path)
+		assert.Equal(t, filepath.Join(root, "dev/vfio/devices/vfio5"), edits.ContainerEdits.DeviceNodes[0].Path)
+	})
+
+	t.Run("iommufd errors when cdev node missing", func(t *testing.T) {
+		setupFakeVfioSysfs(t)
+		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IommuFDCdev: "vfio5"}
+		_, err := GetVfioDeviceCDIEdits(info, true)
+		assert.Error(t, err)
 	})
 
 	t.Run("legacy resolves missing IOMMU group from sysfs", func(t *testing.T) {
@@ -443,53 +490,74 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("path-only node when device attrs unreadable", func(t *testing.T) {
+	t.Run("legacy group node falls back to path-only", func(t *testing.T) {
+		setupFakeVfioSysfs(t)
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42"}
 		edits, err := GetVfioDeviceCDIEdits(info, false)
 		require.NoError(t, err)
 		node := edits.ContainerEdits.DeviceNodes[0]
 		assert.Equal(t, node.Path, node.HostPath)
 		assert.Equal(t, "c", node.Type)
+		assert.Zero(t, node.Major)
 	})
 }
 
 // TestApplyVFIOConfig_BackendConsistency checks that the per-device node and
-// the common API node always come from the same IOMMU backend, and that
-// RequireIommuFD fails instead of falling back.
+// the common API node always come from the same IOMMU backend, that
+// RequireIommuFD fails instead of falling back, and that a missing API node
+// fails Prepare rather than producing an unusable spec.
 func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
+	legacyNodes := []string{"dev/vfio/42", "dev/vfio/vfio"}
+	iommufdNodes := []string{"dev/vfio/devices/vfio5", "dev/iommu"}
+	allNodes := append(append([]string{}, legacyNodes...), iommufdNodes...)
+
 	tests := map[string]struct {
 		policy         configapi.IOMMUBackendPolicy
 		iommuFDEnabled bool
-		hasCdev        bool
+		sysfsCdev      bool
+		nodes          []string
 		expectedNodes  []string
 		expectErr      bool
 	}{
 		"legacy policy": {
-			policy: configapi.IOMMUBackendPolicyLegacyOnly, iommuFDEnabled: true, hasCdev: true,
-			expectedNodes: []string{"dev/vfio/42", "dev/vfio/vfio"},
+			policy: configapi.IOMMUBackendPolicyLegacyOnly, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: allNodes, expectedNodes: legacyNodes,
 		},
-		"iommufd fully available": {
-			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, hasCdev: true,
-			expectedNodes: []string{"dev/vfio/devices/vfio5", "dev/iommu"},
+		"legacy, /dev/vfio/vfio missing": {
+			policy: configapi.IOMMUBackendPolicyLegacyOnly, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: []string{"dev/vfio/42"}, expectErr: true,
 		},
-		"cdev present, host capability false": {
-			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: false, hasCdev: true,
-			expectedNodes: []string{"dev/vfio/42", "dev/vfio/vfio"},
+		"prefer, fully available": {
+			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: allNodes, expectedNodes: iommufdNodes,
 		},
-		"host capable, no cdev": {
-			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, hasCdev: false,
-			expectedNodes: []string{"dev/vfio/42", "dev/vfio/vfio"},
-		}, "require, fully available": {
-			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, hasCdev: true,
-			expectedNodes: []string{"dev/vfio/devices/vfio5", "dev/iommu"},
+		"prefer, host capability false": {
+			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: false, sysfsCdev: true,
+			nodes: allNodes, expectedNodes: legacyNodes,
+		},
+		"prefer, no sysfs cdev": {
+			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, sysfsCdev: false,
+			nodes: allNodes, expectedNodes: legacyNodes,
+		},
+		"prefer, sysfs cdev but no device node": {
+			policy: configapi.IOMMUBackendPolicyPreferIommuFD, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: append(append([]string{}, legacyNodes...), "dev/iommu"), expectedNodes: legacyNodes,
+		},
+		"require, fully available": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: allNodes, expectedNodes: iommufdNodes,
 		},
 		"require, host capability false": {
-			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: false, hasCdev: true,
-			expectErr: true,
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: false, sysfsCdev: true,
+			nodes: allNodes, expectErr: true,
 		},
-		"require, no cdev": {
-			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, hasCdev: false,
-			expectErr: true,
+		"require, no sysfs cdev": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, sysfsCdev: false,
+			nodes: allNodes, expectErr: true,
+		},
+		"require, sysfs cdev but no device node": {
+			policy: configapi.IOMMUBackendPolicyRequireIommuFD, iommuFDEnabled: true, sysfsCdev: true,
+			nodes: append(append([]string{}, legacyNodes...), "dev/iommu"), expectErr: true,
 		},
 	}
 	for name, tc := range tests {
@@ -497,9 +565,12 @@ func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 			root := setupFakeVfioSysfs(t)
 			createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
 			createDriverDir(t, root, "vfio-pci")
-			if tc.hasCdev {
+			if tc.sysfsCdev {
 				require.NoError(t, os.MkdirAll(
 					filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio5"), 0755))
+			}
+			for _, n := range tc.nodes {
+				createDevNode(t, root, n)
 			}
 
 			state := &DeviceState{

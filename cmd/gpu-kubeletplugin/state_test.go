@@ -286,12 +286,21 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 	enableVFIOPassthrough(t)
 
 	const dev = "gpu-vfio-0"
-	setup := func(t *testing.T, iommuFDEnabled bool) (*DeviceState, string) {
+	allNodes := []string{"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu"}
+	// setup creates a pre-bound device with a sysfs cdev entry and the given
+	// /dev nodes (all of them when none are given).
+	setup := func(t *testing.T, iommuFDEnabled bool, nodes ...string) (*DeviceState, string) {
 		root := setupFakeVfioSysfs(t)
 		createPCIDevice(t, root, "0000:0d:00.0", "vfio-pci")
 		createDriverDir(t, root, "vfio-pci")
 		require.NoError(t, os.MkdirAll(
 			filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio5"), 0755))
+		if len(nodes) == 0 {
+			nodes = allNodes
+		}
+		for _, n := range nodes {
+			createDevNode(t, root, n)
+		}
 		state := &DeviceState{
 			cdi: &CDIHandler{},
 			allocatable: AllocatableDevices{
@@ -356,6 +365,29 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "IOMMUFD required")
 		assert.NotNil(t, state.allocatable[dev].Vfio, "pre-bound device stays VFIO after rollback")
+	})
+
+	t.Run("PreferIommuFD falls back when cdev node is missing", func(t *testing.T) {
+		state, root := setup(t, true, "dev/vfio/42", "dev/vfio/vfio", "dev/iommu")
+		pd, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"PreferIommuFD"}`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/42"), filepath.Join(root, "dev/vfio/vfio"),
+		}, nodePaths(pd))
+	})
+
+	t.Run("RequireIommuFD fails when cdev node is missing", func(t *testing.T) {
+		state, _ := setup(t, true, "dev/vfio/42", "dev/vfio/vfio", "dev/iommu")
+		_, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"RequireIommuFD"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cdev node")
+	})
+
+	t.Run("LegacyOnly fails when /dev/vfio/vfio is missing", func(t *testing.T) {
+		state, _ := setup(t, true, "dev/vfio/42")
+		_, err := state.prepareDevices(vfioClaim(dev, ""))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "common VFIO CDI edits")
 	})
 
 	t.Run("invalid policy is rejected by Validate", func(t *testing.T) {
