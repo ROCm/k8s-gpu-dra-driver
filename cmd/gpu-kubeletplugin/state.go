@@ -290,6 +290,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		s.rollbackVfio(preparedDeviceNames(preparedDevices))
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -308,6 +309,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		if delErr := s.cdi.DeleteClaimSpecFile(claimUID); delErr != nil {
 			klog.Warningf("failed to delete orphaned CDI spec file for claim %s after checkpoint failure: %v", claimUID, delErr)
 		}
+		s.rollbackVfio(preparedDeviceNames(preparedDevices))
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -514,7 +516,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ PreparedDevices, err error) {
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -540,6 +542,15 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// Track per-claim VFIO conversions so the long-lived allocatable entry
 	// stays immutable. Restored on unprepare or rollback.
 	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
+
+	// On any failure below, undo every VFIO bind and GPU->VFIO conversion made
+	// for this claim, so a rejected claim never leaves devices converted.
+	var configuredVfio []string
+	defer func() {
+		if err != nil {
+			s.rollbackVfio(configuredVfio)
+		}
+	}()
 
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
@@ -627,24 +638,14 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			if err := castConfig.Validate(); err != nil {
 				return nil, fmt.Errorf("error validating VFIO config: %w", err)
 			}
-			var configuredNames []string
 			for _, result := range results {
+				// Record before applying: a failed Configure may have
+				// partially bound the device, so rollback must visit it.
+				configuredVfio = append(configuredVfio, result.Device)
 				edits, err := s.applyVFIOConfig(result, castConfig)
 				if err != nil {
-					if dev := s.allocatable[result.Device]; dev != nil && dev.Vfio != nil {
-						configuredNames = append(configuredNames, result.Device)
-					}
-					for _, name := range configuredNames {
-						if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil {
-							if unconfigErr := s.vfioManager.Unconfigure(dev.Vfio); unconfigErr != nil {
-								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
-							}
-						}
-						s.restoreFromVfio(name)
-					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
-				configuredNames = append(configuredNames, result.Device)
 				perDeviceCDIContainerEdits[allocationResultKey(string(claim.UID), result)] = edits
 			}
 		default:
@@ -703,6 +704,31 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// preparedDeviceNames returns the device names of a set of prepared devices.
+func preparedDeviceNames(devices PreparedDevices) []string {
+	names := make([]string, 0, len(devices))
+	for _, d := range devices {
+		names = append(names, d.DeviceName)
+	}
+	return names
+}
+
+// rollbackVfio unconfigures the named devices that are VFIO (others are
+// skipped) and restores every GPU->VFIO conversion recorded for the current
+// claim.
+func (s *DeviceState) rollbackVfio(configured []string) {
+	for _, name := range configured {
+		if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil && s.vfioManager != nil {
+			if err := s.vfioManager.Unconfigure(dev.Vfio); err != nil {
+				klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, err)
+			}
+		}
+	}
+	for name := range s.claimVfioConversions {
+		s.restoreFromVfio(name)
+	}
 }
 
 func (s *DeviceState) restoreFromVfio(deviceName string) {
