@@ -48,6 +48,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
+	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 func TestRestoreFromVfio(t *testing.T) {
@@ -251,6 +253,17 @@ func enableVFIOPassthrough(t *testing.T) {
 // vfioClaim builds an allocated claim for device carrying an opaque
 // VfioDeviceConfig. iommuJSON is the raw "iommu" field, or "" to omit it.
 func vfioClaim(device, iommuJSON string) *resourceapi.ResourceClaim {
+	return vfioClaimDevices(iommuJSON, device)
+}
+
+// vfioClaimDevices is vfioClaim for several allocated devices, in order.
+func vfioClaimDevices(iommuJSON string, devices ...string) *resourceapi.ResourceClaim {
+	var results []resourceapi.DeviceRequestAllocationResult
+	for _, d := range devices {
+		results = append(results, resourceapi.DeviceRequestAllocationResult{
+			Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: d,
+		})
+	}
 	params := `{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"`
 	if iommuJSON != "" {
 		params += `,"iommu":` + iommuJSON
@@ -261,9 +274,7 @@ func vfioClaim(device, iommuJSON string) *resourceapi.ResourceClaim {
 		Status: resourceapi.ResourceClaimStatus{
 			Allocation: &resourceapi.AllocationResult{
 				Devices: resourceapi.DeviceAllocationResult{
-					Results: []resourceapi.DeviceRequestAllocationResult{
-						{Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: device},
-					},
+					Results: results,
 					Config: []resourceapi.DeviceAllocationConfiguration{{
 						Source: resourceapi.AllocationConfigSourceClaim,
 						DeviceConfiguration: resourceapi.DeviceConfiguration{
@@ -403,4 +414,197 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "error getting opaque device configs")
 	})
+}
+
+// setupConvertibleGPU creates a regular amdgpu-bound GPU in a fake sysfs, with
+// an IOMMU group, a vfio cdev entry that appears after bind, and the given
+// /dev nodes. It returns a DeviceState that lists the device as an AmdGpu, so
+// a VfioDeviceConfig claim converts it to VFIO during prepare.
+func setupConvertibleGPU(t *testing.T, iommuFDEnabled bool, nodes ...string) (*DeviceState, string) {
+	t.Helper()
+	root := setupFakeVfioSysfs(t)
+	const addr = "0000:0d:00.0"
+	createPCIDevice(t, root, addr, "amdgpu")
+	createDriverDir(t, root, "amdgpu")
+	createDriverDir(t, root, "vfio-pci")
+	devDir := filepath.Join(root, "sys/bus/pci/devices", addr)
+	require.NoError(t, os.Symlink("../../../kernel/iommu_groups/42", filepath.Join(devDir, "iommu_group")))
+	require.NoError(t, os.MkdirAll(filepath.Join(devDir, "vfio-dev/vfio5"), 0755))
+	for _, n := range nodes {
+		createDevNode(t, root, n)
+	}
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: addr, cardIndex: 0, renderIndex: 128}},
+		},
+		vfioManager: &VfioPciManager{iommuFDEnabled: iommuFDEnabled},
+	}
+	return state, root
+}
+
+// assertRestoredGPU checks that a converted device is back to a plain AmdGpu
+// and that no conversion is left recorded for the claim.
+func assertRestoredGPU(t *testing.T, state *DeviceState, name string) {
+	t.Helper()
+	dev := state.allocatable[name]
+	require.NotNil(t, dev)
+	assert.NotNil(t, dev.AmdGpu, "device should be restored to AmdGpu")
+	assert.Nil(t, dev.Vfio, "device should not remain VFIO")
+	assert.Equal(t, consts.AmdGpuDeviceType, dev.Type())
+	assert.Empty(t, state.claimVfioConversions)
+}
+
+// TestPrepareDevices_ConvertedGPU covers claims that convert a regular GPU to
+// VFIO, including every failure path that must undo the conversion.
+func TestPrepareDevices_ConvertedGPU(t *testing.T) {
+	enableVFIOPassthrough(t)
+	allNodes := []string{"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu"}
+
+	t.Run("RequireIommuFD succeeds and unprepare restores the GPU", func(t *testing.T) {
+		state, root := setupConvertibleGPU(t, true, allNodes...)
+		state.cdi = &CDIHandler{}
+
+		pd, err := state.prepareDevices(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+		require.NoError(t, err)
+		require.Len(t, pd, 1)
+		var paths []string
+		for _, n := range pd[0].ContainerEdits.ContainerEdits.DeviceNodes {
+			paths = append(paths, n.Path)
+		}
+		assert.Equal(t, []string{
+			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+		}, paths)
+		assert.Equal(t, consts.VfioDeviceType, state.allocatable["gpu-0-128"].Type())
+		bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
+		require.NoError(t, err)
+		assert.Equal(t, "0000:0d:00.0", string(bound))
+
+		require.NoError(t, state.unprepareDevices("claim-uid", pd))
+		assertRestoredGPU(t, state, "gpu-0-128")
+	})
+
+	t.Run("invalid policy restores the GPU without binding it", func(t *testing.T) {
+		state, root := setupConvertibleGPU(t, true, allNodes...)
+
+		_, err := state.prepareDevices(vfioClaim("gpu-0-128", `{"backendPolicy":"Bogus"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error validating VFIO config")
+		assertRestoredGPU(t, state, "gpu-0-128")
+		bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
+		require.NoError(t, err)
+		assert.Empty(t, bound, "device must not be bound to vfio-pci")
+	})
+
+	t.Run("RequireIommuFD failure after bind restores the GPU", func(t *testing.T) {
+		state, _ := setupConvertibleGPU(t, false, allNodes...)
+
+		_, err := state.prepareDevices(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "IOMMUFD required")
+		assertRestoredGPU(t, state, "gpu-0-128")
+	})
+
+	t.Run("unallocatable later result restores an earlier conversion", func(t *testing.T) {
+		state, _ := setupConvertibleGPU(t, true, allNodes...)
+
+		_, err := state.prepareDevices(vfioClaimDevices("", "gpu-0-128", "no-such-device"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not allocatable")
+		assertRestoredGPU(t, state, "gpu-0-128")
+	})
+}
+
+// newLifecycleState returns a converted-GPU DeviceState wired to a real CDI
+// handler and checkpoint manager in temp dirs, as NewDeviceState would.
+func newLifecycleState(t *testing.T, iommuFDEnabled bool, nodes ...string) (*DeviceState, string, string) {
+	t.Helper()
+	state, root := setupConvertibleGPU(t, iommuFDEnabled, nodes...)
+
+	cdiRoot := t.TempDir()
+	cdi, err := NewCDIHandler(&Config{flags: &Flags{cdiRoot: cdiRoot, nodeName: "node"}})
+	require.NoError(t, err)
+	state.cdi = cdi
+
+	cm, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()))
+	state.checkpointManager = cm
+	return state, root, cdiRoot
+}
+
+func claimSpecFiles(t *testing.T, cdiRoot string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(cdiRoot)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestPrepareUnprepare_VfioLifecycle drives Prepare and Unprepare end to end:
+// claim decode, GPU->VFIO conversion, CDI spec file, checkpoint, idempotent
+// re-prepare, and cleanup.
+func TestPrepareUnprepare_VfioLifecycle(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, cdiRoot := newLifecycleState(t, true,
+		"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu")
+	claim := vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`)
+
+	devices, err := state.Prepare(claim)
+	require.NoError(t, err)
+	require.Len(t, devices, 1)
+	assert.Equal(t, "gpu-0-128", devices[0].DeviceName)
+
+	files := claimSpecFiles(t, cdiRoot)
+	require.Len(t, files, 1)
+	spec, err := cdiapi.ReadSpec(filepath.Join(cdiRoot, files[0]), 0)
+	require.NoError(t, err)
+	require.Len(t, spec.Devices, 1)
+	var paths []string
+	for _, n := range spec.Devices[0].ContainerEdits.DeviceNodes {
+		paths = append(paths, n.Path)
+	}
+	assert.Equal(t, []string{
+		filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+	}, paths)
+
+	cp := newCheckpoint()
+	require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	assert.Contains(t, cp.V1.PreparedClaims, "claim-uid")
+
+	// A repeated Prepare is served from the checkpoint.
+	again, err := state.Prepare(claim)
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	assert.Equal(t, devices[0].DeviceName, again[0].DeviceName)
+	assert.Equal(t, devices[0].PoolName, again[0].PoolName)
+	assert.Equal(t, devices[0].RequestNames, again[0].RequestNames)
+	assert.Equal(t, devices[0].CdiDeviceIds, again[0].CdiDeviceIds)
+
+	require.NoError(t, state.Unprepare("claim-uid"))
+	assert.Empty(t, claimSpecFiles(t, cdiRoot))
+	cp = newCheckpoint()
+	require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	assert.NotContains(t, cp.V1.PreparedClaims, "claim-uid")
+	assertRestoredGPU(t, state, "gpu-0-128")
+}
+
+// TestPrepare_CDIWriteFailureRestoresGPU checks that a failure after
+// prepareDevices succeeds still undoes the GPU->VFIO conversion.
+func TestPrepare_CDIWriteFailureRestoresGPU(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions are not enforced for root")
+	}
+	enableVFIOPassthrough(t)
+	state, _, cdiRoot := newLifecycleState(t, true,
+		"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu")
+	require.NoError(t, os.Chmod(cdiRoot, 0500))
+	t.Cleanup(func() { _ = os.Chmod(cdiRoot, 0700) })
+
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"PreferIommuFD"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CDI spec file")
+	assertRestoredGPU(t, state, "gpu-0-128")
 }
