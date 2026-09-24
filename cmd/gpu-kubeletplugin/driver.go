@@ -43,6 +43,7 @@ import (
 	"sort"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
@@ -166,6 +167,9 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 	for _, gpuIndex := range d.partitionableGPUs {
 		counterSets = append(counterSets, buildMutexCounterSet(gpuIndex))
 	}
+	// Non-partitionable GPUs and VFIO devices consume their family's counter
+	// sets (vf-slots, sibling exclusion) in this mode too, so publish them.
+	counterSets = append(counterSets, d.collectCounterSets()...)
 
 	// Build device list. Snapshot under the partition-state lock so reads of the
 	// dynamically-updated per-device Taints field are synchronized with writes.
@@ -260,31 +264,50 @@ func maxDevicesPerSlice(devices []resourceapi.Device) int {
 	return resourceapi.ResourceSliceMaxDevices
 }
 
+// collectCounterSets returns the KEP-4815 counter sets consumed by the
+// compute and VFIO devices, one per device family, sorted by name. Each set
+// merges the counters its devices consume (see deviceCounters), so it always
+// declares every counter a device references.
 func (d *driver) collectCounterSets() []resourceapi.CounterSet {
-	counterSetsByPF := make(map[string]*resourceapi.CounterSet)
+	sets := make(map[string]map[string]int64)
 	for _, device := range d.state.allocatable {
-		var cs *resourceapi.CounterSet
-		var parentPF string
+		var parentPF, pciAddr string
+		var totalVFs int
+		var isVF, siblingExclusive bool
 		switch device.Type() {
 		case consts.VfioDeviceType:
-			cs = device.Vfio.GetSharedCounterSet()
-			parentPF = device.Vfio.ParentPFAddress
+			v := device.Vfio
+			parentPF, pciAddr, totalVFs, isVF, siblingExclusive = v.ParentPFAddress, v.PCIAddress, v.TotalVFs, v.IsVF, v.siblingExclusive
 		case consts.AmdGpuDeviceType:
-			cs = getSharedCounterSet(device.AmdGpu.ParentPFAddress, device.AmdGpu.TotalVFs)
-			parentPF = device.AmdGpu.ParentPFAddress
+			g := device.AmdGpu
+			parentPF, pciAddr, totalVFs, isVF, siblingExclusive = g.ParentPFAddress, g.PCIAddress, g.TotalVFs, g.IsVF, g.siblingExclusive
+		default:
+			continue
 		}
-		if cs != nil {
-			counterSetsByPF[parentPF] = cs
+		_, capacity := deviceCounters(parentPF, pciAddr, totalVFs, isVF, siblingExclusive)
+		if len(capacity) == 0 {
+			continue
+		}
+		name := counterSetName(counterFamily(parentPF, pciAddr))
+		if sets[name] == nil {
+			sets[name] = make(map[string]int64)
+		}
+		for counter, value := range capacity {
+			sets[name][counter] = value
 		}
 	}
-	addrs := make([]string, 0, len(counterSetsByPF))
-	for addr := range counterSetsByPF {
-		addrs = append(addrs, addr)
+	names := make([]string, 0, len(sets))
+	for name := range sets {
+		names = append(names, name)
 	}
-	sort.Strings(addrs)
-	result := make([]resourceapi.CounterSet, 0, len(addrs))
-	for _, addr := range addrs {
-		result = append(result, *counterSetsByPF[addr])
+	sort.Strings(names)
+	result := make([]resourceapi.CounterSet, 0, len(names))
+	for _, name := range names {
+		counters := make(map[string]resourceapi.Counter, len(sets[name]))
+		for counter, value := range sets[name] {
+			counters[counter] = resourceapi.Counter{Value: *resource.NewQuantity(value, resource.BinarySI)}
+		}
+		result = append(result, resourceapi.CounterSet{Name: name, Counters: counters})
 	}
 	return result
 }
