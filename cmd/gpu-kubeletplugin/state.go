@@ -97,7 +97,7 @@ type DeviceState struct {
 	allocatable          AllocatableDevices
 	checkpointManager    checkpointmanager.CheckpointManager
 	vfioManager          *VfioPciManager
-	claimVfioConversions map[string]*AmdGpuInfo
+	claimVfioConversions map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU
 	partitionState       *PartitionState
 	driver               *driver // back-reference for re-publishing resources
 	syntheticPartition   bool    // whether synthetic-partition mode is enabled
@@ -541,9 +541,10 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
 
-	// Track per-claim VFIO conversions so the long-lived allocatable entry
-	// stays immutable. Restored on unprepare or rollback.
-	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
+	// Record GPU->VFIO conversions per claim, so the original GPU can be
+	// restored on unprepare or rollback. Records are keyed by claim UID and
+	// are never reset here: other claims may still hold converted devices.
+	claimUID := string(claim.UID)
 
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
@@ -595,7 +596,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
-						s.claimVfioConversions[result.Device] = allocDev.AmdGpu
+						s.recordVfioConversion(claimUID, result.Device, allocDev.AmdGpu)
 						allocDev.Vfio = vfioInfo
 						allocDev.AmdGpu = nil
 						isVFIO = true
@@ -666,7 +667,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
 							}
 						}
-						s.restoreFromVfio(name)
+						s.restoreFromVfio(claimUID, name)
 					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
@@ -680,7 +681,6 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 
 	// Walk through each config and its associated device allocation results
 	// and construct the list of prepared devices to return.
-	claimUID := string(claim.UID)
 	var preparedDevices PreparedDevices
 	for _, results := range configResultsMap {
 		for _, result := range results {
@@ -724,18 +724,30 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 			if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
 				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
 			} else {
-				s.restoreFromVfio(device.DeviceName)
+				s.restoreFromVfio(claimUID, device.DeviceName)
 			}
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (s *DeviceState) restoreFromVfio(deviceName string) {
+// recordVfioConversion notes that deviceName was converted from original to
+// VFIO for claimUID.
+func (s *DeviceState) recordVfioConversion(claimUID, deviceName string, original *AmdGpuInfo) {
 	if s.claimVfioConversions == nil {
-		return
+		s.claimVfioConversions = make(map[string]map[string]*AmdGpuInfo)
 	}
-	original, ok := s.claimVfioConversions[deviceName]
+	if s.claimVfioConversions[claimUID] == nil {
+		s.claimVfioConversions[claimUID] = make(map[string]*AmdGpuInfo)
+	}
+	s.claimVfioConversions[claimUID][deviceName] = original
+}
+
+// restoreFromVfio swaps a device claimUID converted to VFIO back to its
+// original GPU and drops the record. It is a no-op for devices the claim did
+// not convert, such as pre-bound VFIO devices.
+func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
+	original, ok := s.claimVfioConversions[claimUID][deviceName]
 	if !ok {
 		return
 	}
@@ -744,7 +756,10 @@ func (s *DeviceState) restoreFromVfio(deviceName string) {
 		allocDev.Vfio = nil
 		klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
 	}
-	delete(s.claimVfioConversions, deviceName)
+	delete(s.claimVfioConversions[claimUID], deviceName)
+	if len(s.claimVfioConversions[claimUID]) == 0 {
+		delete(s.claimVfioConversions, claimUID)
+	}
 }
 
 // getDeviceAttrs gets the major, minor, type, and permissions for a given device path.

@@ -294,4 +294,36 @@ func TestDriver_ConcurrentPrepareUnprepareAndPublish(t *testing.T) {
 	}()
 	wg.Wait()
 	assert.Equal(t, int64(gpus*rounds), publishes.Load())
+
+	// Every claim was released, so every GPU is back to its original entry
+	// type, including the compute GPUs other claims' prepares ran between.
+	for i := 0; i < gpus; i++ {
+		assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable[fmt.Sprintf("gpu-%d-%d", i, 128+i)].Type())
+		assert.Equal(t, consts.VfioDeviceType, state.allocatable[fmt.Sprintf("gpu-vfio-%d", i)].Type())
+	}
+	assert.Empty(t, state.claimVfioConversions)
+}
+
+// TestConversions_SurviveOtherClaims converts a compute GPU for claim A,
+// prepares claim B (converting another GPU) before A is released, and checks
+// that releasing A still restores its GPU's compute entry.
+func TestConversions_SurviveOtherClaims(t *testing.T) {
+	setVFIOPassthrough(t, true)
+	state, _, _ := newDualEntryState(t, 2)
+
+	_, err := state.Prepare(convertClaim("claim-a", "gpu-0-128"))
+	require.NoError(t, err)
+	_, err = state.Prepare(convertClaim("claim-b", "gpu-1-129"))
+	require.NoError(t, err)
+	require.Equal(t, consts.VfioDeviceType, state.allocatable["gpu-0-128"].Type())
+
+	require.NoError(t, state.Unprepare("claim-a"))
+	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(), "claim A's GPU must be restored")
+	assert.Equal(t, consts.VfioDeviceType, state.allocatable["gpu-1-129"].Type(), "claim B's GPU stays converted")
+	assert.NotContains(t, state.claimVfioConversions, "claim-a")
+	assert.Contains(t, state.claimVfioConversions["claim-b"], "gpu-1-129")
+
+	require.NoError(t, state.Unprepare("claim-b"))
+	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-1-129"].Type())
+	assert.Empty(t, state.claimVfioConversions)
 }
