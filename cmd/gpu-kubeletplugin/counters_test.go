@@ -197,6 +197,20 @@ func TestSiblingExclusion_Counters(t *testing.T) {
 		assert.Contains(t, sets[0].Counters, "fn-0000-0a-00-0")
 	})
 
+	t.Run("compute VF with an independently discovered VFIO entry", func(t *testing.T) {
+		// Not produced by discovery today (dual-entry siblings are only built
+		// for !isVF GPUs, and GetVFMapping skips VFs already bound to amdgpu),
+		// but markSiblingPairs must still exclude two entries that share a VF's
+		// own PCI address, regardless of IsVF, per review comment 4091934378.
+		const vf = "0000:0b:00.1"
+		pool := dualEntryPool(AllocatableDevices{
+			"gpu-1-129":  {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
+			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true, Index: 1}},
+		})
+		assert.False(t, canAllocateTogether(t, pool, "gpu-1-129", "gpu-vfio-1"),
+			"a VF's compute and VFIO entries must be mutually exclusive, keyed by the VF's own PCI address")
+	})
+
 	t.Run("GPU without a VFIO entry consumes nothing", func(t *testing.T) {
 		pool := dualEntryPool(AllocatableDevices{
 			"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
