@@ -285,6 +285,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 
 	preparedDevices, err := s.prepareDevices(claim)
 	if err != nil {
+		s.rollbackVfioConversions(claimUID)
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -292,6 +293,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		s.rollbackVfioConversions(claimUID)
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -313,6 +315,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
+		s.rollbackVfioConversions(claimUID)
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
@@ -572,6 +575,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 				}
 				if !isVFIO {
 					if allocDev.AmdGpu != nil {
+						if s.vfioManager == nil {
+							return nil, fmt.Errorf("VFIO manager not available for device %s", result.Device)
+						}
 						physfn := filepath.Join(amdgpu.PCIDevicePath, allocDev.AmdGpu.PCIAddress, "physfn")
 						_, physfnErr := os.Lstat(physfn)
 						isVF := physfnErr == nil
@@ -663,8 +669,13 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 					}
 					for _, name := range configuredNames {
 						if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil {
+							if s.vfioManager == nil {
+								klog.Warningf("Rollback: VFIO manager unavailable for %s", name)
+								continue
+							}
 							if unconfigErr := s.vfioManager.Unconfigure(dev.Vfio); unconfigErr != nil {
 								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
+								continue
 							}
 						}
 						s.restoreFromVfio(claimUID, name)
@@ -759,6 +770,30 @@ func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
 	delete(s.claimVfioConversions[claimUID], deviceName)
 	if len(s.claimVfioConversions[claimUID]) == 0 {
 		delete(s.claimVfioConversions, claimUID)
+	}
+}
+
+// rollbackVfioConversions undoes conversions made while preparing a claim
+// before the claim has been checkpointed successfully. The logical DRA state
+// is restored only after the host device has been successfully unconfigured;
+// otherwise a failed rollback would falsely advertise an AMDGPU device while
+// the host is still bound to vfio-pci.
+func (s *DeviceState) rollbackVfioConversions(claimUID string) {
+	for deviceName := range s.claimVfioConversions[claimUID] {
+		allocDev, exists := s.allocatable[deviceName]
+		if !exists || allocDev.Vfio == nil {
+			s.restoreFromVfio(claimUID, deviceName)
+			continue
+		}
+		if s.vfioManager == nil {
+			klog.Warningf("Rollback: VFIO manager unavailable for %s", deviceName)
+			continue
+		}
+		if err := s.vfioManager.Unconfigure(allocDev.Vfio); err != nil {
+			klog.Warningf("Rollback: failed to unconfigure %s: %v", allocDev.Vfio.PCIAddress, err)
+			continue
+		}
+		s.restoreFromVfio(claimUID, deviceName)
 	}
 }
 

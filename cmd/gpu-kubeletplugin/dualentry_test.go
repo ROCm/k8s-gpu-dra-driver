@@ -220,6 +220,52 @@ func TestPrepareUnprepare_DirectVFIOSibling(t *testing.T) {
 	assert.Contains(t, state.allocatable, "gpu-vfio-0")
 }
 
+func TestRollbackVfioConversions(t *testing.T) {
+	root := setupFakeVfioSysfs(t)
+	pci := gpuPCI(0)
+	createPCIDevice(t, root, pci, consts.VFIODriverName)
+	createDriverDir(t, root, consts.VFIODriverName)
+	createDriverDir(t, root, consts.AMDGPUDriverName)
+
+	original := &AmdGpuInfo{PCIAddress: pci, cardIndex: 0, renderIndex: 128}
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": {Vfio: &AmdGpuVFIOInfo{
+				PCIAddress:         pci,
+				preConfigureDriver: consts.AMDGPUDriverName,
+			}},
+		},
+		claimVfioConversions: map[string]map[string]*AmdGpuInfo{
+			"claim-uid": {"gpu-0-128": original},
+		},
+		vfioManager: &VfioPciManager{},
+	}
+
+	state.rollbackVfioConversions("claim-uid")
+
+	allocDev := state.allocatable["gpu-0-128"]
+	assert.Same(t, original, allocDev.AmdGpu)
+	assert.Nil(t, allocDev.Vfio)
+	assert.Empty(t, state.claimVfioConversions)
+	bindContent, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers", consts.AMDGPUDriverName, "bind"))
+	require.NoError(t, err)
+	assert.Equal(t, pci, string(bindContent))
+}
+
+func TestPrepareDevicesWithoutVfioManagerDoesNotConvert(t *testing.T) {
+	setVFIOPassthrough(t, true)
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: gpuPCI(0), cardIndex: 0, renderIndex: 128}},
+		},
+	}
+
+	_, err := state.prepareDevices(convertClaim("claim-uid", "gpu-0-128"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VFIO manager not available")
+	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type())
+}
+
 func TestPrepareDevices_VFIODeviceWithGateDisabled(t *testing.T) {
 	setVFIOPassthrough(t, false)
 	state, _, _ := newDualEntryState(t, 1)
