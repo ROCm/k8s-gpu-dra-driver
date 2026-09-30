@@ -35,7 +35,7 @@ func TestCheckpointPartitionFieldsOmittedWhenUnset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, field := range []string{"activeMemoryMode", "gpuComputeModes", "memoryReload", "assignedSlots"} {
+	for _, field := range []string{"activeMemoryMode", "gpuComputeModes", "memoryReload", "assignedSlots", "vfioConversions"} {
 		var decoded map[string]interface{}
 		if err := json.Unmarshal(out, &decoded); err != nil {
 			t.Fatal(err)
@@ -80,5 +80,30 @@ func TestCheckpointRoundTripWithPartitionState(t *testing.T) {
 	}
 	if got.V1.AssignedSlots[0]["claim-a/req1/gpu-0-cpx-nps4/"] != 1 {
 		t.Error("slot assignment did not survive the round trip")
+	}
+}
+
+// TestCheckpointRoundTripWithVfioConversions verifies GPU->VFIO conversion
+// records survive a write/read cycle with a valid checksum.
+func TestCheckpointRoundTripWithVfioConversions(t *testing.T) {
+	cp := newCheckpoint()
+	cp.V1.VfioConversions = map[string]map[string]*VfioConversionRecord{
+		"claim-a": {"gpu-0-128": {PCIAddress: "0000:0d:00.0", IOMMUGroup: "42", CardIndex: 0, RenderIndex: 128}},
+	}
+
+	data, err := cp.MarshalCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := &Checkpoint{}
+	if err := got.UnmarshalCheckpoint(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := got.VerifyChecksum(); err != nil {
+		t.Fatalf("checksum verification failed on round trip: %v", err)
+	}
+	rec := got.V1.VfioConversions["claim-a"]["gpu-0-128"]
+	if rec == nil || rec.PCIAddress != "0000:0d:00.0" || rec.RenderIndex != 128 || rec.IOMMUGroup != "42" {
+		t.Fatalf("conversion record not preserved: %+v", rec)
 	}
 }
