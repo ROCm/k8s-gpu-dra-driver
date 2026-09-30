@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 
@@ -42,6 +43,12 @@ type AmdGpuInfo struct {
 	ComputeUnits     int
 	SimdUnits        int
 	NumaNode         int
+	ParentPFAddress  string
+	TotalVFs         int
+	IsVF             bool
+	// siblingExclusive is set when this GPU also has a type=vfio entry; both
+	// entries then consume the function's exclusion counter.
+	siblingExclusive bool
 	cardIndex        int // unexported: for CanonicalName and CDI path derivation
 	renderIndex      int // unexported: for CanonicalName and CDI path derivation
 	pcieRootAttr     deviceattribute.DeviceAttribute
@@ -90,8 +97,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive),
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"memory":       {Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)},
 			"computeUnits": {Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)},
@@ -100,7 +108,81 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 }
 
-// AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
+// KEP-4815 counters.
+//
+// Counters live in one counter set per PCI device family: the parent PF for
+// SR-IOV functions, or the GPU itself otherwise. A family set holds:
+//   - vf-slots (capacity TotalVFs) when the PF supports SR-IOV: a VF entry
+//     consumes one slot and a PF entry consumes all of them, so PF and VF
+//     allocations exclude each other;
+//   - fn-<bdf> (capacity 1) for each PCI function advertised both as a compute
+//     GPU and as a VFIO device. Both entries consume it, so the scheduler can
+//     allocate at most one of them. This exclusion is enforced at allocation
+//     time; nothing has to be withdrawn from the ResourceSlice afterwards.
+
+// VFSlotCounterName is the per-PF counter that bounds VF allocations.
+const VFSlotCounterName = "vf-slots"
+
+// functionCounterName names the capacity-1 exclusion counter shared by the
+// compute and VFIO entries of one PCI function.
+func functionCounterName(pciAddr string) string {
+	return "fn-" + pciAddrToDNSLabel(pciAddr)
+}
+
+// counterFamily returns the address whose counter set holds a device's
+// counters: its parent PF when known, otherwise the device itself.
+func counterFamily(parentPFAddress, pciAddress string) string {
+	if parentPFAddress != "" {
+		return parentPFAddress
+	}
+	return pciAddress
+}
+
+// counterSetName names the counter set of a device family.
+func counterSetName(familyAddr string) string {
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(familyAddr))
+}
+
+// deviceCounters returns, for one advertised device, the amount it consumes
+// of each counter in its family's set, and the capacity the set must publish
+// for each of those counters. Both maps are empty when the device consumes
+// nothing.
+func deviceCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) (consumed, capacity map[string]int64) {
+	consumed = make(map[string]int64)
+	capacity = make(map[string]int64)
+	if parentPFAddress != "" && totalVFs > 0 {
+		capacity[VFSlotCounterName] = int64(totalVFs)
+		consumed[VFSlotCounterName] = int64(totalVFs)
+		if isVF {
+			consumed[VFSlotCounterName] = 1
+		}
+	}
+	if siblingExclusive {
+		name := functionCounterName(pciAddress)
+		capacity[name] = 1
+		consumed[name] = 1
+	}
+	return consumed, capacity
+}
+
+// consumesCounters returns the ConsumesCounters of one advertised device.
+func consumesCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) []resourceapi.DeviceCounterConsumption {
+	consumed, _ := deviceCounters(parentPFAddress, pciAddress, totalVFs, isVF, siblingExclusive)
+	if len(consumed) == 0 {
+		return nil
+	}
+	counters := make(map[string]resourceapi.Counter, len(consumed))
+	for name, amount := range consumed {
+		counters[name] = resourceapi.Counter{Value: *resource.NewQuantity(amount, resource.BinarySI)}
+	}
+	return []resourceapi.DeviceCounterConsumption{{
+		CounterSet: counterSetName(counterFamily(parentPFAddress, pciAddress)),
+		Counters:   counters,
+	}}
+}
+
+// AmdGpuVFIOInfo represents a VFIO passthrough device: a GIM SR-IOV VF, a
+// pre-bound PF, or the type=vfio sibling of a compute GPU.
 type AmdGpuVFIOInfo struct {
 	PCIAddress         string
 	DeviceID           string
@@ -113,11 +195,47 @@ type AmdGpuVFIOInfo struct {
 	pciBusIDAttr       deviceattribute.DeviceAttribute
 	pcieRootAttr       deviceattribute.DeviceAttribute
 	preConfigureDriver string
+	ParentPFAddress    string
+	TotalVFs           int
+	NumVFs             int
+	MemoryBytes        uint64
+	ComputeUnits       int
+	SimdUnits          int
+	// siblingExclusive is set when this device is the type=vfio sibling of a
+	// compute GPU; both entries then consume the function's exclusion counter.
+	siblingExclusive bool
+}
+
+func (d *AmdGpuVFIOInfo) partitionMode() string {
+	switch d.NumVFs {
+	case 1:
+		return "spx"
+	case 2:
+		return "dpx"
+	case 3:
+		return "tpx"
+	case 4:
+		return "qpx"
+	case 8:
+		return "cpx"
+	default:
+		return ""
+	}
 }
 
 // CanonicalName returns the canonical name for this VFIO device
 func (d *AmdGpuVFIOInfo) CanonicalName() string {
 	return fmt.Sprintf("gpu-vfio-%d", d.Index)
+}
+
+func pciAddrToDNSLabel(addr string) string {
+	return strings.NewReplacer(":", "-", ".", "-").Replace(addr)
+}
+
+// GetConsumesCounters returns the KEP-4815 counter consumption for this
+// device (see deviceCounters).
+func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	return consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive)
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU
@@ -144,10 +262,27 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
-	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+	if mode := d.partitionMode(); mode != "" {
+		attributes["partitionProfile"] = resourceapi.DeviceAttribute{StringValue: ptr.To(mode)}
 	}
+	dev := resourceapi.Device{
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: d.GetConsumesCounters(),
+	}
+	if d.MemoryBytes > 0 || d.ComputeUnits > 0 || d.SimdUnits > 0 {
+		dev.Capacity = map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{}
+		if d.MemoryBytes > 0 {
+			dev.Capacity["memory"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)}
+		}
+		if d.ComputeUnits > 0 {
+			dev.Capacity["computeUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)}
+		}
+		if d.SimdUnits > 0 {
+			dev.Capacity["simdUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)}
+		}
+	}
+	return dev
 }
 
 // CanonicalName returns the canonical name for this partition
