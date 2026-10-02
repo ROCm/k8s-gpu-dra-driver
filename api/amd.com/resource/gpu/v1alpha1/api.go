@@ -104,8 +104,9 @@ func (p IOMMUBackendPolicy) Validate() error {
 }
 
 // IOMMUConfig holds parameters for configuring the IOMMU backend for VFIO devices.
-// The IOMMU API device matching the selected backend (/dev/iommu or
-// /dev/vfio/vfio) is always exposed, since VMMs require it to use VFIO.
+// The selected backend device is exposed, and /dev/vfio/vfio is also exposed
+// for IOMMUFD allocations because libvirt still requires the VFIO API control
+// device while preparing a PCI host device.
 type IOMMUConfig struct {
 	BackendPolicy IOMMUBackendPolicy `json:"backendPolicy"`
 }
