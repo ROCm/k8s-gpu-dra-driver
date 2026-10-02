@@ -348,7 +348,7 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 		pd, err := state.prepareDevices(vfioClaim(dev, `{"backendPolicy":"PreferIommuFD"}`))
 		require.NoError(t, err)
 		assert.Equal(t, []string{
-			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/vfio/vfio"), filepath.Join(root, "dev/iommu"),
 		}, nodePaths(pd))
 
 		require.NoError(t, state.unprepareDevices("claim-uid", pd))
@@ -479,7 +479,7 @@ func TestPrepareDevices_ConvertedGPU(t *testing.T) {
 			paths = append(paths, n.Path)
 		}
 		assert.Equal(t, []string{
-			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+			filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/vfio/vfio"), filepath.Join(root, "dev/iommu"),
 		}, paths)
 		assert.Equal(t, consts.VfioDeviceType, state.allocatable["gpu-0-128"].Type())
 		bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
@@ -574,7 +574,7 @@ func TestPrepareUnprepare_VfioLifecycle(t *testing.T) {
 		paths = append(paths, n.Path)
 	}
 	assert.Equal(t, []string{
-		filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/iommu"),
+		filepath.Join(root, "dev/vfio/devices/vfio5"), filepath.Join(root, "dev/vfio/vfio"), filepath.Join(root, "dev/iommu"),
 	}, paths)
 
 	cp := newCheckpoint()
