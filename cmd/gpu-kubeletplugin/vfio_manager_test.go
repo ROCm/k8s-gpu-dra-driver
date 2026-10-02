@@ -520,7 +520,7 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 	legacyNodes := []string{"dev/vfio/42", "dev/vfio/vfio"}
 	iommufdNodes := []string{"dev/vfio/devices/vfio5", "dev/vfio/vfio", "dev/iommu"}
-	allNodes := append(append([]string{}, legacyNodes...), iommufdNodes...)
+	allNodes := []string{"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu"}
 
 	tests := map[string]struct {
 		policy         configapi.IOMMUBackendPolicy
