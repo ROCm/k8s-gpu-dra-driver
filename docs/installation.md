@@ -184,8 +184,8 @@ on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 | Policy | Behavior |
 |--------|----------|
 | `LegacyOnly` (default) | Legacy VFIO: exposes `/dev/vfio/<group>` and `/dev/vfio/vfio` |
-| `PreferIommuFD` | IOMMUFD (`/dev/vfio/devices/vfioN` and `/dev/iommu`) when the host has `/dev/iommu` and the device has a vfio cdev; otherwise falls back to legacy with a warning in the plugin log |
-| `RequireIommuFD` | IOMMUFD only; Prepare fails if it is unavailable. Use when per-device isolation is mandatory, e.g. confidential VMs (SEV-SNP) |
+| `PreferIommuFD` | IOMMUFD (`/dev/vfio/devices/vfioN` and `/dev/iommu`, plus the shared `/dev/vfio/vfio` control device required by libvirt) when the host has `/dev/iommu` and the device has a vfio cdev; otherwise falls back to legacy with a warning in the plugin log |
+| `RequireIommuFD` | IOMMUFD only; Prepare fails if it is unavailable. The shared `/dev/vfio/vfio` control device is still exposed for libvirt compatibility. Use when per-device isolation is mandatory, e.g. confidential VMs (SEV-SNP) |
 
 ```yaml
     config:

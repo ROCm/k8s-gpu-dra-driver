@@ -409,30 +409,44 @@ func TestUseIommuFD(t *testing.T) {
 func TestGetVfioCommonCDIEdits(t *testing.T) {
 	for name, tc := range map[string]struct {
 		useIommuFD bool
-		node       string
+		nodes      []string
 	}{
-		"legacy uses /dev/vfio/vfio": {useIommuFD: false, node: "dev/vfio/vfio"},
-		"iommufd uses /dev/iommu":    {useIommuFD: true, node: "dev/iommu"},
+		"legacy uses /dev/vfio/vfio": {useIommuFD: false, nodes: []string{"dev/vfio/vfio"}},
+		"iommufd uses both API and IOMMUFD devices": {
+			useIommuFD: true,
+			nodes:      []string{"dev/vfio/vfio", "dev/iommu"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := setupFakeVfioSysfs(t)
-			createDevNode(t, root, tc.node)
+			for _, path := range tc.nodes {
+				createDevNode(t, root, path)
+			}
 
 			edits, err := GetVfioCommonCDIEdits(tc.useIommuFD)
 			require.NoError(t, err)
-			require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-			node := edits.ContainerEdits.DeviceNodes[0]
-			assert.Equal(t, filepath.Join(root, tc.node), node.Path)
-			assert.Equal(t, "c", node.Type)
-			assert.Equal(t, int64(1), node.Major)
-			assert.Equal(t, int64(3), node.Minor)
+			require.Len(t, edits.ContainerEdits.DeviceNodes, len(tc.nodes))
+			for i, path := range tc.nodes {
+				node := edits.ContainerEdits.DeviceNodes[i]
+				assert.Equal(t, filepath.Join(root, path), node.Path)
+				assert.Equal(t, "c", node.Type)
+				assert.Equal(t, int64(1), node.Major)
+				assert.Equal(t, int64(3), node.Minor)
+			}
 		})
 
-		t.Run(name+" errors when node missing", func(t *testing.T) {
-			setupFakeVfioSysfs(t)
-			_, err := GetVfioCommonCDIEdits(tc.useIommuFD)
-			assert.Error(t, err)
-		})
+		for _, missing := range tc.nodes {
+			t.Run(name+" errors when "+missing+" is missing", func(t *testing.T) {
+				root := setupFakeVfioSysfs(t)
+				for _, path := range tc.nodes {
+					if path != missing {
+						createDevNode(t, root, path)
+					}
+				}
+				_, err := GetVfioCommonCDIEdits(tc.useIommuFD)
+				assert.Error(t, err)
+			})
+		}
 	}
 }
 
@@ -505,7 +519,7 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 // fails Prepare rather than producing an unusable spec.
 func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 	legacyNodes := []string{"dev/vfio/42", "dev/vfio/vfio"}
-	iommufdNodes := []string{"dev/vfio/devices/vfio5", "dev/iommu"}
+	iommufdNodes := []string{"dev/vfio/devices/vfio5", "dev/vfio/vfio", "dev/iommu"}
 	allNodes := append(append([]string{}, legacyNodes...), iommufdNodes...)
 
 	tests := map[string]struct {

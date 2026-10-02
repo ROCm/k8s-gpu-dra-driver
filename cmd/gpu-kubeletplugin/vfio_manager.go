@@ -309,21 +309,28 @@ func newDeviceNode(path string) (*cdispec.DeviceNode, error) {
 	}, nil
 }
 
-// GetVfioCommonCDIEdits returns CDI edits for the common IOMMU API device.
-// With IOMMUFD: /dev/iommu. With legacy: /dev/vfio/vfio. The container can't
-// use VFIO without it, so a missing node fails Prepare.
+// GetVfioCommonCDIEdits returns CDI edits for the common VFIO/IOMMUFD devices.
+// The VFIO API control device is required by libvirt even when the assigned
+// device itself uses an IOMMUFD cdev. IOMMUFD allocations therefore expose
+// both /dev/vfio/vfio and /dev/iommu; legacy allocations expose only the VFIO
+// API control device. A missing node fails Prepare.
 func GetVfioCommonCDIEdits(useIommuFD bool) (*cdiapi.ContainerEdits, error) {
-	path := filepath.Join(amdgpu.VFIODevicesRoot, "vfio")
+	paths := []string{filepath.Join(amdgpu.VFIODevicesRoot, "vfio")}
 	if useIommuFD {
-		path = amdgpu.IommuDevicePath
+		paths = append(paths, amdgpu.IommuDevicePath)
 	}
-	node, err := newDeviceNode(path)
-	if err != nil {
-		return nil, err
+
+	nodes := make([]*cdispec.DeviceNode, 0, len(paths))
+	for _, path := range paths {
+		node, err := newDeviceNode(path)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
 	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			DeviceNodes: []*cdispec.DeviceNode{node},
+			DeviceNodes: nodes,
 		},
 	}, nil
 }
