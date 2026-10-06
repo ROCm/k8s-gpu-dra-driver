@@ -20,12 +20,33 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
+
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 )
 
 func TestNUMAAttributeForm(t *testing.T) {
 	assert.Equal(t, deviceattribute.ScalarAttribute, numaAttributeForm(false))
 	assert.Equal(t, deviceattribute.ListAttribute, numaAttributeForm(true))
+}
+
+func TestConfiguredNUMAAttributeForm(t *testing.T) {
+	fg := featuregates.FeatureGates()
+	wasEnabled := fg.Enabled(featuregates.DRAListTypeAttributes)
+	restore := "false"
+	if wasEnabled {
+		restore = "true"
+	}
+	t.Cleanup(func() {
+		require.NoError(t, fg.Set(string(featuregates.DRAListTypeAttributes)+"="+restore))
+	})
+
+	require.NoError(t, fg.Set(string(featuregates.DRAListTypeAttributes)+"=false"))
+	assert.Equal(t, deviceattribute.ScalarAttribute, configuredNUMAAttributeForm())
+
+	require.NoError(t, fg.Set(string(featuregates.DRAListTypeAttributes)+"=true"))
+	assert.Equal(t, deviceattribute.ListAttribute, configuredNUMAAttributeForm())
 }
 
 func TestGetMemoryBytes(t *testing.T) {
