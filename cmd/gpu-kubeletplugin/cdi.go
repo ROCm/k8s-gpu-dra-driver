@@ -34,7 +34,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	klog "k8s.io/klog/v2"
@@ -53,7 +52,8 @@ const (
 )
 
 type CDIHandler struct {
-	cache *cdiapi.Cache
+	cache    *cdiapi.Cache
+	nodeName string
 }
 
 func NewCDIHandler(config *Config) (*CDIHandler, error) {
@@ -64,7 +64,8 @@ func NewCDIHandler(config *Config) (*CDIHandler, error) {
 		return nil, fmt.Errorf("unable to create a new CDI cache: %w", err)
 	}
 	handler := &CDIHandler{
-		cache: cache,
+		cache:    cache,
+		nodeName: config.flags.nodeName,
 	}
 
 	return handler, nil
@@ -78,7 +79,7 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 				Name: cdiCommonDeviceName,
 				ContainerEdits: cdispec.ContainerEdits{
 					Env: []string{
-						fmt.Sprintf("KUBERNETES_NODE_NAME=%s", os.Getenv("NODE_NAME")),
+						fmt.Sprintf("KUBERNETES_NODE_NAME=%s", cdi.nodeName),
 						fmt.Sprintf("DRA_RESOURCE_DRIVER_NAME=%s", consts.DriverName),
 					},
 				},
@@ -100,6 +101,23 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 	return cdi.cache.WriteSpec(spec, specName)
 }
 
+// cdiDeviceName builds the CDI device name for one prepared device.
+//
+// The claim UID and device name alone are not unique: a claim may hold several
+// shares of the same synthetic-partition device, which would otherwise produce
+// duplicate CDI device names within a single spec. Appending the partition slot
+// keeps them distinct and names the physical partition the container receives.
+// Devices without a slot (regular GPUs, VFIO) keep the original two-part name.
+//
+// CreateClaimSpecFile and GetClaimDevices must agree on this name, so both go
+// through here.
+func cdiDeviceName(claimUID string, device *PreparedDevice) string {
+	if device.PartitionSlot == nil {
+		return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
+	}
+	return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
+}
+
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {
 	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClass, claimUID)
 
@@ -114,7 +132,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevi
 		claimEdits.Append(device.ContainerEdits)
 
 		cdiDevice := cdispec.Device{
-			Name:           fmt.Sprintf("%s-%s", claimUID, device.DeviceName),
+			Name:           cdiDeviceName(claimUID, device),
 			ContainerEdits: *claimEdits.ContainerEdits,
 		}
 
@@ -135,13 +153,16 @@ func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
 	return cdi.cache.RemoveSpec(specName)
 }
 
-func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []string) []string {
+// GetClaimDevices returns the qualified CDI device names for the given prepared
+// devices. Names are built with cdiDeviceName so they match exactly what
+// CreateClaimSpecFile wrote into the spec.
+func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []*PreparedDevice) []string {
 	cdiDevices := []string{
 		cdiparser.QualifiedName(cdiVendor, cdiClass, cdiCommonDeviceName),
 	}
 
 	for _, device := range devices {
-		cdiDevice := cdiparser.QualifiedName(cdiVendor, cdiClass, fmt.Sprintf("%s-%s", claimUID, device))
+		cdiDevice := cdiparser.QualifiedName(cdiVendor, cdiClass, cdiDeviceName(claimUID, device))
 		cdiDevices = append(cdiDevices, cdiDevice)
 	}
 

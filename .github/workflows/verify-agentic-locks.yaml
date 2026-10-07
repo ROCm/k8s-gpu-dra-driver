@@ -1,0 +1,110 @@
+# Recompiles every agentic workflow and fails if the committed .lock.yml files
+# differ from what the compiler produces.
+#
+# A .lock.yml is a generated artifact, but git treats it as ordinary text. Two
+# pull requests touching different parts of the shared component merge cleanly
+# and produce a blended lock that no compile would ever emit — the .md is
+# correct, the generated file silently is not, and nothing warns. The runtime
+# "Check workflow lock file" step only catches it once the workflow already ran.
+#
+# It also catches a lock compiled against the wrong version of an imported
+# component. The import is pinned by SHA, so a lock built before that pin moved
+# embeds the older component while looking entirely correct.
+#
+# And it catches hand-edits to a .lock.yml (every one of them says DO NOT EDIT).
+#
+# Adapted from ROCm/common-infra-operator's workflow of the same name.
+name: Verify Agentic Locks
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/aw/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Recompile and check for drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Taken from the locks rather than hardcoded here, so a deliberate
+      # compiler upgrade — which rewrites the locks anyway — is self-consistent
+      # in the same pull request instead of needing this file bumped too.
+      - name: Resolve compiler version
+        id: compiler
+        run: |
+          set -euo pipefail
+          versions=$(grep -ho 'compiler_version":"[^"]*"' .github/workflows/*.lock.yml \
+            | sed 's/.*:"//; s/"$//' | sort -u)
+          count=$(printf '%s' "${versions}" | grep -c . || true)
+          if [ "${count}" -ne 1 ]; then
+            echo "::error::Expected exactly one compiler version across the lock files, found: [${versions}]"
+            exit 1
+          fi
+          echo "version=${versions}" >> "$GITHUB_OUTPUT"
+          echo "Recompiling with gh aw ${versions}"
+
+      - name: Install gh aw
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh extension install githubnext/gh-aw --pin "${{ steps.compiler.outputs.version }}"
+
+      # Compiled by name. A bare `gh aw compile` also emits the agentics
+      # maintenance workflow, which this repository has not adopted, and the
+      # extra file would fail the drift check below for the wrong reason.
+      #
+      # Only files opening with `---` are agentic workflows; this directory also
+      # holds a plain README.md, which the compiler would reject.
+      - name: Recompile agentic workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ids=()
+          for f in .github/workflows/*.md; do
+            [ "$(head -n 1 "${f}")" = "---" ] || continue
+            ids+=("$(basename "${f}" .md)")
+          done
+          if [ "${#ids[@]}" -eq 0 ]; then
+            echo "No agentic workflows found."
+            exit 0
+          fi
+          echo "Compiling: ${ids[*]}"
+          gh aw compile "${ids[@]}"
+
+      - name: Fail on drift
+        run: |
+          set -euo pipefail
+
+          # A new .md whose lock was never committed.
+          untracked=$(git ls-files --others --exclude-standard -- '.github/workflows/*.lock.yml')
+          if [ -n "${untracked}" ]; then
+            echo "::error::Lock file generated but not committed:"
+            printf '%s\n' "${untracked}"
+            exit 1
+          fi
+
+          if git diff --quiet -- .github; then
+            echo "Lock files match a fresh compile."
+            exit 0
+          fi
+
+          echo "::error::Committed files do not match a fresh compile. Run 'gh aw compile <workflow-id>' and commit the result."
+          git diff --stat -- .github
+          {
+            echo "### Agentic lock drift"
+            echo
+            echo "These files differ from a fresh compile at \`${{ steps.compiler.outputs.version }}\`:"
+            echo
+            echo '```'
+            git diff --stat -- .github
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
