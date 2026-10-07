@@ -15,7 +15,7 @@
 # docker/Dockerfile.devel
 # Minimal dev image for Makefile targets (build, lint, generate, etc.)
 
-ARG GOLANG_VERSION=1.26.5
+ARG GOLANG_VERSION=1.26.7
 FROM golang:${GOLANG_VERSION}-bookworm
 
 # Basic build tooling; keep it small
@@ -23,7 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl bash make \
  && rm -rf /var/lib/apt/lists/*
 
-ENV CGO_ENABLED=0
+
+# pkg/amdsmi cgo-binds to the vendored libamd_smi (third_party/amd_smi); the
+# golang:*-bookworm base image already ships gcc, so cgo just needs enabling.
+ENV CGO_ENABLED=1
 
 # Pin tool versions
 ARG CT_VERSION=v0.17.0

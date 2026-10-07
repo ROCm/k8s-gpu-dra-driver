@@ -65,7 +65,7 @@ kubectl describe pod <name>
    kubectl get resourceslice <name> -o yaml
    ```
 2. Adjust your CEL selectors to reference only attributes that are present.
-3. Check driver logs for warnings like `VRAM info not available` which indicate fallback values are being used.
+3. Check driver logs for `VRAM info not available ... reporting 0`. The corresponding ResourceSlice keeps the `memory` capacity key with a value of zero. This indicates that VRAM discovery failed; it does not mean that the GPU physically has no memory.
 
 ### ResourceClaim stuck Pending
 
@@ -112,7 +112,7 @@ kubectl describe pod <name>
 - **No dynamic GPU partitioning:** GPUs must be pre-partitioned before driver deployment. The driver discovers existing partitions but does not create, modify, or remove them.
 - **Kubernetes 1.32+ required:** The DRA APIs used by this driver require Kubernetes 1.32 or later. The specific API version (`v1`, `v1beta2`, `v1beta1`) varies by Kubernetes version — the Helm chart auto-detects this.
 - **Sysfs-dependent attributes:** Device attributes are read from sysfs at discovery time. Attributes not exposed by the kernel driver or hardware will not appear in ResourceSlices. Documentation and examples may reference attributes that are not available on all GPU models.
-- **VRAM fallback:** When sysfs does not report VRAM size, the driver uses a default fallback value and logs a warning. The reported memory capacity may not reflect actual hardware in this case.
+- **Unreadable VRAM:** When sysfs does not report a valid VRAM size, the driver publishes `memory: 0` and logs a warning. Memory-aware claims should require a positive capacity behind an existence guard (see the selector example in the driver attributes reference). Restart the driver after correcting the underlying sysfs/driver issue so discovery runs again.
 
 ## Reporting issues
 
@@ -140,3 +140,60 @@ When opening a GitHub issue, include the following information to help us diagno
 - Steps to reproduce
 
 Use the [bug report issue template](https://github.com/ROCm/k8s-gpu-dra-driver/issues/new?template=bug_report.md) for a structured format.
+
+## VFIO passthrough troubleshooting
+
+### No VFIO devices in ResourceSlice
+
+The `VFIOPassthrough` feature gate must be enabled:
+
+```bash
+--feature-gates=VFIOPassthrough=true
+```
+
+Verify with: `kubectl get resourceslices -o json | jq '.items[].spec.devices[].attributes["gpu.amd.com"].type'` — look for `vfio` entries.
+
+### IOMMU not enabled
+
+```bash
+ls /sys/kernel/iommu_groups/
+```
+
+If empty or missing, IOMMU is not enabled. Add `amd_iommu=on` to the kernel
+cmdline and reboot. Without IOMMU, the VFIO manager will not initialize.
+
+### GIM driver not loaded (no VFs discovered)
+
+```bash
+lsmod | grep gim
+ls /sys/bus/pci/drivers/gim/
+```
+
+GIM must be loaded for SR-IOV VF discovery. VFs appear as `virtfn*` symlinks
+under the GIM-managed PF in sysfs.
+
+### vfio_pci module not loaded
+
+```bash
+lsmod | grep vfio_pci
+```
+
+If not loaded: `modprobe vfio_pci`. The driver logs a warning at startup but
+continues without it — pre-bound devices still work, but on-demand binding
+will fail.
+
+### Device stuck on vfio-pci after VM deletion
+
+If `Unconfigure` fails during Unprepare, the device remains bound to `vfio-pci`.
+Check the driver logs for errors:
+
+```bash
+kubectl logs <driver-pod> | grep -i "unconfigure\|unbind"
+```
+
+Manual recovery: unbind from vfio-pci and rebind to the original driver:
+
+```bash
+echo <pci-addr> > /sys/bus/pci/drivers/vfio-pci/unbind
+echo <pci-addr> > /sys/bus/pci/drivers/amdgpu/bind
+```
