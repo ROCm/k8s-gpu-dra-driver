@@ -46,6 +46,7 @@ type AmdGpuInfo struct {
 	renderIndex      int // unexported: for CanonicalName and CDI path derivation
 	pcieRootAttr     deviceattribute.DeviceAttribute
 	pciBusIDAttr     deviceattribute.DeviceAttribute
+	numaNodeAttr     deviceattribute.DeviceAttribute
 }
 
 // AmdPartitionInfo represents a partition of an AMD GPU
@@ -89,6 +90,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
+	if d.numaNodeAttr.Name != "" {
+		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
+	}
 	return resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
@@ -112,6 +116,7 @@ type AmdGpuVFIOInfo struct {
 	IsVF               bool
 	pciBusIDAttr       deviceattribute.DeviceAttribute
 	pcieRootAttr       deviceattribute.DeviceAttribute
+	numaNodeAttr       deviceattribute.DeviceAttribute
 	preConfigureDriver string
 }
 
@@ -143,6 +148,9 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	}
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	}
+	if d.numaNodeAttr.Name != "" {
+		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
 	return resourceapi.Device{
 		Name:       d.CanonicalName(),
@@ -176,6 +184,9 @@ func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 	if d.Parent.pcieRootAttr.Name != "" {
 		attributes[d.Parent.pcieRootAttr.Name] = d.Parent.pcieRootAttr.Value
 	}
+	if d.Parent.numaNodeAttr.Name != "" {
+		attributes[d.Parent.numaNodeAttr.Name] = d.Parent.numaNodeAttr.Value
+	}
 	return resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
@@ -204,6 +215,7 @@ type SyntheticPartitionDevice struct {
 	NumaNode         int
 	pcieRootAttr     deviceattribute.DeviceAttribute
 	pciBusIDAttr     deviceattribute.DeviceAttribute
+	numaNodeAttr     deviceattribute.DeviceAttribute
 	// Taints holds any taints applied to this device (e.g. memory partition conflicts).
 	// This field is set dynamically and may be updated during runtime.
 	Taints []resourceapi.DeviceTaint
@@ -260,6 +272,9 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 	}
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	}
+	if d.numaNodeAttr.Name != "" {
+		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
 
 	// Build partitions capacity entry. For partition types with count > 1,

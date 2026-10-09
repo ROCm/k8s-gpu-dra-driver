@@ -40,6 +40,7 @@ import (
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 )
 
 // A memory capacity of 0 is the unreadable-VRAM sentinel. Both device types must
@@ -65,6 +66,115 @@ func TestZeroMemoryCapacityIsPublished(t *testing.T) {
 			require.True(t, ok)
 			require.True(t, memory.Value.IsZero())
 		})
+	}
+}
+
+func testNUMAAttribute(form deviceattribute.AttributeForm) deviceattribute.DeviceAttribute {
+	value := resourceapi.DeviceAttribute{}
+	if form == deviceattribute.ListAttribute {
+		value.IntValues = []int64{7, 9}
+	} else {
+		node := int64(7)
+		value.IntValue = &node
+	}
+	return deviceattribute.DeviceAttribute{
+		Name:  deviceattribute.StandardDeviceAttributeNUMANode,
+		Value: value,
+	}
+}
+
+func TestDeviceGetDevicePublishesStandardNUMAAttribute(t *testing.T) {
+	devices := []struct {
+		name  string
+		build func(deviceattribute.DeviceAttribute) resourceapi.Device
+	}{
+		{
+			name: "full GPU",
+			build: func(attr deviceattribute.DeviceAttribute) resourceapi.Device {
+				return (&AmdGpuInfo{
+					NumaNode:     7,
+					numaNodeAttr: attr,
+				}).GetDevice()
+			},
+		},
+		{
+			name: "GPU partition",
+			build: func(attr deviceattribute.DeviceAttribute) resourceapi.Device {
+				return (&AmdPartitionInfo{
+					Parent:   &AmdGpuInfo{numaNodeAttr: attr},
+					NumaNode: 7,
+				}).GetDevice()
+			},
+		},
+		{
+			name: "synthetic partition",
+			build: func(attr deviceattribute.DeviceAttribute) resourceapi.Device {
+				return (&SyntheticPartitionDevice{
+					ComputePartition: consts.ComputePartitionCPX,
+					MemoryPartition:  consts.MemoryPartitionNPS4,
+					PartitionCount:   8,
+					NumaNode:         7,
+					numaNodeAttr:     attr,
+				}).GetDevice()
+			},
+		},
+		{
+			name: "VFIO device",
+			build: func(attr deviceattribute.DeviceAttribute) resourceapi.Device {
+				return (&AmdGpuVFIOInfo{
+					NumaNode:     7,
+					numaNodeAttr: attr,
+				}).GetDevice()
+			},
+		},
+	}
+
+	for _, form := range []struct {
+		name string
+		form deviceattribute.AttributeForm
+	}{
+		{name: "scalar", form: deviceattribute.ScalarAttribute},
+		{name: "list", form: deviceattribute.ListAttribute},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			standard := testNUMAAttribute(form.form)
+			for _, tc := range devices {
+				t.Run(tc.name, func(t *testing.T) {
+					device := tc.build(standard)
+					got, ok := device.Attributes[deviceattribute.StandardDeviceAttributeNUMANode]
+					require.True(t, ok, "standard NUMA attribute should be published")
+
+					if form.form == deviceattribute.ListAttribute {
+						require.Nil(t, got.IntValue)
+						require.Equal(t, []int64{7, 9}, got.IntValues)
+					} else {
+						require.NotNil(t, got.IntValue)
+						require.Equal(t, int64(7), *got.IntValue)
+						require.Empty(t, got.IntValues)
+					}
+
+					legacy, ok := device.Attributes["numaNode"]
+					require.True(t, ok, "legacy driver-scoped NUMA attribute should remain")
+					require.NotNil(t, legacy.IntValue)
+					require.Equal(t, int64(7), *legacy.IntValue)
+				})
+			}
+		})
+	}
+}
+
+func TestDeviceGetDeviceOmitsStandardNUMAAttributeWhenUnavailable(t *testing.T) {
+	devices := []resourceapi.Device{
+		(&AmdGpuInfo{}).GetDevice(),
+		(&AmdPartitionInfo{Parent: &AmdGpuInfo{}}).GetDevice(),
+		(&SyntheticPartitionDevice{}).GetDevice(),
+		(&AmdGpuVFIOInfo{}).GetDevice(),
+	}
+
+	for _, device := range devices {
+		if _, ok := device.Attributes[deviceattribute.StandardDeviceAttributeNUMANode]; ok {
+			t.Errorf("device %q published standard NUMA attribute without topology data", device.Name)
+		}
 	}
 }
 
