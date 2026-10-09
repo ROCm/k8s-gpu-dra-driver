@@ -47,13 +47,18 @@ jobs:
       registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
       registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  # Label-gated image build on PRs (build only, no push)
+  # Image build on PRs (build only, no push).
+  # Runs automatically for ROCm org members / collaborators; external
+  # contributors still require the 'ci-run' label.
   pr-build:
     name: PR Build
     if: >-
       github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'ci-run') &&
-      github.repository == 'ROCm/k8s-gpu-dra-driver'
+      github.repository == 'ROCm/k8s-gpu-dra-driver' &&
+      (
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) ||
+        contains(github.event.pull_request.labels.*.name, 'ci-run')
+      )
     uses: ROCm/common-infra-operator/.github/workflows/image-build-push.yaml@main
     with:
       image-registry: docker.io/amdpsdo

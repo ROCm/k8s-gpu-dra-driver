@@ -45,7 +45,8 @@ const (
 	GroupName = "gpu.resource.amd.com"
 	Version   = "v1alpha1"
 
-	GpuConfigKind = "GpuConfig"
+	GpuConfigKind        = "GpuConfig"
+	VfioDeviceConfigKind = "VfioDeviceConfig"
 )
 
 // Decoder implements a decoder for objects in this API group.
@@ -55,7 +56,6 @@ var Decoder runtime.Decoder
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // GpuConfig holds the set of parameters for configuring a GPU.
-// No configs are supported yet.
 type GpuConfig struct {
 	metav1.TypeMeta `json:",inline"`
 }
@@ -78,6 +78,36 @@ func (c *GpuConfig) Normalize() error {
 	return nil
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// VfioDeviceConfig holds configuration for VFIO passthrough devices.
+type VfioDeviceConfig struct {
+	metav1.TypeMeta `json:",inline"`
+}
+
+// DefaultVfioDeviceConfig provides the default VFIO configuration.
+func DefaultVfioDeviceConfig() *VfioDeviceConfig {
+	return &VfioDeviceConfig{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: GroupName + "/" + Version,
+			Kind:       VfioDeviceConfigKind,
+		},
+	}
+}
+
+// Normalize updates a VfioDeviceConfig with implied default values.
+func (c *VfioDeviceConfig) Normalize() error {
+	if c == nil {
+		return fmt.Errorf("config is 'nil'")
+	}
+	return nil
+}
+
+// Validate checks a VfioDeviceConfig for invalid settings.
+func (c *VfioDeviceConfig) Validate() error {
+	return nil
+}
+
 func init() {
 	// Create a new scheme and add our types to it. If at some point in the
 	// future a new version of the configuration API becomes necessary, then
@@ -90,6 +120,7 @@ func init() {
 	}
 	scheme.AddKnownTypes(schemeGroupVersion,
 		&GpuConfig{},
+		&VfioDeviceConfig{},
 	)
 	metav1.AddToGroupVersion(scheme, schemeGroupVersion)
 
