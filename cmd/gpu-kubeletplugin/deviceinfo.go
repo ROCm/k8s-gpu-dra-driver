@@ -42,10 +42,13 @@ type AmdGpuInfo struct {
 	ComputeUnits     int
 	SimdUnits        int
 	NumaNode         int
-	cardIndex        int // unexported: for CanonicalName and CDI path derivation
-	renderIndex      int // unexported: for CanonicalName and CDI path derivation
-	pcieRootAttr     deviceattribute.DeviceAttribute
-	pciBusIDAttr     deviceattribute.DeviceAttribute
+	// AllowSharing publishes the GPU as shareable by several claims through
+	// consumable capacity (WholeGPUSharing feature gate).
+	AllowSharing bool
+	cardIndex    int // unexported: for CanonicalName and CDI path derivation
+	renderIndex  int // unexported: for CanonicalName and CDI path derivation
+	pcieRootAttr deviceattribute.DeviceAttribute
+	pciBusIDAttr deviceattribute.DeviceAttribute
 }
 
 // AmdPartitionInfo represents a partition of an AMD GPU
@@ -89,7 +92,7 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
-	return resourceapi.Device{
+	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
@@ -98,6 +101,28 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 			"simdUnits":    {Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)},
 		},
 	}
+
+	// Sharing needs a known VRAM size: with memory published as the 0 sentinel,
+	// a claim that requests no memory would consume nothing and any number of
+	// "exclusive" claims could land on the same GPU.
+	if d.AllowSharing && d.MemoryBytes > 0 {
+		device.AllowMultipleAllocations = ptr.To(true)
+		// memory keeps no RequestPolicy: a claim that does not request memory
+		// consumes the full value, so a plain claim still gets the GPU to itself.
+		// Compute and SIMD units are time-shared, not divided, so a claim consumes
+		// none of them unless it asks; otherwise a memory-only claim would take
+		// all units by default and nothing could share the GPU.
+		zero := resource.MustParse("0")
+		for _, name := range []resourceapi.QualifiedName{"computeUnits", "simdUnits"} {
+			c := device.Capacity[name]
+			c.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+				Default:    ptr.To(zero),
+				ValidRange: &resourceapi.CapacityRequestPolicyRange{Min: ptr.To(zero)},
+			}
+			device.Capacity[name] = c
+		}
+	}
+	return device
 }
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough

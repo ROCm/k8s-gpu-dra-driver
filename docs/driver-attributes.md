@@ -71,6 +71,46 @@ is precautionary here and matters mainly for capacities other drivers may leave
 unset. Devices with unknown VRAM remain allocatable to claims which do not
 reference memory.
 
+### Sharing a whole GPU
+
+With the `WholeGPUSharing` feature gate enabled, full GPUs are published with
+`allowMultipleAllocations: true`, so several ResourceClaims can be allocated the
+same GPU through Kubernetes consumable capacity (`DRAConsumableCapacity`, beta
+and on by default since Kubernetes 1.36). A claim requests part of the GPU's
+`memory` capacity, and the scheduler only places it on a GPU whose remaining
+memory covers the request:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-4gi
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.amd.com
+          capacity:
+            requests:
+              memory: 4Gi
+```
+
+- A claim that does not request `memory` consumes all of it, so existing claims
+  keep exclusive access to the GPU and cannot be placed on a GPU that is already
+  shared.
+- `computeUnits` and `simdUnits` carry a request policy that defaults to `0`:
+  compute is time-shared between processes rather than divided, so a claim
+  consumes none of these unless it requests them.
+- A GPU whose VRAM could not be read (`memory` of `0`) is never published as
+  shareable.
+- This is scheduler accounting only. The driver does not limit how much VRAM
+  or compute a container actually uses, and processes on a shared GPU are not
+  isolated from each other's memory pressure: a workload that allocates more
+  than it requested can cause out-of-memory errors in the others. Size each
+  workload to stay within its request.
+
 ## Attributes for a partition
 
 The following attributes are attached to each GPU partition device:

@@ -717,6 +717,70 @@ func TestAmdGpuInfo_GetDevice_TypeAttribute(t *testing.T) {
 	}
 }
 
+// ---- Tests for AmdGpuInfo.GetDevice (WholeGPUSharing) ----
+
+func newSharingTestGPU(allowSharing bool, memoryBytes uint64) *AmdGpuInfo {
+	return &AmdGpuInfo{
+		cardIndex:    1,
+		renderIndex:  128,
+		DeviceID:     "0x747e",
+		MemoryBytes:  memoryBytes,
+		ComputeUnits: 60,
+		SimdUnits:    120,
+		AllowSharing: allowSharing,
+	}
+}
+
+func TestAmdGpuInfo_GetDevice_SharingDisabledByDefault(t *testing.T) {
+	d := newSharingTestGPU(false, 16*1024*1024*1024).GetDevice()
+
+	require.Nil(t, d.AllowMultipleAllocations)
+	for name, c := range d.Capacity {
+		require.Nil(t, c.RequestPolicy, "capacity %s", name)
+	}
+}
+
+func TestAmdGpuInfo_GetDevice_SharingEnabled(t *testing.T) {
+	d := newSharingTestGPU(true, 16*1024*1024*1024).GetDevice()
+
+	require.NotNil(t, d.AllowMultipleAllocations)
+	require.True(t, *d.AllowMultipleAllocations)
+
+	// memory has no RequestPolicy, so a claim that does not request memory
+	// consumes the whole GPU and stays exclusive.
+	memory, ok := d.Capacity["memory"]
+	require.True(t, ok)
+	require.Nil(t, memory.RequestPolicy)
+	require.Equal(t, int64(16*1024*1024*1024), memory.Value.Value())
+
+	// Compute and SIMD units default to 0 so a memory-only request does not
+	// consume them all.
+	for _, name := range []resourceapi.QualifiedName{"computeUnits", "simdUnits"} {
+		c, ok := d.Capacity[name]
+		require.True(t, ok, "capacity %s", name)
+		require.NotNil(t, c.RequestPolicy, "capacity %s", name)
+		require.NotNil(t, c.RequestPolicy.Default, "capacity %s", name)
+		require.True(t, c.RequestPolicy.Default.IsZero(), "capacity %s", name)
+		require.NotNil(t, c.RequestPolicy.ValidRange, "capacity %s", name)
+		require.True(t, c.RequestPolicy.ValidRange.Min.IsZero(), "capacity %s", name)
+	}
+	computeUnits := d.Capacity["computeUnits"].Value
+	simdUnits := d.Capacity["simdUnits"].Value
+	require.Equal(t, int64(60), computeUnits.Value())
+	require.Equal(t, int64(120), simdUnits.Value())
+}
+
+// With unreadable VRAM (the 0 sentinel) a plain claim would consume 0 memory, so
+// sharing must stay off or any number of plain claims could land on the GPU.
+func TestAmdGpuInfo_GetDevice_SharingNotPublishedWithZeroMemory(t *testing.T) {
+	d := newSharingTestGPU(true, 0).GetDevice()
+
+	require.Nil(t, d.AllowMultipleAllocations)
+	for name, c := range d.Capacity {
+		require.Nil(t, c.RequestPolicy, "capacity %s", name)
+	}
+}
+
 // ---- Tests for AmdPartitionInfo.GetDevice (type attribute) ----
 
 func TestAmdPartitionInfo_GetDevice_TypeAttribute(t *testing.T) {
