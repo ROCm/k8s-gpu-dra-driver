@@ -25,7 +25,7 @@
 : ${APIS:=gpu/v1alpha1}
 
 # Toolchain
-: ${GOLANG_VERSION:=1.26.7}
+: ${GOLANG_VERSION:=1.27.2}
 : ${BUILDIMAGE_TAG:=v1.1}
 
 # AMD SMI (theRock) — prebuilt libamd_smi is vendored under third_party/amd_smi.
