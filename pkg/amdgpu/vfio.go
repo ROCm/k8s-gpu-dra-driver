@@ -35,6 +35,8 @@ var (
 	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
 	VFIOModulePath       = "/sys/module/vfio_pci"
 	VFIODevicesRoot      = "/dev/vfio"
+	VFIODevicesPath      = "/dev/vfio/devices"
+	IommuDevicePath      = "/dev/iommu"
 )
 
 // SetSysfsRoot rebases all sysfs/devfs path variables under the given root.
@@ -48,6 +50,8 @@ func SetSysfsRoot(root string) {
 	KernelIOMMUGroupPath = filepath.Join(root, "sys/kernel/iommu_groups")
 	VFIOModulePath = filepath.Join(root, "sys/module/vfio_pci")
 	VFIODevicesRoot = filepath.Join(root, "dev/vfio")
+	VFIODevicesPath = filepath.Join(root, "dev/vfio/devices")
+	IommuDevicePath = filepath.Join(root, "dev/iommu")
 }
 
 // ResetSysfsRoot restores all path variables to their real system defaults.
@@ -60,6 +64,8 @@ func ResetSysfsRoot() {
 	KernelIOMMUGroupPath = "/sys/kernel/iommu_groups"
 	VFIOModulePath = "/sys/module/vfio_pci"
 	VFIODevicesRoot = "/dev/vfio"
+	VFIODevicesPath = "/dev/vfio/devices"
+	IommuDevicePath = "/dev/iommu"
 }
 
 // PFInfo holds metadata for a Physical Function already bound to vfio-pci
@@ -271,6 +277,29 @@ func GetPCIDriver(pciAddr string) (string, error) {
 		return "", err
 	}
 	return filepath.Base(target), nil
+}
+
+// CheckIommuFDEnabled checks whether IOMMUFD is available by looking for /dev/iommu.
+func CheckIommuFDEnabled() bool {
+	_, err := os.Stat(IommuDevicePath)
+	return err == nil
+}
+
+// GetIommuFDCdev returns the IOMMUFD character device name (e.g., "vfio42")
+// for a PCI device by reading /sys/bus/pci/devices/<bdf>/vfio-dev/.
+// The vfio-dev directory only exists when the device is bound to vfio-pci.
+func GetIommuFDCdev(pciAddr string) (string, error) {
+	vfioDevDir := filepath.Join(PCIDevicePath, pciAddr, "vfio-dev")
+	entries, err := os.ReadDir(vfioDevDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read vfio-dev for %s: %w", pciAddr, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() && len(e.Name()) > 4 && e.Name()[:4] == "vfio" {
+			return e.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no IOMMUFD cdev found for %s", pciAddr)
 }
 
 // CheckVFIOModuleLoaded checks whether the vfio_pci kernel module is loaded.

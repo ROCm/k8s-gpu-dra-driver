@@ -336,3 +336,42 @@ func TestGetPFMapping(t *testing.T) {
 		assert.Empty(t, pfMap)
 	})
 }
+
+func TestCheckIommuFDEnabled_Present(t *testing.T) {
+	root := setupFakeSysfs(t)
+	iommuPath := filepath.Join(root, "dev/iommu")
+	require.NoError(t, os.MkdirAll(filepath.Dir(iommuPath), 0755))
+	require.NoError(t, os.WriteFile(iommuPath, nil, 0644))
+	assert.True(t, CheckIommuFDEnabled())
+}
+
+func TestCheckIommuFDEnabled_Absent(t *testing.T) {
+	setupFakeSysfs(t)
+	assert.False(t, CheckIommuFDEnabled())
+}
+
+func TestGetIommuFDCdev_Found(t *testing.T) {
+	root := setupFakeSysfs(t)
+	vfioDevDir := filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev/vfio42")
+	require.NoError(t, os.MkdirAll(vfioDevDir, 0755))
+
+	cdev, err := GetIommuFDCdev("0000:0d:00.0")
+	assert.NoError(t, err)
+	assert.Equal(t, "vfio42", cdev)
+}
+
+func TestGetIommuFDCdev_NotBound(t *testing.T) {
+	root := setupFakeSysfs(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0"), 0755))
+
+	_, err := GetIommuFDCdev("0000:0d:00.0")
+	assert.Error(t, err)
+}
+
+func TestGetIommuFDCdev_EmptyDir(t *testing.T) {
+	root := setupFakeSysfs(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/vfio-dev"), 0755))
+
+	_, err := GetIommuFDCdev("0000:0d:00.0")
+	assert.Error(t, err)
+}
