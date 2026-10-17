@@ -33,6 +33,7 @@ limitations under the License.
 package featuregates
 
 import (
+	"fmt"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/util/version"
@@ -68,6 +69,18 @@ const VFIOPassthrough featuregate.Feature = "VFIOPassthrough"
 // pod from before the switch is still using, which resets that GPU mid-workload.
 const AutoPartition featuregate.Feature = "AutoPartition"
 
+// GPUSharing advertises every whole GPU as shareable (AllowMultipleAllocations)
+// with consumable memory and computeUnits capacity, so several claims can each
+// take a slice of one GPU. When a claim consumes less than the whole GPU, the
+// driver pins it to a free set of CUs with HSA_CU_MASK and, if a vGPU hook is
+// configured (--vgpu-hook-host-path), caps its VRAM with HIP_DEVICE_MEMORY_LIMIT_0
+// enforced by that hook. Requires DRAConsumableCapacity in the cluster.
+//
+// Drain the node before toggling this gate: claims prepared under the other
+// mode do not carry a CU assignment, so they are not counted when new slices
+// are placed.
+const GPUSharing featuregate.Feature = "GPUSharing"
+
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	DeviceMetadata: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
@@ -76,6 +89,9 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 	AutoPartition: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+	GPUSharing: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 }
@@ -113,6 +129,12 @@ func ToMap() map[string]bool {
 	return out
 }
 
-// ValidateFeatureGates checks cross-gate constraints. No constraints exist yet;
-// this is a stub kept in place so callers and wiring are ready for future gates.
-func ValidateFeatureGates() error { return nil }
+// ValidateFeatureGates checks cross-gate constraints.
+func ValidateFeatureGates() error {
+	// AutoPartition replaces whole GPUs with synthetic partition devices, while
+	// GPUSharing slices whole GPUs; the two describe the same hardware differently.
+	if Enabled(AutoPartition) && Enabled(GPUSharing) {
+		return fmt.Errorf("feature gates %s and %s cannot both be enabled", AutoPartition, GPUSharing)
+	}
+	return nil
+}

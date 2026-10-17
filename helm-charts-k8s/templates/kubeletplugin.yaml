@@ -88,6 +88,10 @@ spec:
         - name: HEALTHCHECK_PORT
           value: {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | quote }}
         {{- end }}
+        {{- if .Values.kubeletPlugin.vgpuHookHostPath }}
+        - name: VGPU_HOOK_HOST_PATH
+          value: {{ .Values.kubeletPlugin.vgpuHookHostPath | quote }}
+        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{- $pairs := list -}}

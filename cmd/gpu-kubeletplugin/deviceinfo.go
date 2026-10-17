@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -89,7 +90,7 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr.Name != "" {
 		attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
-	return resourceapi.Device{
+	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
@@ -98,6 +99,34 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 			"simdUnits":    {Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)},
 		},
 	}
+	if featuregates.Enabled(featuregates.GPUSharing) {
+		shareGPUDevice(&device, d.ComputeUnits)
+	}
+	return device
+}
+
+// shareGPUDevice lets several claims take slices of one whole GPU. A request
+// that names no capacity still consumes all memory and computeUnits (the
+// unconstrained default), so plain claims keep the whole GPU to themselves.
+// computeUnits is consumed in whole CUs. simdUnits defaults to zero: it follows
+// the CUs a claim gets, and consuming all of it by default would stop a second
+// slice from fitting.
+func shareGPUDevice(device *resourceapi.Device, computeUnits int) {
+	device.AllowMultipleAllocations = ptr.To(true)
+	one := resource.NewQuantity(1, resource.DecimalSI)
+	cu := device.Capacity["computeUnits"]
+	cu.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+		Default:    resource.NewQuantity(int64(computeUnits), resource.DecimalSI),
+		ValidRange: &resourceapi.CapacityRequestPolicyRange{Min: one, Step: one},
+	}
+	device.Capacity["computeUnits"] = cu
+	zero := resource.NewQuantity(0, resource.DecimalSI)
+	simd := device.Capacity["simdUnits"]
+	simd.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+		Default:    zero,
+		ValidRange: &resourceapi.CapacityRequestPolicyRange{Min: zero},
+	}
+	device.Capacity["simdUnits"] = simd
 }
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough

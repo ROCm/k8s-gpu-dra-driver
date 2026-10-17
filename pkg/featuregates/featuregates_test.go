@@ -133,3 +133,14 @@ func TestSetGraduatedGaGateIsLocked(t *testing.T) {
 		t.Fatalf("setting a GA gate to its default value should succeed, got %v", err)
 	}
 }
+
+func TestValidateFeatureGatesRejectsAutoPartitionWithSharing(t *testing.T) {
+	fg := FeatureGates()
+	if err := fg.Set("AutoPartition=true,GPUSharing=true"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fg.Set("AutoPartition=false,GPUSharing=false") }()
+	if err := ValidateFeatureGates(); err == nil {
+		t.Fatalf("ValidateFeatureGates() should reject AutoPartition with GPUSharing")
+	}
+}

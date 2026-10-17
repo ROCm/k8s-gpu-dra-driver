@@ -54,6 +54,10 @@ kubeletPlugin:
   affinity: {}
   kubeletRegistrarDirectoryPath: /var/lib/kubelet/plugins_registry
   kubeletPluginsDirectoryPath: /var/lib/kubelet/plugins
+  # Host path of HAMi's vGPU hook (libamvgpu.so) that enforces memory slices
+  # under the GPUSharing feature gate, e.g. /usr/local/vgpu/libamvgpu.so.
+  # Empty leaves memory slices unenforced; CU slices still apply.
+  vgpuHookHostPath: ""
   containers:
     init:
       image: docker.io/busybox:1.36

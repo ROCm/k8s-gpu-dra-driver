@@ -17,6 +17,7 @@ allocation requests.
 | `--kubelet-registrar-directory-path` | string | `/var/lib/kubelet/plugins_registry` | `KUBELET_REGISTRAR_DIRECTORY_PATH` | Absolute path to the directory where kubelet stores plugin registrations. |
 | `--kubelet-plugins-directory-path` | string | `/var/lib/kubelet/plugins` | `KUBELET_PLUGINS_DIRECTORY_PATH` | Absolute path to the directory where kubelet stores plugin data. |
 | `--healthcheck-port` | int | `-1` | `HEALTHCHECK_PORT` | Port for the gRPC healthcheck service. A positive value uses that port, `0` allocates a random port, and a negative value disables the service. |
+| `--vgpu-hook-host-path` | string | *(empty)* | `VGPU_HOOK_HOST_PATH` | Host path of HAMi's vGPU hook (`libamvgpu.so`). Under the `GPUSharing` gate it is mounted into containers that get a memory slice and loaded with `LD_AUDIT` to enforce `HIP_DEVICE_MEMORY_LIMIT_0`. Empty leaves memory slices unenforced. |
 
 ### Kubernetes client flags
 
@@ -58,3 +59,4 @@ or `helm ... --set featureGates.ExampleFeature=true`.
 |------|---------|-------|-------------|
 | `VFIOPassthrough` | `false` | Alpha | Enables VFIO passthrough support. Discovers GIM SR-IOV VFs, binds to `vfio-pci` on demand during Prepare, generates CDI specs for `/dev/vfio/*` device nodes. Required for VM passthrough via KubeVirt. |
 | `AutoPartition` | `false` | Alpha | Enable auto-partition mode. When enabled, the driver advertises all possible compute+memory partition configurations as virtual devices and dynamically partitions GPUs on demand via AMD SMI when a ResourceClaim is prepared. Requires Kubernetes 1.36+ with DRA beta features. GPUs that do not support partitioning are unaffected. |
+| `GPUSharing` | `false` | Alpha | Advertises every whole GPU with `allowMultipleAllocations` and consumable `memory`/`computeUnits`, so several ResourceClaims can each take a slice of one GPU (needs `DRAConsumableCapacity`). A claim that consumes fewer CUs than the GPU has gets a free set of CUs through `HSA_CU_MASK`; a claim that consumes less memory gets `HIP_DEVICE_MEMORY_LIMIT_0`, enforced by the hook from `--vgpu-hook-host-path`. A request without capacity still takes the whole GPU. One shared GPU per container. Cannot be combined with `AutoPartition`. |

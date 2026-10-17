@@ -81,6 +81,10 @@ type PreparedDevice struct {
 	// ShareKey identifies the allocation share this device represents (see
 	// ShareKey). Persisted so Unprepare releases the exact slot that was reserved.
 	ShareKey string `json:"shareKey,omitempty"`
+
+	// ComputeUnits are the CUs given to this share of a whole GPU under the
+	// GPUSharing gate. Persisted so later shares of the GPU avoid them.
+	ComputeUnits []int `json:"computeUnits,omitempty"`
 }
 
 func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
@@ -102,6 +106,8 @@ type DeviceState struct {
 	driver               *driver // back-reference for re-publishing resources
 	syntheticPartition   bool    // whether synthetic-partition mode is enabled
 	nodeName             string  // this node's name, matched against allocation results' Pool
+	gpuSharing           bool    // whether whole GPUs are sliced (GPUSharing gate)
+	vgpuHookHostPath     string  // host path of the vGPU hook that enforces memory slices
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -148,6 +154,8 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		checkpointManager:  checkpointManager,
 		syntheticPartition: autoPartition,
 		nodeName:           config.flags.nodeName,
+		gpuSharing:         featuregates.Enabled(featuregates.GPUSharing),
+		vgpuHookHostPath:   config.flags.vgpuHookHostPath,
 	}
 
 	// Set up partition state for synthetic-partition mode
@@ -281,7 +289,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		}
 	}
 
-	preparedDevices, err := s.prepareDevices(claim)
+	preparedDevices, err := s.prepareDevices(claim, preparedClaims)
 	if err != nil {
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
@@ -514,7 +522,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim, prepared PreparedClaims) (PreparedDevices, error) {
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -678,6 +686,12 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 				}
 			}
 
+			if s.gpuSharing {
+				if err := s.applyGPUSlice(device, result, prepared, preparedDevices); err != nil {
+					return nil, err
+				}
+			}
+
 			// Built after PartitionSlot is set: the CDI device name embeds the slot.
 			device.CdiDeviceIds = s.cdi.GetClaimDevices(claimUID, []*PreparedDevice{device})
 			preparedDevices = append(preparedDevices, device)
@@ -685,6 +699,43 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 
 	return preparedDevices, nil
+}
+
+// applyGPUSlice confines a share of a whole GPU to the capacity its allocation
+// result consumed, avoiding the CUs held by other prepared shares of that GPU.
+func (s *DeviceState) applyGPUSlice(device *PreparedDevice, result *resourceapi.DeviceRequestAllocationResult, prepared PreparedClaims, current PreparedDevices) error {
+	allocDev := s.allocatable[result.Device]
+	if allocDev == nil || allocDev.AmdGpu == nil {
+		return nil
+	}
+	busy := map[int]bool{}
+	mark := func(devices PreparedDevices) {
+		for _, d := range devices {
+			if d.DeviceName == result.Device {
+				for _, cu := range d.ComputeUnits {
+					busy[cu] = true
+				}
+			}
+		}
+	}
+	for _, devices := range prepared {
+		mark(devices)
+	}
+	mark(current)
+
+	edits, cus, err := gpuSliceEdits(allocDev.AmdGpu, result.ConsumedCapacity, busy, s.vgpuHookHostPath)
+	if err != nil {
+		return fmt.Errorf("error placing slice of GPU %s: %w", result.Device, err)
+	}
+	device.ComputeUnits = cus
+	if edits != nil {
+		if device.ContainerEdits == nil {
+			device.ContainerEdits = &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
+		}
+		device.ContainerEdits.Append(&cdiapi.ContainerEdits{ContainerEdits: edits})
+		klog.Infof("GPU %s slice: %v", result.Device, edits.Env)
+	}
+	return nil
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
