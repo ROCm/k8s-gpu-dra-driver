@@ -15,6 +15,7 @@ jobs:
       go-version-file: go.mod
       build-deps: ""
       check-target: check
+      golangci-lint-version: v2.15.0
 
   test:
     name: Test

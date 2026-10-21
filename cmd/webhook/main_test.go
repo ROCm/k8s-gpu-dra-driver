@@ -88,6 +88,11 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 
 			res, err := http.Post(s.URL+"/validate-resource-claim-parameters", contentType, bytes.NewReader(requestBody))
 			require.NoError(t, err)
+			defer func() {
+				if err := res.Body.Close(); err != nil {
+					t.Errorf("close response body: %v", err)
+				}
+			}()
 			expectedResponseCode := test.expectedResponseCode
 			if expectedResponseCode == 0 {
 				expectedResponseCode = http.StatusOK
@@ -100,7 +105,6 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 
 			responseBody, err := io.ReadAll(res.Body)
 			require.NoError(t, err)
-			res.Body.Close()
 
 			responseAdmissionReview, err := readAdmissionReview(responseBody)
 			assert.NoError(t, err)

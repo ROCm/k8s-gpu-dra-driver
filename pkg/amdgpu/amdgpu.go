@@ -277,7 +277,7 @@ func AMDGPU(cardName string) bool {
 		vid := strings.TrimSpace(string(b))
 
 		// AMD vendor ID is 0x1002
-		if "0x1002" == vid {
+		if vid == "0x1002" {
 			return true
 		}
 	} else {
@@ -307,7 +307,14 @@ func ParseTopologyProperties(path string, re *regexp.Regexp) (int64, error) {
 		v, e = strconv.ParseInt(m[1], 0, 64)
 		break
 	}
-	f.Close()
+	scanErr := scanner.Err()
+	closeErr := f.Close()
+	if scanErr != nil {
+		return 0, scanErr
+	}
+	if e == nil && closeErr != nil {
+		return 0, closeErr
+	}
 
 	return v, e
 }
@@ -334,7 +341,14 @@ func ParseTopologyPropertiesString(path string, re *regexp.Regexp) (string, erro
 		e = nil
 		break
 	}
-	f.Close()
+	scanErr := scanner.Err()
+	closeErr := f.Close()
+	if scanErr != nil {
+		return "", scanErr
+	}
+	if e == nil && closeErr != nil {
+		return "", closeErr
+	}
 
 	return v, e
 }
