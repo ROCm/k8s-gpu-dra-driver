@@ -182,6 +182,40 @@ If not loaded: `modprobe vfio_pci`. The driver logs a warning at startup but
 continues without it — pre-bound devices still work, but on-demand binding
 will fail.
 
+### GPU unavailable after VFIO allocation
+
+**Symptom:** A claim for a compute GPU (`type=amdgpu`) stays Pending even
+though the GPU is listed in the ResourceSlice, while the VFIO entry of the same
+physical GPU (or vice versa) is allocated.
+
+**Cause:** This is expected behavior. Dual-entry advertising creates both a
+compute and a VFIO entry for each GPU that is not an SR-IOV VF. Both entries
+consume the same capacity-1 `fn-<pci-addr>` counter, so the scheduler never
+allocates the same physical GPU for compute and passthrough at once.
+
+**Resolution:** The other entry becomes allocatable again when the claim is
+released. No action is needed. To see which counter the entries share:
+
+```bash
+kubectl get resourceslices -o json | jq '.items[].spec.devices[]? | {name, consumesCounters}'
+```
+
+### VFIO device cannot be allocated — VF slots exhausted
+
+**Symptom:** A ResourceClaim for a VFIO device stays Pending even though
+VFIO devices appear in the ResourceSlice.
+
+**Cause:** All `vf-slots` counters for the PF are consumed by existing
+allocations. The scheduler cannot allocate more VFs (or the PF) until
+slots are freed.
+
+**Resolution:**
+1. Check counter consumption: `kubectl get resourceslices -o yaml` and
+   look for `sharedCounters` and `consumesCounters` entries.
+2. Release existing VFIO claims to free slots.
+3. If a PF is allocated (consuming all slots), no VFs can be allocated
+   until the PF claim is released.
+
 ### Device stuck on vfio-pci after VM deletion
 
 If `Unconfigure` fails during Unprepare, the device remains bound to `vfio-pci`.

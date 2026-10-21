@@ -397,8 +397,13 @@ claim attributes instead.
 
 ## VFIO passthrough devices
 
-When the `VFIOPassthrough` feature gate is enabled, the driver discovers GIM
-SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
+When the `VFIOPassthrough` feature gate is enabled, the driver advertises VFIO
+passthrough devices with `type = vfio`. These come from two sources:
+
+1. **Dual-entry siblings** — each compute GPU (`type=amdgpu`) that is not an
+   SR-IOV VF also appears as a VFIO device (`type=vfio`) for PF passthrough.
+2. **GIM SR-IOV VFs** — VFs created by the GIM driver appear as VFIO devices
+   with `isVF=true`.
 
 ### Attributes for a VFIO device
 
@@ -412,9 +417,24 @@ SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
 | `productName` | string | GPU product name (e.g., `Instinct_MI300X`) |
 | `deviceID` | string | PCI device ID (e.g., `0x740f`) |
 | `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
+| `partitionProfile` | string | Compute partition mode (e.g., `cpx`, `qpx`, `tpx`, `dpx`, `spx`). Only present on GIM VFs with a recognized partition mode. Not set on dual-entry PF siblings. |
 
 Standard topology attributes (`resource.kubernetes.io/pciBusID`,
 `resource.kubernetes.io/pcieRoot`) are also published when available.
+
+### Capacity for VFIO devices
+
+GIM VFs publish per-VF capacity computed as the PF's total capacity divided
+equally by the number of active VFs:
+
+- `memory` (quantity, bytes): PF VRAM / NumVFs
+- `computeUnits` (quantity): PF CUs / NumVFs
+- `simdUnits` (quantity): PF SIMDs / NumVFs
+
+Dual-entry PF siblings publish the full PF capacity. Pre-bound PF-passthrough
+devices (already on `vfio-pci` at discovery) have no capacity data.
+
+The capacity map is omitted entirely when all three values are zero.
 
 ### Selecting VFIO devices
 
@@ -425,6 +445,50 @@ selectors:
       device.driver == 'gpu.amd.com' &&
       device.attributes['gpu.amd.com'].type == 'vfio'
 ```
+
+### Dual-entry advertising and sibling exclusion
+
+When `VFIOPassthrough` is enabled, each compute GPU that is not an SR-IOV VF (a
+PF, or a GPU without SR-IOV) appears in the ResourceSlice as both a compute
+device (`type=amdgpu`) and a VFIO device (`type=vfio`). The scheduler allocates
+whichever type the claim requests. A `type=vfio` entry claimed without a
+`VfioDeviceConfig` gets the default VFIO configuration.
+
+Compute VFs (SR-IOV VFs bound to `amdgpu`) are advertised only as
+`type=amdgpu`. Unbound GIM VFs are discovered separately and advertised only as
+`type=vfio`. To use a compute VF for passthrough, claim it with a
+`VfioDeviceConfig`, which converts it during Prepare.
+
+Sibling exclusion is bidirectional and enforced by the scheduler at allocation
+time: both entries of a GPU consume the same capacity-1 counter (see below),
+so once either one is allocated the other cannot be. Both entries stay in the
+ResourceSlice; the one that is not allocated simply cannot be satisfied until
+the claim is released. This relies on KEP-4815 partitionable devices
+(`DRAPartitionableDevices`, beta and enabled by default since Kubernetes 1.36).
+
+Pre-bound PF-passthrough devices (GPUs already bound to `vfio-pci` at discovery
+time, e.g., by the GPU Operator) are different. They appear as VFIO-only
+devices with no compute sibling and no sibling exclusion counter.
+
+### KEP-4815 SharedCounters for mutual exclusion
+
+The driver publishes one `SharedCounterSet` per PCI device family (a PF and
+its VFs, or a GPU without SR-IOV) whenever a device in it needs one:
+
+- **Counter set name:** `pf-<pci-addr>-counter-set` (PCI address in DNS label
+  form, e.g., `pf-0000-0a-00-0-counter-set`)
+- **`vf-slots`** (GPUs with SR-IOV, `TotalVFs > 0`): value `TotalVFs`. Each VF
+  consumes 1 slot; the PF consumes `TotalVFs` slots (the entire budget).
+  Allocating the PF exhausts all slots, preventing any VF from being allocated
+  on the same physical GPU; conversely, if VF allocations consume all slots,
+  the PF cannot be allocated.
+- **`fn-<pci-addr>`** (functions with dual entries): value 1. The compute and
+  the VFIO entry of that PCI function each consume 1, so only one of them can
+  be allocated at a time.
+
+A GPU without SR-IOV and without a VFIO sibling consumes no counters and
+publishes no counter set. Counter sets are published in their own
+ResourceSlices, at most 8 per slice.
 
 ---
 
