@@ -10,11 +10,23 @@ on:
 jobs:
   lint:
     name: Lint
-    uses: ROCm/common-infra-operator/.github/workflows/go-lint.yaml@main
-    with:
-      go-version-file: go.mod
-      build-deps: ""
-      check-target: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install lint tools
+        run: |
+          go install github.com/gordonklaus/ineffassign@latest
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+
+      - name: Run checks
+        run: make check
 
   test:
     name: Test

@@ -983,7 +983,7 @@ func GetOpaqueDeviceConfigs(
 	for _, config := range candidateConfigs {
 		// If this is nil, the driver doesn't support some future API extension
 		// and needs to be updated.
-		if config.DeviceConfiguration.Opaque == nil {
+		if config.Opaque == nil {
 			return nil, fmt.Errorf("only opaque parameters are supported by this driver")
 		}
 
@@ -991,11 +991,11 @@ func GetOpaqueDeviceConfigs(
 		// single request can be satisfied by different drivers. This is not
 		// an error -- drivers must skip over other driver's configs in order
 		// to support this.
-		if config.DeviceConfiguration.Opaque.Driver != driverName {
+		if config.Opaque.Driver != driverName {
 			continue
 		}
 
-		decodedConfig, err := runtime.Decode(decoder, config.DeviceConfiguration.Opaque.Parameters.Raw)
+		decodedConfig, err := runtime.Decode(decoder, config.Opaque.Parameters.Raw)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding config parameters: %w", err)
 		}
@@ -1034,7 +1034,7 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 	if err != nil {
 		return nil, fmt.Errorf("error building common VFIO CDI edits: %w", err)
 	}
-	deviceEdits.ContainerEdits.DeviceNodes = append(deviceEdits.ContainerEdits.DeviceNodes, commonEdits.ContainerEdits.DeviceNodes...)
+	deviceEdits.DeviceNodes = append(deviceEdits.DeviceNodes, commonEdits.DeviceNodes...)
 
 	klog.Infof("Applied VFIO config for %s: iommuGroup=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup)
 	return deviceEdits, nil

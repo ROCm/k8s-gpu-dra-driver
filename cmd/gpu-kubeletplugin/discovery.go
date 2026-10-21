@@ -77,11 +77,11 @@ func getPcieInfo(gpuInfoMap map[string]interface{}) (deviceattribute.DeviceAttri
 	pciAddr := gpuInfoMap["pciAddr"].(string)
 	pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciAddr)
 	if err != nil {
-		return pcieRootAttr, deviceattribute.DeviceAttribute{}, "", fmt.Errorf("Failed to get PCIe root attribute for device %s: %v", pciAddr, err)
+		return pcieRootAttr, deviceattribute.DeviceAttribute{}, "", fmt.Errorf("failed to get PCIe root attribute for device %s: %w", pciAddr, err)
 	}
 	pciBusIDAttr, err := deviceattribute.GetPCIBusIDAttribute(pciAddr)
 	if err != nil {
-		return pcieRootAttr, pciBusIDAttr, "", fmt.Errorf("Failed to get PCI Bus ID attribute for device %s: %v", pciAddr, err)
+		return pcieRootAttr, pciBusIDAttr, "", fmt.Errorf("failed to get PCI Bus ID attribute for device %s: %w", pciAddr, err)
 	}
 	return pcieRootAttr, pciBusIDAttr, pciAddr, nil
 }

@@ -289,8 +289,8 @@ func CheckIOMMUEnabled() bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
 	names, err := f.Readdirnames(1)
+	_ = f.Close()
 	return err == nil && len(names) > 0
 }
 
