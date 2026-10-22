@@ -39,6 +39,52 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestIOMMUBackendPolicy_Validate(t *testing.T) {
+	assert.NoError(t, IOMMUBackendPolicyLegacyOnly.Validate())
+	assert.NoError(t, IOMMUBackendPolicyPreferIommuFD.Validate())
+	assert.NoError(t, IOMMUBackendPolicyRequireIommuFD.Validate())
+	assert.Error(t, IOMMUBackendPolicy("InvalidPolicy").Validate())
+	assert.Error(t, IOMMUBackendPolicy("").Validate())
+}
+
+func TestIOMMUConfig_Validate(t *testing.T) {
+	assert.NoError(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyLegacyOnly}).Validate())
+	assert.NoError(t, (&IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}).Validate())
+	assert.Error(t, (&IOMMUConfig{BackendPolicy: "Bad"}).Validate())
+}
+
+func TestVfioDeviceConfig_Normalize_DefaultsIommu(t *testing.T) {
+	c := &VfioDeviceConfig{}
+	assert.NoError(t, c.Normalize())
+	assert.NotNil(t, c.Iommu)
+	assert.Equal(t, IOMMUBackendPolicyLegacyOnly, c.Iommu.BackendPolicy)
+}
+
+func TestVfioDeviceConfig_Normalize_EmptyPolicy(t *testing.T) {
+	c := &VfioDeviceConfig{Iommu: &IOMMUConfig{}}
+	assert.NoError(t, c.Normalize())
+	assert.Equal(t, IOMMUBackendPolicyLegacyOnly, c.Iommu.BackendPolicy)
+}
+
+func TestVfioDeviceConfig_Normalize_KeepsPolicy(t *testing.T) {
+	c := &VfioDeviceConfig{Iommu: &IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}}
+	assert.NoError(t, c.Normalize())
+	assert.Equal(t, IOMMUBackendPolicyPreferIommuFD, c.Iommu.BackendPolicy)
+}
+
+func TestVfioDeviceConfig_Validate_WithIommu(t *testing.T) {
+	c := &VfioDeviceConfig{Iommu: &IOMMUConfig{BackendPolicy: IOMMUBackendPolicyPreferIommuFD}}
+	assert.NoError(t, c.Validate())
+
+	c2 := &VfioDeviceConfig{Iommu: &IOMMUConfig{BackendPolicy: "Invalid"}}
+	assert.Error(t, c2.Validate())
+}
+
+func TestVfioDeviceConfig_Validate_NilIommu(t *testing.T) {
+	c := &VfioDeviceConfig{}
+	assert.NoError(t, c.Validate())
+}
+
 func TestGpuConfigNormalize(t *testing.T) {
 	tests := map[string]struct {
 		gpuConfig   *GpuConfig
