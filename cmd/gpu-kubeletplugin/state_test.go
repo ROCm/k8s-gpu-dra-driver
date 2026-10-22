@@ -33,15 +33,21 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 )
 
@@ -94,6 +100,72 @@ func TestRestoreFromVfio_NilMap(t *testing.T) {
 	assert.NotPanics(t, func() {
 		state.restoreFromVfio("gpu-vfio-0")
 	})
+}
+
+// TestPrepareDevices_ConversionPreservesNumaNodeAttr covers the on-demand
+// AMD GPU to VFIO conversion path in prepareDevices(): converting a compute
+// GPU carrying the standard numaNode attribute must copy numaNodeAttr onto
+// the resulting AmdGpuVFIOInfo, the same way pciBusIDAttr and pcieRootAttr
+// are already copied. Before this fix the attribute was dropped, so a
+// converted device's GetDevice() omitted resource.kubernetes.io/numaNode
+// even though DeviceMetadata had previously advertised it for scheduling
+// (review comment 4332719438).
+func TestPrepareDevices_ConversionPreservesNumaNodeAttr(t *testing.T) {
+	fg := featuregates.FeatureGates()
+	require.NoError(t, fg.Set(string(featuregates.VFIOPassthrough)+"=true"))
+	t.Cleanup(func() { _ = fg.Set(string(featuregates.VFIOPassthrough) + "=false") })
+
+	root := setupFakeVfioSysfs(t)
+	const pci = "0000:0d:00.0"
+	createPCIDevice(t, root, pci, "amdgpu")
+	createDriverDir(t, root, "amdgpu")
+	createDriverDir(t, root, consts.VFIODriverName)
+	require.NoError(t, os.Symlink("../../../kernel/iommu_groups/42",
+		filepath.Join(root, "sys/bus/pci/devices", pci, "iommu_group")))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dev/vfio"), 0755))
+	require.NoError(t, os.Symlink("/dev/null", filepath.Join(root, "dev/vfio/vfio")))
+	require.NoError(t, os.Symlink("/dev/null", filepath.Join(root, "dev/vfio/42")))
+
+	numaAttr := deviceattribute.DeviceAttribute{
+		Name:  "resource.kubernetes.io/numaNode",
+		Value: resourceapi.DeviceAttribute{IntValue: func() *int64 { v := int64(7); return &v }()},
+	}
+	gpu := &AmdGpuInfo{PCIAddress: pci, cardIndex: 0, renderIndex: 128, numaNodeAttr: numaAttr}
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-0-128": {AmdGpu: gpu},
+		},
+		vfioManager: &VfioPciManager{},
+	}
+
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-uid")},
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: "gpu-0-128"},
+					},
+					Config: []resourceapi.DeviceAllocationConfiguration{{
+						Source: resourceapi.AllocationConfigSourceClaim,
+						DeviceConfiguration: resourceapi.DeviceConfiguration{
+							Opaque: &resourceapi.OpaqueDeviceConfiguration{
+								Driver:     consts.DriverName,
+								Parameters: runtime.RawExtension{Raw: []byte(`{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`)},
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	_, err := state.prepareDevices(claim)
+	require.NoError(t, err)
+
+	converted := state.allocatable["gpu-0-128"]
+	require.NotNil(t, converted.Vfio, "the device must have been converted to VFIO")
+	assert.Equal(t, numaAttr, converted.Vfio.numaNodeAttr, "numaNodeAttr must survive the amdgpu to VFIO conversion")
 }
 
 func TestUnprepareDevices_RestoresConvertedDevice(t *testing.T) {
