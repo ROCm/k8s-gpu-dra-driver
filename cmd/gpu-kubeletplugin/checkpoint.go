@@ -60,6 +60,32 @@ type CheckpointV1 struct {
 	// restart mid-Prepare (notably during an async memory reload) recovers the
 	// reservation and its slot rather than losing them.
 	AssignedSlots map[int]map[string]int `json:"assignedSlots,omitempty"`
+
+	// VfioConversions records GPUs converted to VFIO on a claim's behalf,
+	// keyed claimUID -> device name. An entry lives until the device has been
+	// rebound to its original driver, so a restart can still return devices
+	// for prepared claims and finish rebinds left by a failed Prepare.
+	VfioConversions map[string]map[string]*VfioConversionRecord `json:"vfioConversions,omitempty"`
+}
+
+// VfioConversionRecord is the persisted form of one GPU->VFIO conversion: the
+// original GPU's identity and attributes, plus the VFIO details needed to
+// rebind it.
+type VfioConversionRecord struct {
+	PCIAddress       string `json:"pciAddress"`
+	IsVF             bool   `json:"isVF,omitempty"`
+	IOMMUGroup       string `json:"iommuGroup,omitempty"`
+	CardIndex        int    `json:"cardIndex"`
+	RenderIndex      int    `json:"renderIndex"`
+	KFDID            string `json:"kfdID,omitempty"`
+	DeviceID         string `json:"deviceID,omitempty"`
+	DriverVersion    string `json:"driverVersion,omitempty"`
+	PartitionProfile string `json:"partitionProfile,omitempty"`
+	ProductName      string `json:"productName,omitempty"`
+	MemoryBytes      uint64 `json:"memoryBytes,omitempty"`
+	ComputeUnits     int    `json:"computeUnits,omitempty"`
+	SimdUnits        int    `json:"simdUnits,omitempty"`
+	NumaNode         int    `json:"numaNode,omitempty"`
 }
 
 // MemoryReloadMarker records that a KMM-managed driver reload has been triggered
