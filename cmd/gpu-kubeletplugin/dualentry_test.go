@@ -71,6 +71,11 @@ func setPCIDriver(t *testing.T, root, pciAddr, driver string) {
 // gpuPCI returns the PCI address of the i-th fake dual-entry GPU.
 func gpuPCI(i int) string { return fmt.Sprintf("0000:%02x:00.0", 0x0a+i) }
 
+// vfioSiblingName returns the canonical name of the i-th fake dual-entry
+// GPU's type=vfio sibling, derived from its PCI address the same way
+// AmdGpuVFIOInfo.CanonicalName does.
+func vfioSiblingName(i int) string { return "gpu-vfio-" + pciAddrToDNSLabel(gpuPCI(i)) }
+
 // newDualEntryState returns a DeviceState for n amdgpu-bound compute GPUs,
 // each with its type=vfio sibling, built and marked as discovery and
 // NewDeviceState do, and wired to a real CDI handler and checkpoint manager
@@ -91,7 +96,7 @@ func newDualEntryState(t *testing.T, n int) (*DeviceState, string, string) {
 		createDevNode(t, root, fmt.Sprintf("dev/vfio/%d", 42+i))
 		compute := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pci, ParentPFAddress: pci, cardIndex: i, renderIndex: 128 + i}}
 		allocatable[compute.CanonicalName()] = compute
-		sibling := newVFIOSibling(compute.AmdGpu, i, 0)
+		sibling := newVFIOSibling(compute.AmdGpu, 0)
 		allocatable[sibling.CanonicalName()] = sibling
 	}
 	markSiblingPairs(allocatable)
@@ -156,11 +161,11 @@ func TestNewVFIOSibling(t *testing.T) {
 		PCIAddress: pci, DeviceID: "0x74a1", ProductName: "MI300X", NumaNode: 1,
 		ParentPFAddress: pci, TotalVFs: 8, MemoryBytes: 192 << 30, ComputeUnits: 304, SimdUnits: 1216,
 	}
-	dev := newVFIOSibling(gpu, 3, 4)
+	dev := newVFIOSibling(gpu, 4)
 	require.NotNil(t, dev.Vfio)
 	v := dev.Vfio
 	assert.Equal(t, consts.AMDGPUDriverName, v.preConfigureDriver, "release must rebind the GPU to amdgpu")
-	assert.Equal(t, "gpu-vfio-3", dev.CanonicalName())
+	assert.Equal(t, "gpu-vfio-"+pciAddrToDNSLabel(pci), dev.CanonicalName())
 	assert.Equal(t, "42", v.IOMMUGroup)
 	assert.Equal(t, consts.AMDVendorID, v.VendorID)
 	assert.Equal(t, 4, v.NumVFs)
@@ -181,10 +186,10 @@ func TestPrepareUnprepare_DirectVFIOSibling(t *testing.T) {
 	state, root, cdiRoot := newDualEntryState(t, 1)
 	pci := gpuPCI(0)
 
-	devices, err := state.Prepare(directClaim("claim-uid", "gpu-vfio-0"))
+	devices, err := state.Prepare(directClaim("claim-uid", vfioSiblingName(0)))
 	require.NoError(t, err)
 	require.Len(t, devices, 1, "a direct type=vfio claim must prepare its device")
-	assert.Equal(t, "gpu-vfio-0", devices[0].DeviceName)
+	assert.Equal(t, vfioSiblingName(0), devices[0].DeviceName)
 
 	bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
 	require.NoError(t, err)
@@ -206,8 +211,8 @@ func TestPrepareUnprepare_DirectVFIOSibling(t *testing.T) {
 	// counter is what keeps the scheduler from also allocating the compute
 	// entry.
 	pool := (&driver{state: state}).buildDriverResources("node").Pools["node"]
-	assert.ElementsMatch(t, []string{"gpu-0-128", "gpu-vfio-0"}, publishedDeviceNames(pool))
-	assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-0"))
+	assert.ElementsMatch(t, []string{"gpu-0-128", vfioSiblingName(0)}, publishedDeviceNames(pool))
+	assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", vfioSiblingName(0)))
 
 	// The kernel now has the GPU on vfio-pci.
 	setPCIDriver(t, root, pci, consts.VFIODriverName)
@@ -217,7 +222,7 @@ func TestPrepareUnprepare_DirectVFIOSibling(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pci, string(rebound), "release must rebind the GPU to amdgpu")
 	assert.Contains(t, state.allocatable, "gpu-0-128")
-	assert.Contains(t, state.allocatable, "gpu-vfio-0")
+	assert.Contains(t, state.allocatable, vfioSiblingName(0))
 }
 
 func TestRollbackVfioConversions(t *testing.T) {
@@ -270,7 +275,7 @@ func TestPrepareDevices_VFIODeviceWithGateDisabled(t *testing.T) {
 	setVFIOPassthrough(t, false)
 	state, _, _ := newDualEntryState(t, 1)
 
-	_, err := state.prepareDevices(directClaim("claim-uid", "gpu-vfio-0"))
+	_, err := state.prepareDevices(directClaim("claim-uid", vfioSiblingName(0)))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "VFIOPassthrough")
 }
@@ -316,7 +321,7 @@ func TestDriver_ConcurrentPrepareUnprepareAndPublish(t *testing.T) {
 			defer wg.Done()
 			uid := fmt.Sprintf("claim-%d", i)
 			for r := 0; r < rounds; r++ {
-				claim := directClaim(uid, fmt.Sprintf("gpu-vfio-%d", i))
+				claim := directClaim(uid, vfioSiblingName(i))
 				if i%2 == 1 {
 					claim = convertClaim(uid, fmt.Sprintf("gpu-%d-%d", i, 128+i))
 				}
@@ -345,7 +350,7 @@ func TestDriver_ConcurrentPrepareUnprepareAndPublish(t *testing.T) {
 	// type, including the compute GPUs other claims' prepares ran between.
 	for i := 0; i < gpus; i++ {
 		assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable[fmt.Sprintf("gpu-%d-%d", i, 128+i)].Type())
-		assert.Equal(t, consts.VfioDeviceType, state.allocatable[fmt.Sprintf("gpu-vfio-%d", i)].Type())
+		assert.Equal(t, consts.VfioDeviceType, state.allocatable[vfioSiblingName(i)].Type())
 	}
 	assert.Empty(t, state.vfioConversions)
 }

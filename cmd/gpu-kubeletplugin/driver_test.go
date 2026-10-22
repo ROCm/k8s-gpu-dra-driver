@@ -41,8 +41,8 @@ func TestCollectCounterSets(t *testing.T) {
 	t.Run("deduplicates VFs from same PF", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
-				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{Index: 1, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
+				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
 				"gpu-0-128":  {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
 			},
 		}}
@@ -54,8 +54,8 @@ func TestCollectCounterSets(t *testing.T) {
 	t.Run("multiple PFs produce multiple sets sorted by address", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0b:00.0"}},
-				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{Index: 1, IsVF: false, TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}},
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0b:00.0"}},
+				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{IsVF: false, TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}},
 			},
 		}}
 		sets := d.collectCounterSets()
@@ -127,7 +127,6 @@ func TestBuildDriverResourcesWithCounters(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
 				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{
-					Index:           0,
 					IsVF:            false,
 					TotalVFs:        4,
 					ParentPFAddress: "0000:0a:00.0",
@@ -153,7 +152,7 @@ func TestBuildDriverResourcesWithCounters(t *testing.T) {
 	t.Run("with counters has 2 slices", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{Index: 0, IsVF: false, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0", IOMMUGroup: "42", PCIAddress: "0000:0a:00.0"}},
+				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: false, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0", IOMMUGroup: "42", PCIAddress: "0000:0a:00.0"}},
 			},
 		}}
 		res := d.buildDriverResources("test-node")
@@ -314,7 +313,6 @@ func vfioVFs(numPFs, vfsPerPF int) AllocatableDevices {
 		pfAddr := fmt.Sprintf("0000:%02x:00.0", 0x10+pf)
 		for vf := 0; vf < vfsPerPF; vf++ {
 			devs[fmt.Sprintf("gpu-vfio-%d", idx)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
-				Index:           idx,
 				PCIAddress:      fmt.Sprintf("0000:%02x:00.%d", 0x10+pf, vf+1),
 				IsVF:            true,
 				ParentPFAddress: pfAddr,
