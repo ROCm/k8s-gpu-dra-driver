@@ -684,6 +684,18 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 				}
 				configuredNames = append(configuredNames, result.Device)
 				perDeviceCDIContainerEdits[allocationResultKey(string(claim.UID), result)] = edits
+				// Record every successful bind, not just conversions, so a
+				// later failure in this Prepare call (CDI spec file, checkpoint
+				// write) can find and undo a direct claim's binding too via
+				// rollbackVfioConversions. A nil original means "nothing to
+				// restore the device to, just unconfigure it" (see
+				// restoreFromVfio) — this device was already type=vfio before
+				// this Prepare call, so there is no AmdGpu identity to bring
+				// back. Skip devices already recorded as a real conversion
+				// above so we never overwrite a non-nil original.
+				if _, alreadyRecorded := s.claimVfioConversions[claimUID][result.Device]; !alreadyRecorded {
+					s.recordVfioConversion(claimUID, result.Device, nil)
+				}
 			}
 		default:
 			return nil, fmt.Errorf("runtime object is not a recognized configuration")
@@ -755,17 +767,23 @@ func (s *DeviceState) recordVfioConversion(claimUID, deviceName string, original
 }
 
 // restoreFromVfio swaps a device claimUID converted to VFIO back to its
-// original GPU and drops the record. It is a no-op for devices the claim did
-// not convert, such as pre-bound VFIO devices.
+// original GPU and drops the record. For a device claimUID bound directly —
+// including a pre-bound VFIO device claimed as-is — the record's original is
+// nil, since the device was already type=vfio and there is nothing to
+// restore; this only drops the record, leaving the device's type alone. It is
+// a no-op when claimUID has no record at all for deviceName, e.g. a retry
+// after the record was already cleared.
 func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
 	original, ok := s.claimVfioConversions[claimUID][deviceName]
 	if !ok {
 		return
 	}
-	if allocDev, exists := s.allocatable[deviceName]; exists {
-		allocDev.AmdGpu = original
-		allocDev.Vfio = nil
-		klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
+	if original != nil {
+		if allocDev, exists := s.allocatable[deviceName]; exists {
+			allocDev.AmdGpu = original
+			allocDev.Vfio = nil
+			klog.Infof("Restored %s from VFIO back to AmdGpu type", deviceName)
+		}
 	}
 	delete(s.claimVfioConversions[claimUID], deviceName)
 	if len(s.claimVfioConversions[claimUID]) == 0 {
@@ -773,10 +791,11 @@ func (s *DeviceState) restoreFromVfio(claimUID, deviceName string) {
 	}
 }
 
-// rollbackVfioConversions undoes conversions made while preparing a claim
-// before the claim has been checkpointed successfully. The logical DRA state
-// is restored only after the host device has been successfully unconfigured;
-// otherwise a failed rollback would falsely advertise an AMDGPU device while
+// rollbackVfioConversions undoes every VFIO binding made while preparing a
+// claim — both GPU->VFIO conversions and direct claims on an already-VFIO
+// device — before the claim has been checkpointed successfully. The logical
+// DRA state is restored only after the host device has been successfully
+// unconfigured; otherwise a failed rollback would falsely advertise an AMDGPU device while
 // the host is still bound to vfio-pci.
 func (s *DeviceState) rollbackVfioConversions(claimUID string) {
 	for deviceName := range s.claimVfioConversions[claimUID] {

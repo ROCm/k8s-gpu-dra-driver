@@ -83,6 +83,29 @@ func TestRestoreFromVfio_NoConversion(t *testing.T) {
 	assert.Nil(t, allocDev.AmdGpu, "should not gain an AmdGpu entry")
 }
 
+func TestRestoreFromVfio_DirectBinding(t *testing.T) {
+	// A nil original means "this device was already type=vfio before this
+	// Prepare call" (a direct claim on a dual-entry sibling or pre-bound
+	// device bound during this Prepare), recorded only so rollback can find
+	// and unconfigure it. Restoring must drop the record without touching
+	// the device's type.
+	state := &DeviceState{
+		allocatable: AllocatableDevices{
+			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}},
+		},
+		claimVfioConversions: map[string]map[string]*AmdGpuInfo{
+			"claim-a": {"gpu-vfio-0": nil},
+		},
+	}
+
+	state.restoreFromVfio("claim-a", "gpu-vfio-0")
+
+	allocDev := state.allocatable["gpu-vfio-0"]
+	assert.NotNil(t, allocDev.Vfio, "a direct binding should stay type=vfio")
+	assert.Nil(t, allocDev.AmdGpu, "should not gain an AmdGpu entry")
+	assert.Empty(t, state.claimVfioConversions, "record should be removed once restored")
+}
+
 func TestRestoreFromVfio_NilMap(t *testing.T) {
 	state := &DeviceState{
 		allocatable: AllocatableDevices{

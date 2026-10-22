@@ -225,6 +225,43 @@ func TestPrepareUnprepare_DirectVFIOSibling(t *testing.T) {
 	assert.Contains(t, state.allocatable, vfioSiblingName(0))
 }
 
+// TestPrepareDevices_RecordsDirectVFIOBinding covers a direct claim on a
+// dual-entry sibling (no VfioDeviceConfig conversion involved). Before this
+// fix, only GPU->VFIO conversions were recorded in claimVfioConversions, so
+// if Prepare failed after Configure succeeded (e.g. a later checkpoint write
+// failure), rollbackVfioConversions had no record of a direct sibling's
+// binding and left it bound to vfio-pci with no rebind (review comment
+// 4333141011). prepareDevices must now record every successful bind, direct
+// or converted, so rollback can find and undo it.
+func TestPrepareDevices_RecordsDirectVFIOBinding(t *testing.T) {
+	setVFIOPassthrough(t, true)
+	state, root, _ := newDualEntryState(t, 1)
+
+	_, err := state.prepareDevices(directClaim("claim-uid", vfioSiblingName(0)))
+	require.NoError(t, err)
+
+	original, ok := state.claimVfioConversions["claim-uid"][vfioSiblingName(0)]
+	require.True(t, ok, "a direct binding must be recorded so rollback can find it")
+	assert.Nil(t, original, "a direct binding has no original GPU identity to restore")
+
+	// Simulate the kernel having completed the bind (the fake sysfs bind file
+	// write does not update the driver symlink read by Unconfigure), then
+	// prove the record is enough for rollback to actually rebind the device,
+	// exactly as if a later step of Prepare (checkpoint write, CDI spec file)
+	// had failed.
+	setPCIDriver(t, root, gpuPCI(0), consts.VFIODriverName)
+
+	state.rollbackVfioConversions("claim-uid")
+
+	rebound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/amdgpu/bind"))
+	require.NoError(t, err)
+	assert.Equal(t, gpuPCI(0), string(rebound), "rollback must rebind the GPU to amdgpu even though it was never converted")
+
+	allocDev := state.allocatable[vfioSiblingName(0)]
+	require.NotNil(t, allocDev.Vfio, "a direct binding stays type=vfio on rollback")
+	assert.Empty(t, state.claimVfioConversions, "the binding record must be cleared once rolled back")
+}
+
 func TestRollbackVfioConversions(t *testing.T) {
 	root := setupFakeVfioSysfs(t)
 	pci := gpuPCI(0)
