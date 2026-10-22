@@ -82,6 +82,30 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 	return ""
 }
 
+// markSiblingPairs flags every PCI function that is advertised both as a
+// compute GPU and as a VFIO device (dual-entry advertising). Flagged entries
+// consume a capacity-1 counter for their function (see deviceCounters), so
+// the scheduler never allocates both. It must run after discovery and before
+// the first ResourceSlice is published.
+func markSiblingPairs(allocatable AllocatableDevices) {
+	compute := make(map[string]*AmdGpuInfo)
+	vfio := make(map[string]*AmdGpuVFIOInfo)
+	for _, d := range allocatable {
+		switch d.Type() {
+		case consts.AmdGpuDeviceType:
+			compute[d.AmdGpu.PCIAddress] = d.AmdGpu
+		case consts.VfioDeviceType:
+			vfio[d.Vfio.PCIAddress] = d.Vfio
+		}
+	}
+	for addr, gpu := range compute {
+		if v, ok := vfio[addr]; ok && addr != "" {
+			gpu.siblingExclusive = true
+			v.siblingExclusive = true
+		}
+	}
+}
+
 // GetDevice returns the DRA Device representation for Kubernetes
 func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {
