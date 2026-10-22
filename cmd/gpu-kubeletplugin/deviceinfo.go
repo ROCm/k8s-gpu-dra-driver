@@ -188,7 +188,6 @@ type AmdGpuVFIOInfo struct {
 	DeviceID           string
 	VendorID           string
 	IOMMUGroup         string
-	Index              int
 	ProductName        string
 	NumaNode           int
 	IsVF               bool
@@ -223,9 +222,14 @@ func (d *AmdGpuVFIOInfo) partitionMode() string {
 	}
 }
 
-// CanonicalName returns the canonical name for this VFIO device
+// CanonicalName returns the canonical name for this VFIO device. It is
+// derived from the device's own PCI address rather than discovery order, so
+// it stays stable across restarts regardless of which discovery pass (amdgpu
+// sibling, pre-bound PF, or SR-IOV VF) finds the device this time — a device
+// that moves between passes because its host driver binding changed (e.g. an
+// active claim rebinding it to vfio-pci) keeps the same name.
 func (d *AmdGpuVFIOInfo) CanonicalName() string {
-	return fmt.Sprintf("gpu-vfio-%d", d.Index)
+	return fmt.Sprintf("gpu-vfio-%s", pciAddrToDNSLabel(d.PCIAddress))
 }
 
 func pciAddrToDNSLabel(addr string) string {

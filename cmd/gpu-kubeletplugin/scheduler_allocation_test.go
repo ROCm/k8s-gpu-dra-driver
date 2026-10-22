@@ -164,7 +164,7 @@ func (s *scheduler) allocate(claim *resourceapi.ResourceClaim) []string {
 func dualGPU(i int, totalVFs int) (string, *AllocatableDevice, string, *AllocatableDevice) {
 	pci := gpuPCI(i)
 	compute := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pci, ParentPFAddress: pci, TotalVFs: totalVFs, cardIndex: i, renderIndex: 128 + i}}
-	vfio := &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{PCIAddress: pci, ParentPFAddress: pci, TotalVFs: totalVFs, Index: i}}
+	vfio := &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{PCIAddress: pci, ParentPFAddress: pci, TotalVFs: totalVFs}}
 	return compute.CanonicalName(), compute, vfio.CanonicalName(), vfio
 }
 
@@ -216,10 +216,11 @@ func TestScheduler_SiblingExclusion(t *testing.T) {
 // address. The scheduler must not allocate both to different claims.
 func TestScheduler_MixedComputeVFIOAllocationForOneVF(t *testing.T) {
 	const pf, vf = "0000:0a:00.0", "0000:0b:00.1"
+	vfioName := "gpu-vfio-" + pciAddrToDNSLabel(vf)
 	build := func() AllocatableDevices {
 		return AllocatableDevices{
-			"gpu-1-129":  {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
-			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true, Index: 1}},
+			"gpu-1-129": {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
+			vfioName:    {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: pf, TotalVFs: 4, IsVF: true}},
 		}
 	}
 
@@ -231,21 +232,21 @@ func TestScheduler_MixedComputeVFIOAllocationForOneVF(t *testing.T) {
 
 	t.Run("VFIO claimed first blocks compute", func(t *testing.T) {
 		s := newScheduler(t, build())
-		require.Equal(t, []string{"gpu-vfio-1"}, s.allocate(schedClaim("a", selVFIOVF)))
+		require.Equal(t, []string{vfioName}, s.allocate(schedClaim("a", selVFIOVF)))
 		require.Nil(t, s.allocate(schedClaim("b", selCompute)), "the VF's compute entry must not be allocatable once its VFIO entry is")
 	})
 }
 
 func TestScheduler_PFVFExclusion(t *testing.T) {
 	pf := gpuPCI(0)
+	pfName := "gpu-vfio-" + pciAddrToDNSLabel(pf)
 	build := func() AllocatableDevices {
 		devs := AllocatableDevices{
-			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 2, Index: 0}},
+			pfName: {Vfio: &AmdGpuVFIOInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 2}},
 		}
 		for i := 1; i <= 2; i++ {
 			devs[fmt.Sprintf("gpu-vfio-%d", i)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
-				PCIAddress: fmt.Sprintf("0000:0b:00.%d", i), ParentPFAddress: pf, TotalVFs: 2, IsVF: true, Index: i,
-			}}
+				PCIAddress: fmt.Sprintf("0000:0b:00.%d", i), ParentPFAddress: pf, TotalVFs: 2, IsVF: true}}
 		}
 		return devs
 	}
@@ -260,7 +261,7 @@ func TestScheduler_PFVFExclusion(t *testing.T) {
 
 	t.Run("an allocated PF blocks every VF", func(t *testing.T) {
 		s := newScheduler(t, build())
-		require.Equal(t, []string{"gpu-vfio-0"}, s.allocate(schedClaim("a", selVFIOPF)))
+		require.Equal(t, []string{pfName}, s.allocate(schedClaim("a", selVFIOPF)))
 		require.Nil(t, s.allocate(schedClaim("b", selVFIOVF)))
 	})
 }

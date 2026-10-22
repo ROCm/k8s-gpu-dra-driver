@@ -136,9 +136,9 @@ func TestDeviceCounters(t *testing.T) {
 
 func TestMarkSiblingPairs(t *testing.T) {
 	pairCompute := &AmdGpuInfo{PCIAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}
-	pairVFIO := &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", Index: 0}
+	pairVFIO := &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0"}
 	loneCompute := &AmdGpuInfo{PCIAddress: "0000:0c:00.0", cardIndex: 1, renderIndex: 129}
-	loneVFIO := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", Index: 1}
+	loneVFIO := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 	partition := &AmdPartitionInfo{Parent: &AmdGpuInfo{PCIAddress: "0000:0a:00.0"}, cardIndex: 2, renderIndex: 130}
 
 	markSiblingPairs(AllocatableDevices{
@@ -160,32 +160,34 @@ func TestMarkSiblingPairs(t *testing.T) {
 // allocations and the existing PF/VF rules still hold.
 func TestSiblingExclusion_Counters(t *testing.T) {
 	t.Run("GPU without SR-IOV", func(t *testing.T) {
+		name0, name1 := "gpu-vfio-"+pciAddrToDNSLabel("0000:0a:00.0"), "gpu-vfio-"+pciAddrToDNSLabel("0000:0c:00.0")
 		pool := dualEntryPool(AllocatableDevices{
-			"gpu-0-128":  {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
-			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", Index: 0}},
-			"gpu-1-129":  {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0c:00.0", ParentPFAddress: "0000:0c:00.0", cardIndex: 1, renderIndex: 129}},
-			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0c:00.0", ParentPFAddress: "0000:0c:00.0", Index: 1}},
+			"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
+			name0:       {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0"}},
+			"gpu-1-129": {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0c:00.0", ParentPFAddress: "0000:0c:00.0", cardIndex: 1, renderIndex: 129}},
+			name1:       {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0c:00.0", ParentPFAddress: "0000:0c:00.0"}},
 		})
-		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-0"), "siblings must be mutually exclusive")
-		assert.False(t, canAllocateTogether(t, pool, "gpu-1-129", "gpu-vfio-1"), "siblings must be mutually exclusive")
+		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", name0), "siblings must be mutually exclusive")
+		assert.False(t, canAllocateTogether(t, pool, "gpu-1-129", name1), "siblings must be mutually exclusive")
 		assert.True(t, canAllocateTogether(t, pool, "gpu-0-128"))
-		assert.True(t, canAllocateTogether(t, pool, "gpu-vfio-0"))
-		assert.True(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-1"), "different GPUs are independent")
-		assert.True(t, canAllocateTogether(t, pool, "gpu-vfio-0", "gpu-vfio-1"))
+		assert.True(t, canAllocateTogether(t, pool, name0))
+		assert.True(t, canAllocateTogether(t, pool, "gpu-0-128", name1), "different GPUs are independent")
+		assert.True(t, canAllocateTogether(t, pool, name0, name1))
 	})
 
 	t.Run("SR-IOV PF with GIM VFs", func(t *testing.T) {
-		const pf = "0000:0a:00.0"
+		const pf, vf1, vf2 = "0000:0a:00.0", "0000:0b:00.1", "0000:0b:00.2"
+		namePF, name1, name2 := "gpu-vfio-"+pciAddrToDNSLabel(pf), "gpu-vfio-"+pciAddrToDNSLabel(vf1), "gpu-vfio-"+pciAddrToDNSLabel(vf2)
 		pool := dualEntryPool(AllocatableDevices{
-			"gpu-0-128":  {AmdGpu: &AmdGpuInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 4, cardIndex: 0, renderIndex: 128}},
-			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 4, Index: 0}},
-			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0b:00.1", ParentPFAddress: pf, TotalVFs: 4, IsVF: true, Index: 1}},
-			"gpu-vfio-2": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0b:00.2", ParentPFAddress: pf, TotalVFs: 4, IsVF: true, Index: 2}},
+			"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 4, cardIndex: 0, renderIndex: 128}},
+			namePF:      {Vfio: &AmdGpuVFIOInfo{PCIAddress: pf, ParentPFAddress: pf, TotalVFs: 4}},
+			name1:       {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf1, ParentPFAddress: pf, TotalVFs: 4, IsVF: true}},
+			name2:       {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf2, ParentPFAddress: pf, TotalVFs: 4, IsVF: true}},
 		})
-		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-0"), "PF siblings must be mutually exclusive")
-		assert.False(t, canAllocateTogether(t, pool, "gpu-vfio-0", "gpu-vfio-1"), "PF and VF exclude each other")
-		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-1"), "PF and VF exclude each other")
-		assert.True(t, canAllocateTogether(t, pool, "gpu-vfio-1", "gpu-vfio-2"), "VFs share the PF's slots")
+		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", namePF), "PF siblings must be mutually exclusive")
+		assert.False(t, canAllocateTogether(t, pool, namePF, name1), "PF and VF exclude each other")
+		assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", name1), "PF and VF exclude each other")
+		assert.True(t, canAllocateTogether(t, pool, name1, name2), "VFs share the PF's slots")
 
 		var sets []resourceapi.CounterSet
 		for _, sl := range pool.Slices {
@@ -203,11 +205,12 @@ func TestSiblingExclusion_Counters(t *testing.T) {
 		// but markSiblingPairs must still exclude two entries that share a VF's
 		// own PCI address, regardless of IsVF, per review comment 4091934378.
 		const vf = "0000:0b:00.1"
+		nameVF := "gpu-vfio-" + pciAddrToDNSLabel(vf)
 		pool := dualEntryPool(AllocatableDevices{
-			"gpu-1-129":  {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
-			"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true, Index: 1}},
+			"gpu-1-129": {AmdGpu: &AmdGpuInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true, cardIndex: 1, renderIndex: 129}},
+			nameVF:      {Vfio: &AmdGpuVFIOInfo{PCIAddress: vf, ParentPFAddress: "0000:0a:00.0", TotalVFs: 4, IsVF: true}},
 		})
-		assert.False(t, canAllocateTogether(t, pool, "gpu-1-129", "gpu-vfio-1"),
+		assert.False(t, canAllocateTogether(t, pool, "gpu-1-129", nameVF),
 			"a VF's compute and VFIO entries must be mutually exclusive, keyed by the VF's own PCI address")
 	})
 
@@ -234,9 +237,10 @@ func TestSiblingExclusion_Counters(t *testing.T) {
 // next to synthetic partition devices: the family counter sets its entries
 // consume must be published alongside the partition mutex sets.
 func TestSyntheticPartitionResources_PublishFamilyCounterSets(t *testing.T) {
+	name0 := "gpu-vfio-" + pciAddrToDNSLabel("0000:0a:00.0")
 	allocatable := AllocatableDevices{
-		"gpu-0-128":  {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
-		"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", Index: 0}},
+		"gpu-0-128": {AmdGpu: &AmdGpuInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}},
+		name0:       {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0a:00.0", ParentPFAddress: "0000:0a:00.0"}},
 		"gpu-1-spx-nps1": {SyntheticPartition: &SyntheticPartitionDevice{
 			GPUIndex: 1, ComputePartition: "spx", MemoryPartition: "nps1", Taints: []resourceapi.DeviceTaint{},
 		}},
@@ -259,6 +263,6 @@ func TestSyntheticPartitionResources_PublishFamilyCounterSets(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{"gpu-1-mutex", "pf-0000-0a-00-0-counter-set"}, names)
-	assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-vfio-0"))
+	assert.False(t, canAllocateTogether(t, pool, "gpu-0-128", name0))
 	assert.True(t, canAllocateTogether(t, pool, "gpu-0-128", "gpu-1-spx-nps1"))
 }

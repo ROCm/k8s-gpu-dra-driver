@@ -107,7 +107,7 @@ func getVFIOParentInfo(pciAddr string) (isVF bool, parentPFAddress string, total
 // that is the driver Unconfigure must rebind it to when the claim is released:
 // an empty preConfigureDriver would mean "originally unbound" and leave the GPU
 // without a driver.
-func newVFIOSibling(gpu *AmdGpuInfo, index, numVFs int) *AllocatableDevice {
+func newVFIOSibling(gpu *AmdGpuInfo, numVFs int) *AllocatableDevice {
 	iommuGroup, _ := amdgpu.GetIOMMUGroup(gpu.PCIAddress)
 	return &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
 		PCIAddress:         gpu.PCIAddress,
@@ -116,7 +116,6 @@ func newVFIOSibling(gpu *AmdGpuInfo, index, numVFs int) *AllocatableDevice {
 		ProductName:        gpu.ProductName,
 		NumaNode:           gpu.NumaNode,
 		IsVF:               gpu.IsVF,
-		Index:              index,
 		IOMMUGroup:         iommuGroup,
 		pciBusIDAttr:       gpu.pciBusIDAttr,
 		pcieRootAttr:       gpu.pcieRootAttr,
@@ -144,7 +143,7 @@ func newVFIOSibling(gpu *AmdGpuInfo, index, numVFs int) *AllocatableDevice {
 // counter sets).
 func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevices, map[int]string, []int, error) {
 	alldevices := make(AllocatableDevices)
-	vfioIndex := 0
+	vfioCount := 0
 	allAMDGPUs := amdgpu.GetAMDGPUs()
 
 	// Sort PCI addresses for deterministic GPU index assignment
@@ -232,9 +231,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
 				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					vfioDev := newVFIOSibling(amdGpuInfo, vfioIndex, numVFs)
+					vfioDev := newVFIOSibling(amdGpuInfo, numVFs)
 					alldevices[vfioDev.CanonicalName()] = vfioDev
-					vfioIndex++
+					vfioCount++
 				}
 				klog.Infof("GPU %d (%s) does not support partitioning, advertising as normal GPU: %s",
 					gpuIndex, pciAddr, device.CanonicalName())
@@ -316,9 +315,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					device.CanonicalName(), computePartitionType, memoryPartitionType)
 
 				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					vfioDev := newVFIOSibling(amdGpuInfo, vfioIndex, numVFs)
+					vfioDev := newVFIOSibling(amdGpuInfo, numVFs)
 					alldevices[vfioDev.CanonicalName()] = vfioDev
-					vfioIndex++
+					vfioCount++
 				}
 			} else if computePartitionType != "" {
 				// This is a partition - create both parent GPU info and partition info
@@ -388,7 +387,6 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						DeviceID:           pf.DeviceID,
 						VendorID:           pf.VendorID,
 						IOMMUGroup:         pf.IOMMUGroup,
-						Index:              vfioIndex,
 						ProductName:        pf.ProductName,
 						NumaNode:           pf.NumaNode,
 						IsVF:               false,
@@ -398,7 +396,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 					klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
-					vfioIndex++
+					vfioCount++
 				}
 			}
 		}
@@ -442,7 +440,6 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						DeviceID:           vf.DeviceID,
 						VendorID:           vf.VendorID,
 						IOMMUGroup:         vf.IOMMUGroup,
-						Index:              vfioIndex,
 						ProductName:        vf.ProductName,
 						NumaNode:           vf.NumaNode,
 						IsVF:               true,
@@ -458,14 +455,14 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 					klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
-					vfioIndex++
+					vfioCount++
 				}
 			}
 		}
 	}
 
-	if vfioIndex > 0 {
-		klog.Infof("Discovered %d VFIO passthrough devices", vfioIndex)
+	if vfioCount > 0 {
+		klog.Infof("Discovered %d VFIO passthrough devices", vfioCount)
 	}
 
 	if enableSyntheticPartition {
