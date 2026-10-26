@@ -588,6 +588,34 @@ func TestPrepareDevices_ConvertedGPU(t *testing.T) {
 	})
 }
 
+func TestPrepareDevices_DoesNotConvertUnmatchedRequest(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root := setupConvertibleGPU(t, false, "dev/vfio/42", "dev/vfio/vfio")
+
+	const passthroughDevice = "gpu-vfio-1"
+	const passthroughPCI = "0000:0e:00.0"
+	createPCIDevice(t, root, passthroughPCI, consts.VFIODriverName)
+	require.NoError(t, os.Symlink("../../../kernel/iommu_groups/43",
+		filepath.Join(root, "sys/bus/pci/devices", passthroughPCI, "iommu_group")))
+	createDevNode(t, root, "dev/vfio/43")
+	state.allocatable[passthroughDevice] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress:         passthroughPCI,
+		IOMMUGroup:         "43",
+		preConfigureDriver: consts.VFIODriverName,
+	}}
+
+	claim := vfioClaimDevices("", "gpu-0-128", passthroughDevice)
+	claim.Status.Allocation.Devices.Results[0].Request = "compute"
+	claim.Status.Allocation.Devices.Results[1].Request = "passthrough"
+	claim.Status.Allocation.Devices.Config[0].Requests = []string{"passthrough"}
+
+	_, err := state.prepareDevices(claim)
+	require.Error(t, err, "the fixture has no host GPU CDI nodes for the default compute config")
+	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(),
+		"a VFIO config scoped to passthrough must not convert the compute GPU")
+	assert.Empty(t, state.claimVfioConversions)
+}
+
 // newLifecycleState returns a converted-GPU DeviceState wired to a real CDI
 // handler and checkpoint manager in temp dirs, as NewDeviceState would.
 func newLifecycleState(t *testing.T, iommuFDEnabled bool, nodes ...string) (*DeviceState, string, string) {

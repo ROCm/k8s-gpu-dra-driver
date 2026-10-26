@@ -565,6 +565,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ Prepar
 		}
 		isVFIO := allocDev.Type() == consts.VfioDeviceType
 		for _, c := range slices.Backward(configs) {
+			if len(c.Requests) != 0 && !slices.Contains(c.Requests, result.Request) {
+				continue
+			}
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
 				if !featuregates.Enabled(featuregates.VFIOPassthrough) {
@@ -605,10 +608,8 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ Prepar
 					continue
 				}
 			}
-			if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
-				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
-				break
-			}
+			configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+			break
 		}
 	}
 
