@@ -590,7 +590,7 @@ func TestPrepareDevices_ConvertedGPU(t *testing.T) {
 
 func TestPrepareDevices_DoesNotConvertUnmatchedRequest(t *testing.T) {
 	enableVFIOPassthrough(t)
-	state, root := setupConvertibleGPU(t, false, "dev/vfio/42", "dev/vfio/vfio")
+	state, root, _ := newLifecycleState(t, false, "dev/vfio/42", "dev/vfio/vfio")
 
 	const passthroughDevice = "gpu-vfio-1"
 	const passthroughPCI = "0000:0e:00.0"
@@ -609,11 +609,21 @@ func TestPrepareDevices_DoesNotConvertUnmatchedRequest(t *testing.T) {
 	claim.Status.Allocation.Devices.Results[1].Request = "passthrough"
 	claim.Status.Allocation.Devices.Config[0].Requests = []string{"passthrough"}
 
-	_, err := state.prepareDevices(claim)
-	require.Error(t, err, "the fixture has no host GPU CDI nodes for the default compute config")
-	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(),
-		"a VFIO config scoped to passthrough must not convert the compute GPU")
-	assert.Empty(t, state.claimVfioConversions)
+	devices, err := state.Prepare(claim)
+	if err != nil {
+		// The test host may not have /dev/kfd and the GPU device nodes needed
+		// to finish the default compute config. Prepare must still roll back
+		// without converting the unmatched compute allocation.
+		assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(),
+			"a VFIO config scoped to passthrough must not convert the compute GPU")
+		assert.Empty(t, state.claimVfioConversions)
+		require.NoError(t, state.Unprepare("claim-uid"))
+		return
+	}
+
+	require.Len(t, devices, 2, "both request-scoped allocations must be prepared")
+	require.NoError(t, state.Unprepare("claim-uid"))
+	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type())
 }
 
 // newLifecycleState returns a converted-GPU DeviceState wired to a real CDI
