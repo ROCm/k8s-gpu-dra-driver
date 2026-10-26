@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 )
 
 const convertAddr = "0000:0d:00.0"
@@ -191,6 +192,7 @@ func TestVfioConversions_PerClaim(t *testing.T) {
 func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	enableVFIOPassthrough(t)
 	state, root, _ := newLifecycleState(t, true, allVfioNodes...)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices", convertAddr, "numa_node"), []byte("7\n"), 0644))
 	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
 	require.NoError(t, err)
 	cp := readCheckpoint(t, state)
@@ -209,7 +211,7 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 			}},
 		},
 	}
-	restarted.recoverVfioConversions(cp.V1.VfioConversions)
+	restarted.recoverVfioConversions(cp.V1.VfioConversions, deviceattribute.WithFSFromRoot(filepath.Join(root, "sys")))
 
 	assert.NotContains(t, restarted.allocatable, "gpu-vfio-0", "discovery's duplicate must be dropped")
 	dev := restarted.allocatable["gpu-0-128"]
@@ -217,6 +219,9 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	require.NotNil(t, dev.Vfio)
 	assert.Equal(t, "amdgpu", dev.Vfio.preConfigureDriver)
 	assert.Equal(t, "42", dev.Vfio.IOMMUGroup)
+	assert.Equal(t, deviceattribute.StandardDeviceAttributeNUMANode, dev.Vfio.convertedFrom.numaNodeAttr.Name)
+	require.NotNil(t, dev.Vfio.convertedFrom.numaNodeAttr.Value.IntValue)
+	assert.Equal(t, int64(7), *dev.Vfio.convertedFrom.numaNodeAttr.Value.IntValue)
 	assertPublished(t, restarted.allocatable, map[string]string{"gpu-0-128": consts.AmdGpuDeviceType})
 
 	require.NoError(t, restarted.Unprepare("claim-uid"))

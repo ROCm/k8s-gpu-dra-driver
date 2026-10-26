@@ -170,7 +170,7 @@ func (s *DeviceState) saveVfioConversions(checkpoint *Checkpoint) {
 // GPU and instead lists it as a pre-bound VFIO device under another name.
 // Recovery drops that duplicate entry and restores the converted entry under
 // the name the claim was allocated, so Unprepare can rebind it to amdgpu.
-func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*VfioConversionRecord) {
+func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*VfioConversionRecord, mods ...deviceattribute.MachineModifier) {
 	for claimUID, devices := range records {
 		for name, rec := range devices {
 			for other, dev := range s.allocatable {
@@ -184,6 +184,10 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 			pcieRootAttr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(rec.PCIAddress)
 			if err != nil {
 				klog.Warningf("Failed to get PCIe root for recovered VFIO conversion %s: %v", rec.PCIAddress, err)
+			}
+			numaNodeAttr, err := deviceattribute.GetNUMANodeAttributeByPCIBusID(rec.PCIAddress, configuredNUMAAttributeForm(), mods...)
+			if err != nil {
+				klog.V(2).Infof("Standard numaNode attribute unavailable for recovered VFIO conversion %s: %v", rec.PCIAddress, err)
 			}
 			original := &AmdGpuInfo{
 				PCIAddress:       rec.PCIAddress,
@@ -200,6 +204,7 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 				NumaNode:         rec.NumaNode,
 				pciBusIDAttr:     pciBusIDAttr,
 				pcieRootAttr:     pcieRootAttr,
+				numaNodeAttr:     numaNodeAttr,
 			}
 			s.allocatable[name] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
 				PCIAddress:         rec.PCIAddress,
@@ -211,6 +216,7 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 				IOMMUGroup:         rec.IOMMUGroup,
 				pciBusIDAttr:       pciBusIDAttr,
 				pcieRootAttr:       pcieRootAttr,
+				numaNodeAttr:       numaNodeAttr,
 				preConfigureDriver: "amdgpu",
 				convertedFrom:      original,
 			}}
