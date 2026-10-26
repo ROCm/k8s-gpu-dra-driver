@@ -575,6 +575,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 							IsVF:               isVF,
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
+							numaNodeAttr:       allocDev.AmdGpu.numaNodeAttr,
 							preConfigureDriver: "amdgpu",
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
