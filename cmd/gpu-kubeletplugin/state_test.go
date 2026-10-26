@@ -614,7 +614,7 @@ func TestPrepareDevices_DoesNotConvertUnmatchedRequest(t *testing.T) {
 		// without converting the unmatched compute allocation.
 		assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(),
 			"a VFIO config scoped to passthrough must not convert the compute GPU")
-		assert.Empty(t, state.claimVfioConversions)
+		assert.Empty(t, state.vfioConversions)
 		require.NoError(t, state.Unprepare("claim-uid"))
 		return
 	}
