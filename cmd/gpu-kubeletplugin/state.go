@@ -193,7 +193,12 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 				checkpoint.V1.AssignedSlots,
 			)
 		}
-		state.recoverVfioConversions(checkpoint.V1.VfioConversions)
+		if state.recoverVfioConversions(checkpoint.V1.VfioConversions) {
+			state.saveVfioConversions(checkpoint)
+			if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+				klog.Warningf("Failed to remove stale VFIO conversion intents from checkpoint: %v", err)
+			}
+		}
 		return state, nil
 	}
 
@@ -297,7 +302,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 		}
 	}
 
-	preparedDevices, err := s.prepareDevices(claim)
+	preparedDevices, err := s.prepareDevicesWithCheckpoint(claim, checkpoint)
 	if err != nil {
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
@@ -560,7 +565,11 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ PreparedDevices, err error) {
+func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+	return s.prepareDevicesWithCheckpoint(claim, nil)
+}
+
+func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceClaim, checkpoint *Checkpoint) (_ PreparedDevices, err error) {
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -656,6 +665,16 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ Prepar
 			}
 			configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
 			break
+		}
+	}
+
+	// Persist conversion intent before the first hardware bind. If the process
+	// stops after Configure, startup recovery can still identify the original
+	// allocated device and return it to the claim.
+	if checkpoint != nil && len(s.vfioConversions[claimUID]) != 0 {
+		s.saveVfioConversions(checkpoint)
+		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			return nil, fmt.Errorf("unable to checkpoint VFIO conversion intent: %w", err)
 		}
 	}
 

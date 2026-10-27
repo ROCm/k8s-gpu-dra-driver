@@ -170,9 +170,17 @@ func (s *DeviceState) saveVfioConversions(checkpoint *Checkpoint) {
 // GPU and instead lists it as a pre-bound VFIO device under another name.
 // Recovery drops that duplicate entry and restores the converted entry under
 // the name the claim was allocated, so Unprepare can rebind it to amdgpu.
-func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*VfioConversionRecord, mods ...deviceattribute.MachineModifier) {
+func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*VfioConversionRecord, mods ...deviceattribute.MachineModifier) (checkpointChanged bool) {
 	for claimUID, devices := range records {
 		for name, rec := range devices {
+			currentDriver, driverErr := amdgpu.GetPCIDriver(rec.PCIAddress)
+			if driverErr == nil && currentDriver == "amdgpu" {
+				klog.Infof("Discarding stale VFIO conversion intent for %s (%s): device is still bound to amdgpu", name, rec.PCIAddress)
+				delete(devices, name)
+				checkpointChanged = true
+				continue
+			}
+
 			for other, dev := range s.allocatable {
 				if other != name && dev.Vfio != nil && dev.Vfio.PCIAddress == rec.PCIAddress {
 					klog.Infof("Dropping discovered VFIO device %s: %s is converted for claim %s as %s", other, rec.PCIAddress, claimUID, name)
@@ -223,5 +231,10 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 			s.recordVfioConversion(claimUID, name, original)
 			klog.Infof("Recovered VFIO conversion of %s (%s) for claim %s", name, rec.PCIAddress, claimUID)
 		}
+		if len(devices) == 0 {
+			delete(records, claimUID)
+			checkpointChanged = true
+		}
 	}
+	return checkpointChanged
 }

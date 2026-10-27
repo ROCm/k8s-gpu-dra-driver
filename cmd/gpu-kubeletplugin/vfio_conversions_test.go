@@ -233,6 +233,26 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	assert.Empty(t, readCheckpoint(t, restarted).V1.VfioConversions)
 }
 
+func TestVfioConversions_RecoveredIntentOnOriginalDriverIsDiscarded(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, _, _ := newLifecycleState(t, true, allVfioNodes...)
+	records := map[string]map[string]*VfioConversionRecord{
+		"claim-uid": {"gpu-0-128": {
+			PCIAddress:  convertAddr,
+			CardIndex:   0,
+			RenderIndex: 128,
+		}},
+	}
+
+	changed := state.recoverVfioConversions(records)
+
+	assert.True(t, changed)
+	assert.NotNil(t, state.allocatable["gpu-0-128"].AmdGpu, "an unbound intent must leave the discovered GPU available")
+	assert.Nil(t, state.allocatable["gpu-0-128"].Vfio)
+	assert.Empty(t, state.vfioConversions)
+	assert.Empty(t, records)
+}
+
 // TestConvertedGPU_AdvertisedAsOriginal checks that a GPU converted to VFIO
 // for a claim keeps being published under its own name and attributes, and
 // does not collide with a pre-bound VFIO device.

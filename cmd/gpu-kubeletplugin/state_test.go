@@ -33,10 +33,12 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
@@ -52,6 +54,70 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 )
+
+type observingCheckpointManager struct {
+	checkpointmanager.CheckpointManager
+	onCreate func(checkpointmanager.Checkpoint) error
+}
+
+func (m *observingCheckpointManager) CreateCheckpoint(key string, checkpoint checkpointmanager.Checkpoint) error {
+	if m.onCreate != nil {
+		if err := m.onCreate(checkpoint); err != nil {
+			return err
+		}
+	}
+	return m.CheckpointManager.CreateCheckpoint(key, checkpoint)
+}
+
+func TestPrepare_CheckpointsVfioIntentBeforeConfigure(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, _, _ := newLifecycleState(t, true, allVfioNodes...)
+
+	var intentDrivers []string
+	manager := state.checkpointManager
+	state.checkpointManager = &observingCheckpointManager{
+		CheckpointManager: manager,
+		onCreate: func(checkpoint checkpointmanager.Checkpoint) error {
+			cp := checkpoint.(*Checkpoint)
+			if len(cp.V1.VfioConversions) == 0 {
+				return nil
+			}
+			driver, err := amdgpu.GetPCIDriver(convertAddr)
+			require.NoError(t, err)
+			intentDrivers = append(intentDrivers, driver)
+			return nil
+		},
+	}
+
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+	require.NoError(t, err)
+	require.Len(t, intentDrivers, 2)
+	assert.Equal(t, "amdgpu", intentDrivers[0])
+}
+
+func TestPrepare_VfioIntentCheckpointFailureDoesNotBind(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, _ := newLifecycleState(t, true, allVfioNodes...)
+	manager := state.checkpointManager
+	state.checkpointManager = &observingCheckpointManager{
+		CheckpointManager: manager,
+		onCreate: func(checkpoint checkpointmanager.Checkpoint) error {
+			cp := checkpoint.(*Checkpoint)
+			if len(cp.V1.VfioConversions) != 0 {
+				return errors.New("conversion intent checkpoint failed")
+			}
+			return nil
+		},
+	}
+
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conversion intent checkpoint failed")
+	assert.Empty(t, state.vfioConversions)
+	bind, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
+	require.NoError(t, err)
+	assert.Empty(t, bind, "VFIO bind must not be attempted before intent is durable")
+}
 
 func TestRestoreFromVfio(t *testing.T) {
 	original := &AmdGpuInfo{PCIAddress: "0000:0d:00.0", cardIndex: 0, renderIndex: 128}
