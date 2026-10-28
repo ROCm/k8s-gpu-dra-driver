@@ -395,7 +395,7 @@ func TestPrepareDevices_IOMMUBackend(t *testing.T) {
 	nodePaths := func(pd PreparedDevices) []string {
 		require.Len(t, pd, 1)
 		var paths []string
-		for _, n := range pd[0].ContainerEdits.ContainerEdits.DeviceNodes {
+		for _, n := range pd[0].ContainerEdits.DeviceNodes {
 			paths = append(paths, n.Path)
 		}
 		return paths
@@ -542,7 +542,7 @@ func TestPrepareDevices_ConvertedGPU(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, pd, 1)
 		var paths []string
-		for _, n := range pd[0].ContainerEdits.ContainerEdits.DeviceNodes {
+		for _, n := range pd[0].ContainerEdits.DeviceNodes {
 			paths = append(paths, n.Path)
 		}
 		assert.Equal(t, []string{

@@ -425,7 +425,7 @@ func TestGetVfioCommonCDIEdits(t *testing.T) {
 
 			edits, err := GetVfioCommonCDIEdits(tc.useIommuFD)
 			require.NoError(t, err)
-			require.Len(t, edits.ContainerEdits.DeviceNodes, len(tc.nodes))
+			require.Len(t, edits.DeviceNodes, len(tc.nodes))
 			for i, path := range tc.nodes {
 				node := edits.ContainerEdits.DeviceNodes[i]
 				assert.Equal(t, filepath.Join(root, path), node.Path)
