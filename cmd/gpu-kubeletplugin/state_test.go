@@ -33,10 +33,12 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
@@ -53,18 +55,82 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
+type observingCheckpointManager struct {
+	checkpointmanager.CheckpointManager
+	onCreate func(checkpointmanager.Checkpoint) error
+}
+
+func (m *observingCheckpointManager) CreateCheckpoint(key string, checkpoint checkpointmanager.Checkpoint) error {
+	if m.onCreate != nil {
+		if err := m.onCreate(checkpoint); err != nil {
+			return err
+		}
+	}
+	return m.CheckpointManager.CreateCheckpoint(key, checkpoint)
+}
+
+func TestPrepare_CheckpointsVfioIntentBeforeConfigure(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, _, _ := newLifecycleState(t, true, allVfioNodes...)
+
+	var intentDrivers []string
+	manager := state.checkpointManager
+	state.checkpointManager = &observingCheckpointManager{
+		CheckpointManager: manager,
+		onCreate: func(checkpoint checkpointmanager.Checkpoint) error {
+			cp := checkpoint.(*Checkpoint)
+			if len(cp.V1.VfioConversions) == 0 {
+				return nil
+			}
+			driver, err := amdgpu.GetPCIDriver(convertAddr)
+			require.NoError(t, err)
+			intentDrivers = append(intentDrivers, driver)
+			return nil
+		},
+	}
+
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+	require.NoError(t, err)
+	require.Len(t, intentDrivers, 2)
+	assert.Equal(t, "amdgpu", intentDrivers[0])
+}
+
+func TestPrepare_VfioIntentCheckpointFailureDoesNotBind(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, _ := newLifecycleState(t, true, allVfioNodes...)
+	manager := state.checkpointManager
+	state.checkpointManager = &observingCheckpointManager{
+		CheckpointManager: manager,
+		onCreate: func(checkpoint checkpointmanager.Checkpoint) error {
+			cp := checkpoint.(*Checkpoint)
+			if len(cp.V1.VfioConversions) != 0 {
+				return errors.New("conversion intent checkpoint failed")
+			}
+			return nil
+		},
+	}
+
+	_, err := state.Prepare(vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conversion intent checkpoint failed")
+	assert.Empty(t, state.vfioConversions)
+	bind, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
+	require.NoError(t, err)
+	assert.Empty(t, bind, "VFIO bind must not be attempted before intent is durable")
+}
+
 func TestRestoreFromVfio(t *testing.T) {
 	original := &AmdGpuInfo{PCIAddress: "0000:0d:00.0", cardIndex: 0, renderIndex: 128}
 	state := &DeviceState{
 		allocatable: AllocatableDevices{
 			"gpu-0-128": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{
-			"gpu-0-128": original,
+		vfioConversions: map[string]map[string]*AmdGpuInfo{
+			"claim-a": {"gpu-0-128": original},
 		},
 	}
 
-	state.restoreFromVfio("gpu-0-128")
+	state.restoreFromVfio("claim-a", "gpu-0-128")
 
 	allocDev := state.allocatable["gpu-0-128"]
 	assert.NotNil(t, allocDev.AmdGpu, "AmdGpu should be restored")
@@ -73,8 +139,7 @@ func TestRestoreFromVfio(t *testing.T) {
 	assert.Equal(t, 0, allocDev.AmdGpu.cardIndex)
 	assert.Equal(t, 128, allocDev.AmdGpu.renderIndex)
 	assert.Equal(t, consts.AmdGpuDeviceType, allocDev.Type())
-	_, inMap := state.claimVfioConversions["gpu-0-128"]
-	assert.False(t, inMap, "device should be removed from claimVfioConversions")
+	assert.Empty(t, state.vfioConversions, "record should be removed once restored")
 }
 
 func TestRestoreFromVfio_NoConversion(t *testing.T) {
@@ -82,10 +147,10 @@ func TestRestoreFromVfio_NoConversion(t *testing.T) {
 		allocatable: AllocatableDevices{
 			"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{},
+		vfioConversions: map[string]map[string]*AmdGpuInfo{},
 	}
 
-	state.restoreFromVfio("gpu-vfio-0")
+	state.restoreFromVfio("claim-a", "gpu-vfio-0")
 
 	allocDev := state.allocatable["gpu-vfio-0"]
 	assert.NotNil(t, allocDev.Vfio, "pre-discovered VFIO device should stay as VFIO")
@@ -100,7 +165,7 @@ func TestRestoreFromVfio_NilMap(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		state.restoreFromVfio("gpu-vfio-0")
+		state.restoreFromVfio("claim-a", "gpu-vfio-0")
 	})
 }
 
@@ -179,8 +244,8 @@ func TestUnprepareDevices_RestoresConvertedDevice(t *testing.T) {
 				preConfigureDriver: "vfio-pci",
 			}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{
-			"gpu-0-128": original,
+		vfioConversions: map[string]map[string]*AmdGpuInfo{
+			"test-claim": {"gpu-0-128": original},
 		},
 		vfioManager: &VfioPciManager{},
 	}
@@ -205,8 +270,7 @@ func TestUnprepareDevices_PreDiscoveredVfioNotRestored(t *testing.T) {
 				preConfigureDriver: "vfio-pci",
 			}},
 		},
-		claimVfioConversions: map[string]*AmdGpuInfo{},
-		vfioManager:          &VfioPciManager{},
+		vfioManager: &VfioPciManager{},
 	}
 	devices := PreparedDevices{
 		{Device: drapbv1.Device{DeviceName: "gpu-vfio-0"}},
@@ -525,7 +589,7 @@ func assertRestoredGPU(t *testing.T, state *DeviceState, name string) {
 	assert.NotNil(t, dev.AmdGpu, "device should be restored to AmdGpu")
 	assert.Nil(t, dev.Vfio, "device should not remain VFIO")
 	assert.Equal(t, consts.AmdGpuDeviceType, dev.Type())
-	assert.Empty(t, state.claimVfioConversions)
+	assert.Empty(t, state.vfioConversions)
 }
 
 // TestPrepareDevices_ConvertedGPU covers claims that convert a regular GPU to
@@ -616,7 +680,7 @@ func TestPrepareDevices_DoesNotConvertUnmatchedRequest(t *testing.T) {
 		// without converting the unmatched compute allocation.
 		assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-0-128"].Type(),
 			"a VFIO config scoped to passthrough must not convert the compute GPU")
-		assert.Empty(t, state.claimVfioConversions)
+		assert.Empty(t, state.vfioConversions)
 		require.NoError(t, state.Unprepare("claim-uid"))
 		return
 	}
