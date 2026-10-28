@@ -290,6 +290,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	}
 
 	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		s.rollbackVfio(preparedDeviceNames(preparedDevices))
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -308,6 +309,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		if delErr := s.cdi.DeleteClaimSpecFile(claimUID); delErr != nil {
 			klog.Warningf("failed to delete orphaned CDI spec file for claim %s after checkpoint failure: %v", claimUID, delErr)
 		}
+		s.rollbackVfio(preparedDeviceNames(preparedDevices))
 		if s.syntheticPartition && s.partitionState != nil {
 			s.rollbackPartitions(claimUID, partitionShares)
 		}
@@ -514,7 +516,7 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (_ PreparedDevices, err error) {
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -541,6 +543,15 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	// stays immutable. Restored on unprepare or rollback.
 	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
 
+	// On any failure below, undo every VFIO bind and GPU->VFIO conversion made
+	// for this claim, so a rejected claim never leaves devices converted.
+	var configuredVfio []string
+	defer func() {
+		if err != nil {
+			s.rollbackVfio(configuredVfio)
+		}
+	}()
+
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
@@ -554,6 +565,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		}
 		isVFIO := allocDev.Type() == consts.VfioDeviceType
 		for _, c := range slices.Backward(configs) {
+			if len(c.Requests) != 0 && !slices.Contains(c.Requests, result.Request) {
+				continue
+			}
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
 				if !featuregates.Enabled(featuregates.VFIOPassthrough) {
@@ -594,10 +608,8 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 					continue
 				}
 			}
-			if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
-				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
-				break
-			}
+			configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+			break
 		}
 	}
 
@@ -628,24 +640,14 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 			if err := castConfig.Validate(); err != nil {
 				return nil, fmt.Errorf("error validating VFIO config: %w", err)
 			}
-			var configuredNames []string
 			for _, result := range results {
-				edits, err := s.applyVFIOConfig(result)
+				// Record before applying: a failed Configure may have
+				// partially bound the device, so rollback must visit it.
+				configuredVfio = append(configuredVfio, result.Device)
+				edits, err := s.applyVFIOConfig(result, castConfig)
 				if err != nil {
-					if dev := s.allocatable[result.Device]; dev != nil && dev.Vfio != nil {
-						configuredNames = append(configuredNames, result.Device)
-					}
-					for _, name := range configuredNames {
-						if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil {
-							if unconfigErr := s.vfioManager.Unconfigure(dev.Vfio); unconfigErr != nil {
-								klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, unconfigErr)
-							}
-						}
-						s.restoreFromVfio(name)
-					}
 					return nil, fmt.Errorf("error applying VFIO config for %s: %w", result.Device, err)
 				}
-				configuredNames = append(configuredNames, result.Device)
 				perDeviceCDIContainerEdits[allocationResultKey(string(claim.UID), result)] = edits
 			}
 		default:
@@ -704,6 +706,31 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// preparedDeviceNames returns the device names of a set of prepared devices.
+func preparedDeviceNames(devices PreparedDevices) []string {
+	names := make([]string, 0, len(devices))
+	for _, d := range devices {
+		names = append(names, d.DeviceName)
+	}
+	return names
+}
+
+// rollbackVfio unconfigures the named devices that are VFIO (others are
+// skipped) and restores every GPU->VFIO conversion recorded for the current
+// claim.
+func (s *DeviceState) rollbackVfio(configured []string) {
+	for _, name := range configured {
+		if dev := s.allocatable[name]; dev != nil && dev.Vfio != nil && s.vfioManager != nil {
+			if err := s.vfioManager.Unconfigure(dev.Vfio); err != nil {
+				klog.Warningf("Rollback: failed to unconfigure %s: %v", dev.Vfio.PCIAddress, err)
+			}
+		}
+	}
+	for name := range s.claimVfioConversions {
+		s.restoreFromVfio(name)
+	}
 }
 
 func (s *DeviceState) restoreFromVfio(deviceName string) {
@@ -1013,7 +1040,7 @@ func GetOpaqueDeviceConfigs(
 }
 
 // applyVFIOConfig configures a VFIO passthrough device and returns CDI edits.
-func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocationResult) (*cdiapi.ContainerEdits, error) {
+func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocationResult, config *configapi.VfioDeviceConfig) (*cdiapi.ContainerEdits, error) {
 	device, exists := s.allocatable[result.Device]
 	if !exists || device.Vfio == nil {
 		return nil, fmt.Errorf("device %s is not a VFIO device", result.Device)
@@ -1026,17 +1053,29 @@ func (s *DeviceState) applyVFIOConfig(result *resourceapi.DeviceRequestAllocatio
 		return nil, fmt.Errorf("error configuring VFIO device %s: %w", result.Device, err)
 	}
 
-	deviceEdits, err := GetVfioCDIContainerEdits(device.Vfio)
+	policy := configapi.IOMMUBackendPolicyLegacyOnly
+	if config.Iommu != nil {
+		policy = config.Iommu.BackendPolicy
+	}
+	useIommuFD, err := UseIommuFD(device.Vfio, policy, s.vfioManager.iommuFDEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("error selecting IOMMU backend for %s: %w", result.Device, err)
+	}
+
+	deviceEdits, err := GetVfioDeviceCDIEdits(device.Vfio, useIommuFD)
 	if err != nil {
 		return nil, fmt.Errorf("error building CDI edits for %s: %w", result.Device, err)
 	}
-
-	commonEdits, err := GetVfioCommonCDIContainerEdits()
+	commonEdits, err := GetVfioCommonCDIEdits(useIommuFD)
 	if err != nil {
-		return nil, fmt.Errorf("error building common VFIO CDI edits: %w", err)
+		return nil, fmt.Errorf("error building common VFIO CDI edits for %s: %w", result.Device, err)
 	}
 	deviceEdits.DeviceNodes = append(deviceEdits.DeviceNodes, commonEdits.DeviceNodes...)
 
-	klog.Infof("Applied VFIO config for %s: iommuGroup=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup)
+	backend := "legacy"
+	if useIommuFD {
+		backend = "iommufd"
+	}
+	klog.Infof("Applied VFIO config for %s: iommuGroup=%s, backend=%s", device.Vfio.PCIAddress, device.Vfio.IOMMUGroup, backend)
 	return deviceEdits, nil
 }

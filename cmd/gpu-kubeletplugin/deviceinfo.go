@@ -118,6 +118,7 @@ type AmdGpuVFIOInfo struct {
 	pcieRootAttr       deviceattribute.DeviceAttribute
 	numaNodeAttr       deviceattribute.DeviceAttribute
 	preConfigureDriver string
+	IommuFDCdev        string
 }
 
 // CanonicalName returns the canonical name for this VFIO device
