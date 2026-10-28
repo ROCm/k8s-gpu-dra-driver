@@ -427,7 +427,7 @@ func TestGetVfioCommonCDIEdits(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, edits.DeviceNodes, len(tc.nodes))
 			for i, path := range tc.nodes {
-				node := edits.ContainerEdits.DeviceNodes[i]
+				node := edits.DeviceNodes[i]
 				assert.Equal(t, filepath.Join(root, path), node.Path)
 				assert.Equal(t, "c", node.Type)
 				assert.Equal(t, int64(1), node.Major)
@@ -461,8 +461,8 @@ func TestGetVfioCommonCDIEdits(t *testing.T) {
 
 		edits, err := GetVfioCommonCDIEdits(true)
 		require.NoError(t, err)
-		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, filepath.Join(root, "dev/iommu"), edits.ContainerEdits.DeviceNodes[0].Path)
+		require.Len(t, edits.DeviceNodes, 1)
+		assert.Equal(t, filepath.Join(root, "dev/iommu"), edits.DeviceNodes[0].Path)
 	})
 }
 
@@ -473,9 +473,9 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42"}
 		edits, err := GetVfioDeviceCDIEdits(info, false)
 		require.NoError(t, err)
-		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, filepath.Join(root, "dev/vfio/42"), edits.ContainerEdits.DeviceNodes[0].Path)
-		assert.Equal(t, int64(1), edits.ContainerEdits.DeviceNodes[0].Major)
+		require.Len(t, edits.DeviceNodes, 1)
+		assert.Equal(t, filepath.Join(root, "dev/vfio/42"), edits.DeviceNodes[0].Path)
+		assert.Equal(t, int64(1), edits.DeviceNodes[0].Major)
 	})
 
 	t.Run("iommufd cdev path", func(t *testing.T) {
@@ -484,8 +484,8 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0", IOMMUGroup: "42", IommuFDCdev: "vfio5"}
 		edits, err := GetVfioDeviceCDIEdits(info, true)
 		require.NoError(t, err)
-		require.Len(t, edits.ContainerEdits.DeviceNodes, 1)
-		assert.Equal(t, filepath.Join(root, "dev/vfio/devices/vfio5"), edits.ContainerEdits.DeviceNodes[0].Path)
+		require.Len(t, edits.DeviceNodes, 1)
+		assert.Equal(t, filepath.Join(root, "dev/vfio/devices/vfio5"), edits.DeviceNodes[0].Path)
 	})
 
 	t.Run("iommufd errors when cdev node missing", func(t *testing.T) {
@@ -505,7 +505,7 @@ func TestGetVfioDeviceCDIEdits(t *testing.T) {
 		info := &AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"}
 		edits, err := GetVfioDeviceCDIEdits(info, false)
 		require.NoError(t, err)
-		assert.Equal(t, filepath.Join(root, "dev/vfio/17"), edits.ContainerEdits.DeviceNodes[0].Path)
+		assert.Equal(t, filepath.Join(root, "dev/vfio/17"), edits.DeviceNodes[0].Path)
 	})
 
 	t.Run("legacy errors when IOMMU group unresolvable", func(t *testing.T) {
@@ -616,7 +616,7 @@ func TestApplyVFIOConfig_BackendConsistency(t *testing.T) {
 			require.NoError(t, err)
 
 			var paths []string
-			for _, n := range edits.ContainerEdits.DeviceNodes {
+			for _, n := range edits.DeviceNodes {
 				paths = append(paths, n.Path)
 			}
 			var expected []string
