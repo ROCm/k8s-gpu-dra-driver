@@ -36,10 +36,11 @@ const DriverName = "gpu.amd.com"
 
 // PCI and kernel driver constants
 const (
-	AMDVendorID    = "0x1002"
-	VFIODriverName = "vfio-pci"
-	GIMDriverName  = "gim"
-	VFIOPCIModule  = "vfio_pci"
+	AMDVendorID      = "0x1002"
+	AMDGPUDriverName = "amdgpu"
+	VFIODriverName   = "vfio-pci"
+	GIMDriverName    = "gim"
+	VFIOPCIModule    = "vfio_pci"
 )
 
 // Device type constants for ResourceSlice attributes

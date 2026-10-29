@@ -281,6 +281,91 @@ func TestGetVFMapping(t *testing.T) {
 	})
 }
 
+func TestReadSRIOVNumVFs(t *testing.T) {
+	tests := map[string]struct {
+		fileContent string
+		createFile  bool
+		expected    int
+	}{
+		"8 VFs active": {fileContent: "8\n", createFile: true, expected: 8},
+		"4 VFs active": {fileContent: "4\n", createFile: true, expected: 4},
+		"1 VF active":  {fileContent: "1\n", createFile: true, expected: 1},
+		"0 VFs active": {fileContent: "0\n", createFile: true, expected: 0},
+		"file missing": {createFile: false, expected: 0},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			pciAddr := "0000:0a:00.0"
+			files := map[string]string{}
+			if tc.createFile {
+				files["sriov_numvfs"] = tc.fileContent
+			}
+			createFakePCIDevice(t, root, pciAddr, files, nil)
+			assert.Equal(t, tc.expected, ReadSRIOVNumVFs(pciAddr))
+		})
+	}
+}
+
+func TestReadPFCapacity(t *testing.T) {
+	t.Run("all files present", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, map[string]string{
+			"mem_info_vram_total": "206158430208\n",
+			"device":              "0x740f",
+		}, nil)
+		cap := ReadPFCapacity(pciAddr)
+		assert.Equal(t, uint64(206158430208), cap[0])
+		assert.Equal(t, uint64(304), cap[1])
+		assert.Equal(t, uint64(1216), cap[2])
+	})
+
+	t.Run("unknown device ID", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, map[string]string{
+			"mem_info_vram_total": "1000000\n",
+			"device":              "0x9999",
+		}, nil)
+		cap := ReadPFCapacity(pciAddr)
+		assert.Equal(t, uint64(1000000), cap[0])
+		assert.Equal(t, uint64(0), cap[1])
+		assert.Equal(t, uint64(0), cap[2])
+	})
+
+	t.Run("missing files", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, nil, nil)
+		cap := ReadPFCapacity(pciAddr)
+		assert.Equal(t, [3]uint64{0, 0, 0}, cap)
+	})
+}
+
+func TestGpuCapacityByDeviceID(t *testing.T) {
+	tests := map[string]struct {
+		deviceID     string
+		expectedCU   int
+		expectedSIMD int
+	}{
+		"MI355X":  {deviceID: "0x75a3", expectedCU: 256, expectedSIMD: 1024},
+		"MI300X":  {deviceID: "0x740f", expectedCU: 304, expectedSIMD: 1216},
+		"MI325X":  {deviceID: "0x74a0", expectedCU: 304, expectedSIMD: 1216},
+		"unknown": {deviceID: "0x9999", expectedCU: 0, expectedSIMD: 0},
+		"empty":   {deviceID: "", expectedCU: 0, expectedSIMD: 0},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			cu, simd := gpuCapacityByDeviceID(tc.deviceID)
+			assert.Equal(t, tc.expectedCU, cu)
+			assert.Equal(t, tc.expectedSIMD, simd)
+		})
+	}
+}
+
 func TestGetPFMapping(t *testing.T) {
 	t.Run("PF on vfio-pci discovered", func(t *testing.T) {
 		root := setupFakeSysfs(t)
@@ -302,6 +387,31 @@ func TestGetPFMapping(t *testing.T) {
 			total += len(pfs)
 		}
 		assert.Equal(t, 1, total)
+	})
+
+	t.Run("PF with active VFs skipped", func(t *testing.T) {
+		for numVFs, wantTotal := range map[string]int{"0\n": 1, "2\n": 0} {
+			root := setupFakeSysfs(t)
+			devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
+				map[string]string{
+					"vendor":       consts.AMDVendorID,
+					"device":       "0x740f",
+					"sriov_numvfs": numVFs,
+				},
+				map[string]string{"driver": "../../../../bus/pci/drivers/vfio-pci"},
+			)
+			iommuDir := filepath.Join(root, "sys/kernel/iommu_groups/50")
+			require.NoError(t, os.MkdirAll(iommuDir, 0755))
+			require.NoError(t, os.Symlink(iommuDir, filepath.Join(devPath, "iommu_group")))
+
+			pfMap, err := GetPFMapping()
+			require.NoError(t, err)
+			total := 0
+			for _, pfs := range pfMap {
+				total += len(pfs)
+			}
+			assert.Equal(t, wantTotal, total, "sriov_numvfs=%q", numVFs)
+		}
 	})
 
 	t.Run("VF with physfn skipped", func(t *testing.T) {
