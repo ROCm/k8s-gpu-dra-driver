@@ -166,6 +166,22 @@ func newVFIOSibling(gpu *AmdGpuInfo, numVFs int) *AllocatableDevice {
 	}}
 }
 
+// addVFIOSibling adds the type=vfio sibling of a non-VF compute GPU and
+// reports whether it did. A PF with active SR-IOV VFs is already partitioned
+// and cannot be passed through, so it gets no sibling.
+func addVFIOSibling(alldevices AllocatableDevices, gpu *AmdGpuInfo, isVF bool, numVFs int) bool {
+	if !featuregates.Enabled(featuregates.VFIOPassthrough) || isVF {
+		return false
+	}
+	if numVFs > 0 {
+		klog.Warningf("Not advertising %s for VFIO passthrough: %d active SR-IOV VFs", gpu.PCIAddress, numVFs)
+		return false
+	}
+	vfioDev := newVFIOSibling(gpu, numVFs)
+	alldevices[vfioDev.CanonicalName()] = vfioDev
+	return true
+}
+
 // enumerateAllPossibleDevices discovers AMD GPUs and returns allocatable devices.
 //
 // When enableSyntheticPartition is false, it discovers physical GPUs and
@@ -270,9 +286,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				}
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
-				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					vfioDev := newVFIOSibling(amdGpuInfo, numVFs)
-					alldevices[vfioDev.CanonicalName()] = vfioDev
+				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
 					vfioCount++
 				}
 				klog.Infof("GPU %d (%s) does not support partitioning, advertising as normal GPU: %s",
@@ -356,9 +370,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 					device.CanonicalName(), computePartitionType, memoryPartitionType)
 
-				if featuregates.Enabled(featuregates.VFIOPassthrough) && !isVF {
-					vfioDev := newVFIOSibling(amdGpuInfo, numVFs)
-					alldevices[vfioDev.CanonicalName()] = vfioDev
+				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
 					vfioCount++
 				}
 			} else if computePartitionType != "" {

@@ -175,7 +175,7 @@ func TestSiblingExclusion_Counters(t *testing.T) {
 		assert.True(t, canAllocateTogether(t, pool, name0, name1))
 	})
 
-	t.Run("SR-IOV PF with GIM VFs", func(t *testing.T) {
+	t.Run("PF and VFs in one family", func(t *testing.T) {
 		const pf, vf1, vf2 = "0000:0a:00.0", "0000:0b:00.1", "0000:0b:00.2"
 		namePF, name1, name2 := "gpu-vfio-"+pciAddrToDNSLabel(pf), "gpu-vfio-"+pciAddrToDNSLabel(vf1), "gpu-vfio-"+pciAddrToDNSLabel(vf2)
 		pool := dualEntryPool(AllocatableDevices{

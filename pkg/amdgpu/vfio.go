@@ -110,6 +110,12 @@ func GetPFMapping() (map[string][]PFInfo, error) {
 			continue
 		}
 
+		// A PF with active VFs is already partitioned and cannot be passed through.
+		if n := ReadSRIOVNumVFs(pciAddr); n > 0 {
+			glog.Warningf("Skipping PF %s for VFIO passthrough: %d active SR-IOV VFs", pciAddr, n)
+			continue
+		}
+
 		iommuGroup, err := GetIOMMUGroup(pciAddr)
 		if err != nil {
 			glog.Warningf("Failed to get IOMMU group for %s: %v", pciAddr, err)
