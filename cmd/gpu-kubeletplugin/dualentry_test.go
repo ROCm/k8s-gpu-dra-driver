@@ -50,24 +50,6 @@ func setVFIOPassthrough(t *testing.T, enabled bool) {
 	t.Cleanup(func() { _ = featuregates.FeatureGates().Set("VFIOPassthrough=false") })
 }
 
-// createDevNode creates a fake device node at root/rel as a symlink to
-// /dev/null, which os.Stat resolves to a real character device.
-func createDevNode(t *testing.T, root, rel string) {
-	t.Helper()
-	path := filepath.Join(root, rel)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
-	require.NoError(t, os.Symlink("/dev/null", path))
-}
-
-// setPCIDriver repoints a fake device's driver symlink, standing in for the
-// kernel's bind state, which the fake sysfs bind/unbind files do not change.
-func setPCIDriver(t *testing.T, root, pciAddr, driver string) {
-	t.Helper()
-	link := filepath.Join(root, "sys/bus/pci/devices", pciAddr, "driver")
-	require.NoError(t, os.Remove(link))
-	require.NoError(t, os.Symlink("../../../../bus/pci/drivers/"+driver, link))
-}
-
 // gpuPCI returns the PCI address of the i-th fake dual-entry GPU.
 func gpuPCI(i int) string { return fmt.Sprintf("0000:%02x:00.0", 0x0a+i) }
 
