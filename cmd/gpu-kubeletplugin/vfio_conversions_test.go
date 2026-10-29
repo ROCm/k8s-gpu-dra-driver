@@ -260,12 +260,12 @@ func TestConvertedGPU_AdvertisedAsOriginal(t *testing.T) {
 	enableVFIOPassthrough(t)
 	state, _ := setupConvertibleGPU(t, true, allVfioNodes...)
 	state.cdi = &CDIHandler{}
-	state.allocatable["gpu-vfio-0"] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
-		PCIAddress: "0000:0e:00.0", Index: 0, preConfigureDriver: consts.VFIODriverName,
+	state.allocatable["gpu-vfio-0000-0e-00-0"] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress: "0000:0e:00.0", preConfigureDriver: consts.VFIODriverName,
 	}}
 	want := map[string]string{
-		"gpu-0-128":  consts.AmdGpuDeviceType,
-		"gpu-vfio-0": consts.VfioDeviceType,
+		"gpu-0-128":             consts.AmdGpuDeviceType,
+		"gpu-vfio-0000-0e-00-0": consts.VfioDeviceType,
 	}
 	assertPublished(t, state.allocatable, want)
 
