@@ -182,6 +182,27 @@ If not loaded: `modprobe vfio_pci`. The driver logs a warning at startup but
 continues without it — pre-bound devices still work, but on-demand binding
 will fail.
 
+### PF has no `type=vfio` entry
+
+**Symptom:** A GPU appears as `type=amdgpu` but has no `type=vfio` entry, or a
+PF bound to `vfio-pci` is missing from the ResourceSlice. The plugin log has
+`Not advertising <bdf> for VFIO passthrough: N active SR-IOV VFs` or
+`Skipping PF <bdf> for VFIO passthrough: N active SR-IOV VFs`.
+
+**Cause:** The PF has SR-IOV VFs enabled (`sriov_numvfs` > 0). A partitioned PF
+cannot be passed through, so the driver does not advertise it for VFIO.
+
+**Resolution:** Allocate the VFs instead, or remove them and restart the plugin
+so discovery runs again:
+
+```bash
+cat /sys/bus/pci/devices/<bdf>/sriov_numvfs
+echo 0 > /sys/bus/pci/devices/<bdf>/sriov_numvfs
+```
+
+If a claim for such a PF was already scheduled, Prepare fails with
+`cannot passthrough PF <bdf>: N active VFs must be removed first`.
+
 ### GPU unavailable after VFIO allocation
 
 **Symptom:** A claim for a compute GPU (`type=amdgpu`) stays Pending even

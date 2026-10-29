@@ -470,6 +470,15 @@ Pre-bound PF-passthrough devices (GPUs already bound to `vfio-pci` at discovery
 time, e.g., by the GPU Operator) are different. They appear as VFIO-only
 devices with no compute sibling and no sibling exclusion counter.
 
+**PFs with active VFs.** A PF whose `sriov_numvfs` is greater than 0 is already
+partitioned and cannot be passed through. The driver does not advertise a
+`type=vfio` entry for it, neither a dual-entry sibling nor a pre-bound PF, and
+logs `Not advertising <bdf> for VFIO passthrough` or
+`Skipping PF <bdf> for VFIO passthrough` at startup. Prepare also refuses such a
+PF with `active VFs must be removed first`, which covers VFs enabled after
+discovery. Discovery runs once at plugin startup, so restart the plugin after
+changing `sriov_numvfs` to refresh the ResourceSlice.
+
 ### KEP-4815 SharedCounters for mutual exclusion
 
 The driver publishes one `SharedCounterSet` per PCI device family (a PF and
