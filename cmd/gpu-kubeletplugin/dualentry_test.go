@@ -360,3 +360,32 @@ func TestConversions_SurviveOtherClaims(t *testing.T) {
 	assert.Equal(t, consts.AmdGpuDeviceType, state.allocatable["gpu-1-129"].Type())
 	assert.Empty(t, state.vfioConversions)
 }
+
+func TestAddVFIOSibling(t *testing.T) {
+	tests := map[string]struct {
+		gate  bool
+		isVF  bool
+		numVF int
+		want  bool
+	}{
+		"plain GPU":            {gate: true, want: true},
+		"PF with active VFs":   {gate: true, numVF: 2, want: false},
+		"VF":                   {gate: true, isVF: true, want: false},
+		"gate disabled":        {gate: false, want: false},
+		"gate disabled, VFs>0": {gate: false, numVF: 2, want: false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			setVFIOPassthrough(t, tc.gate)
+			devices := AllocatableDevices{}
+			gpu := &AmdGpuInfo{PCIAddress: "0000:0a:00.0", cardIndex: 0, renderIndex: 128}
+
+			assert.Equal(t, tc.want, addVFIOSibling(devices, gpu, tc.isVF, tc.numVF))
+			if tc.want {
+				assert.Contains(t, devices, "gpu-vfio-0000-0a-00-0")
+			} else {
+				assert.Empty(t, devices)
+			}
+		})
+	}
+}

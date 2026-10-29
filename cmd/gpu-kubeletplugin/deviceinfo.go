@@ -118,7 +118,8 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 // SR-IOV functions, or the GPU itself otherwise. A family set holds:
 //   - vf-slots (capacity TotalVFs) when the PF supports SR-IOV: a VF entry
 //     consumes one slot and a PF entry consumes all of them, so PF and VF
-//     allocations exclude each other;
+//     allocations exclude each other (a PF with active VFs gets no VFIO entry,
+//     but its compute entry and its VFs bound to amdgpu still share this set);
 //   - fn-<bdf> (capacity 1) for each PCI function advertised both as a compute
 //     GPU and as a VFIO device. Both entries consume it, so the scheduler can
 //     allocate at most one of them. This exclusion is enforced at allocation

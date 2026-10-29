@@ -389,6 +389,31 @@ func TestGetPFMapping(t *testing.T) {
 		assert.Equal(t, 1, total)
 	})
 
+	t.Run("PF with active VFs skipped", func(t *testing.T) {
+		for numVFs, wantTotal := range map[string]int{"0\n": 1, "2\n": 0} {
+			root := setupFakeSysfs(t)
+			devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
+				map[string]string{
+					"vendor":       consts.AMDVendorID,
+					"device":       "0x740f",
+					"sriov_numvfs": numVFs,
+				},
+				map[string]string{"driver": "../../../../bus/pci/drivers/vfio-pci"},
+			)
+			iommuDir := filepath.Join(root, "sys/kernel/iommu_groups/50")
+			require.NoError(t, os.MkdirAll(iommuDir, 0755))
+			require.NoError(t, os.Symlink(iommuDir, filepath.Join(devPath, "iommu_group")))
+
+			pfMap, err := GetPFMapping()
+			require.NoError(t, err)
+			total := 0
+			for _, pfs := range pfMap {
+				total += len(pfs)
+			}
+			assert.Equal(t, wantTotal, total, "sriov_numvfs=%q", numVFs)
+		}
+	})
+
 	t.Run("VF with physfn skipped", func(t *testing.T) {
 		root := setupFakeSysfs(t)
 		devPath := createFakePCIDevice(t, root, "0000:0c:00.0",

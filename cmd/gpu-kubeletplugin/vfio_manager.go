@@ -84,14 +84,10 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 		return fmt.Errorf("failed to get current driver for %s: %w", info.PCIAddress, err)
 	}
 
-	if currentDriver == consts.VFIODriverName {
-		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
-		vm.recordIommuFDCdev(info)
-		return nil
-	}
-
 	// For PF passthrough, verify no SR-IOV VFs are active. Binding a PF
-	// to vfio-pci while VFs exist would break them.
+	// to vfio-pci while VFs exist would break them. This runs before the
+	// already-bound shortcut: a PF pre-bound to vfio-pci can have VFs enabled
+	// after discovery.
 	if !info.IsVF {
 		numVFsPath := filepath.Join(amdgpu.PCIDevicePath, info.PCIAddress, "sriov_numvfs")
 		if data, err := os.ReadFile(numVFsPath); err == nil {
@@ -100,6 +96,12 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 				return fmt.Errorf("cannot passthrough PF %s: %s active VFs must be removed first", info.PCIAddress, numVFs)
 			}
 		}
+	}
+
+	if currentDriver == consts.VFIODriverName {
+		klog.Infof("Device %s already bound to vfio-pci", info.PCIAddress)
+		vm.recordIommuFDCdev(info)
+		return nil
 	}
 
 	if currentDriver != "" {
