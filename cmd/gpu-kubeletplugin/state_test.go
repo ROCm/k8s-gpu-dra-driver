@@ -784,3 +784,92 @@ func TestPrepare_CDIWriteFailureRestoresGPU(t *testing.T) {
 	assert.Contains(t, err.Error(), "CDI spec file")
 	assertRestoredGPU(t, state, "gpu-0-128")
 }
+
+func seedPreparedClaim(t *testing.T, state *DeviceState, claimUID, pool, device string) {
+	t.Helper()
+	cp := newCheckpoint()
+	require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	cp.V1.PreparedClaims[claimUID] = PreparedDevices{{
+		Device: drapbv1.Device{RequestNames: []string{"gpu"}, PoolName: pool, DeviceName: device},
+	}}
+	require.NoError(t, state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, cp))
+}
+
+// A scheduler can write the same exclusive device into two claims (e.g. a
+// force-deleted pod whose container still runs). Prepare must refuse the second
+// claim before touching the device, and accept it once the first is unprepared.
+func TestPrepare_RejectsDevicePreparedForAnotherClaim(t *testing.T) {
+	enableVFIOPassthrough(t)
+	state, root, cdiRoot := newLifecycleState(t, true,
+		"dev/vfio/42", "dev/vfio/vfio", "dev/vfio/devices/vfio5", "dev/iommu")
+	seedPreparedClaim(t, state, "claim-a", "node", "gpu-0-128")
+	claim := vfioClaim("gpu-0-128", `{"backendPolicy":"RequireIommuFD"}`)
+
+	_, err := state.Prepare(claim)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpu-0-128")
+	assert.Contains(t, err.Error(), "claim-a")
+
+	assertRestoredGPU(t, state, "gpu-0-128")
+	bound, err := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/vfio-pci/bind"))
+	require.NoError(t, err)
+	assert.Empty(t, bound, "a rejected claim must not bind the device")
+	assert.Empty(t, claimSpecFiles(t, cdiRoot))
+	cp := newCheckpoint()
+	require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+	assert.NotContains(t, cp.V1.PreparedClaims, "claim-uid")
+
+	require.NoError(t, state.Unprepare("claim-a"))
+	devices, err := state.Prepare(claim)
+	require.NoError(t, err)
+	require.Len(t, devices, 1)
+	assert.Equal(t, "gpu-0-128", devices[0].DeviceName)
+}
+
+func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
+	shareID := types.UID("3f1c2b7e-0000-4000-8000-000000000001")
+	prepared := PreparedClaims{
+		"claim-a": {{Device: drapbv1.Device{PoolName: "node", DeviceName: "gpu-41-169"}}},
+	}
+	claimWith := func(uid string, result resourceapi.DeviceRequestAllocationResult) *resourceapi.ResourceClaim {
+		return &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{UID: types.UID(uid)},
+			Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{result}},
+			}},
+		}
+	}
+	result := func(pool, device string) resourceapi.DeviceRequestAllocationResult {
+		return resourceapi.DeviceRequestAllocationResult{Request: "gpu", Driver: consts.DriverName, Pool: pool, Device: device}
+	}
+
+	tests := []struct {
+		name    string
+		claim   *resourceapi.ResourceClaim
+		wantErr bool
+	}{
+		{"same device in another claim", claimWith("claim-b", result("node", "gpu-41-169")), true},
+		{"different device", claimWith("claim-b", result("node", "gpu-49-177")), false},
+		{"same device name in another pool", claimWith("claim-b", result("other-node", "gpu-41-169")), false},
+		{"same claim", claimWith("claim-a", result("node", "gpu-41-169")), false},
+		{"another driver's device", claimWith("claim-b", resourceapi.DeviceRequestAllocationResult{
+			Request: "gpu", Driver: "gpu.example.com", Pool: "node", Device: "gpu-41-169"}), false},
+		{"share of a multi-allocatable device", claimWith("claim-b", func() resourceapi.DeviceRequestAllocationResult {
+			r := result("node", "gpu-41-169")
+			r.ShareID = &shareID
+			return r
+		}()), false},
+		{"unallocated claim", &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: "claim-b"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNoOverlappingPreparedDevices(tt.claim, prepared)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "claim-a")
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}

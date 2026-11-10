@@ -373,6 +373,15 @@ func (ps *PartitionState) ReservePartition(deviceName, shareKey string) (taintsC
 			ps.activeMemoryMode, memoryMode)
 	}
 
+	// Refuse a share with no free slot before anything is recorded or applied.
+	if _, held := ps.assignedSlots[gpuIndex][shareKey]; !held {
+		if dev, ok := ps.allocatable[deviceName]; ok && dev.SyntheticPartition != nil &&
+			len(ps.assignedSlots[gpuIndex]) >= dev.SyntheticPartition.PartitionCount {
+			return false, fmt.Errorf("GPU %d has no free %s partition: all %d are held",
+				gpuIndex, computeMode, dev.SyntheticPartition.PartitionCount)
+		}
+	}
+
 	// Reservation is valid: record modes.
 	ps.gpuComputeModes[gpuIndex] = computeMode
 	if ps.activeMemoryMode == "" {
