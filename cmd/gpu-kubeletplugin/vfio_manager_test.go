@@ -152,6 +152,32 @@ func TestConfigure(t *testing.T) {
 		assert.Equal(t, "vfio-pci", info.preConfigureDriver)
 	})
 
+	t.Run("PF with active VFs is rejected", func(t *testing.T) {
+		for _, driver := range []string{"vfio-pci", "amdgpu"} {
+			root := setupFakeVfioSysfs(t)
+			createPCIDevice(t, root, "0000:0d:00.0", driver)
+			createDriverDir(t, root, "vfio-pci")
+			createDriverDir(t, root, "amdgpu")
+			require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/sriov_numvfs"), []byte("2\n"), 0644))
+
+			err := (&VfioPciManager{}).Configure(&AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"})
+			assert.ErrorContains(t, err, "active VFs must be removed first", "driver %s", driver)
+
+			unbind, readErr := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers", driver, "unbind"))
+			require.NoError(t, readErr)
+			assert.Empty(t, unbind, "must not unbind a PF with active VFs (driver %s)", driver)
+		}
+	})
+
+	t.Run("VF on vfio-pci ignores its own sriov_numvfs", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.1", "vfio-pci")
+		createDriverDir(t, root, "vfio-pci")
+		require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.1/sriov_numvfs"), []byte("2\n"), 0644))
+
+		assert.NoError(t, (&VfioPciManager{}).Configure(&AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.1", IsVF: true}))
+	})
+
 	t.Run("bind from unbound", func(t *testing.T) {
 		root := setupFakeVfioSysfs(t)
 		createPCIDevice(t, root, "0000:0d:00.0", "")
