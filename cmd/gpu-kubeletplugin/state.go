@@ -226,6 +226,10 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 		return preparedClaims[claimUID].GetDevices(), nil
 	}
 
+	if err := validateNoOverlappingPreparedDevices(claim, preparedClaims); err != nil {
+		return nil, err
+	}
+
 	// A failed Prepare may leave devices it converted to VFIO but could not
 	// rebind; persist those records so a restart can still return them.
 	defer func() {
@@ -348,6 +352,43 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 	// before the hardware apply, so no re-publish is needed here.
 
 	return preparedClaims[claimUID].GetDevices(), nil
+}
+
+// validateNoOverlappingPreparedDevices rejects a claim that names an exclusive
+// device already prepared for a different claim. The scheduler should never
+// allocate one, but it can: e.g. a force-deleted pod frees its claim in the API
+// while its container still runs on the node.
+//
+// Results carrying a ShareID are shares of a multi-allocatable device; those
+// are kept apart by partition slot accounting instead (see ReservePartition).
+func validateNoOverlappingPreparedDevices(claim *resourceapi.ResourceClaim, preparedClaims PreparedClaims) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	type poolDevice struct{ pool, device string }
+	requested := make(map[poolDevice]struct{})
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != consts.DriverName || result.ShareID != nil {
+			continue
+		}
+		requested[poolDevice{result.Pool, result.Device}] = struct{}{}
+	}
+	if len(requested) == 0 {
+		return nil
+	}
+
+	claimUID := string(claim.UID)
+	for otherUID, devices := range preparedClaims {
+		if otherUID == claimUID {
+			continue
+		}
+		for _, d := range devices {
+			if _, found := requested[poolDevice{d.PoolName, d.DeviceName}]; found {
+				return fmt.Errorf("device %s/%s is already prepared for claim %s", d.PoolName, d.DeviceName, otherUID)
+			}
+		}
+	}
+	return nil
 }
 
 // partitionSharesForClaim returns one PartitionShare per allocation result that

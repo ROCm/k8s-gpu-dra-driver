@@ -1058,3 +1058,43 @@ func TestPartitionState_PartitionSharesFromAssignedSlots(t *testing.T) {
 		t.Errorf("expected nil shares for a claim with no assigned slots, got %v", got)
 	}
 }
+
+// A GPU split into N partitions has N slots. A share beyond that (e.g. from a
+// duplicated allocation) must be refused at reservation, before any hardware is
+// reconfigured, and must not consume a slot or count.
+func TestPartitionState_ReserveClaim_RejectsShareBeyondPartitionCount(t *testing.T) {
+	const deviceName = "gpu-0-cpx-nps1"
+	sp := &SyntheticPartitionDevice{
+		GPUIndex:         0,
+		ComputePartition: consts.ComputePartitionCPX,
+		MemoryPartition:  consts.MemoryPartitionNPS1,
+		PartitionCount:   2,
+	}
+	allocatable := AllocatableDevices{deviceName: {SyntheticPartition: sp}}
+	ps := newTestPartitionState(map[int]string{0: "0000:19:00.0"}, []int{0}, allocatable)
+
+	if _, err := ps.ReserveClaim("claim-a", testShares("claim-a", deviceName, deviceName)); err != nil {
+		t.Fatalf("ReserveClaim(a) within capacity: %v", err)
+	}
+
+	extra := testShares("claim-b", deviceName)
+	if _, err := ps.ReserveClaim("claim-b", extra); err == nil {
+		t.Fatal("expected an error reserving a share beyond the GPU's partition count")
+	}
+	if _, ok := ps.GetAssignedSlot(0, extra[0].ShareKey); ok {
+		t.Error("rejected share must not hold a slot")
+	}
+	if ps.HasReservation("claim-b") {
+		t.Error("rejected claim must not be marked reserved")
+	}
+	if ps.gpuAllocCounts[0] != 2 || ps.totalAllocCount != 2 {
+		t.Errorf("counts changed by rejected share: gpu=%d total=%d, want 2/2", ps.gpuAllocCounts[0], ps.totalAllocCount)
+	}
+
+	if _, err := ps.ReleaseClaim("claim-a", testShares("claim-a", deviceName, deviceName)); err != nil {
+		t.Fatalf("ReleaseClaim(a): %v", err)
+	}
+	if _, err := ps.ReserveClaim("claim-b", extra); err != nil {
+		t.Errorf("ReserveClaim(b) after capacity freed: %v", err)
+	}
+}
