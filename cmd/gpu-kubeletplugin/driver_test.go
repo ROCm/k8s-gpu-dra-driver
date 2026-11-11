@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 )
 
@@ -38,30 +37,24 @@ func deviceNames(devices []resourceapi.Device) []string {
 }
 
 func TestCollectCounterSets(t *testing.T) {
-	t.Run("deduplicates VFs from same PF", func(t *testing.T) {
+	t.Run("GIM VFs have no counter sets", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
-			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
-				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0"}},
-				"gpu-0-128":  {AmdGpu: &AmdGpuInfo{cardIndex: 0, renderIndex: 128}},
-			},
+			allocatable: vfioVFs(2),
 		}}
-		sets := d.collectCounterSets()
-		assert.Len(t, sets, 1)
-		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
+		assert.Empty(t, d.collectCounterSets())
 	})
 
-	t.Run("multiple PFs produce multiple sets sorted by address", func(t *testing.T) {
+	t.Run("dual entry pairs produce sets sorted by address", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
-			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: true, TotalVFs: 4, ParentPFAddress: "0000:0b:00.0"}},
-				"gpu-vfio-1": {Vfio: &AmdGpuVFIOInfo{IsVF: false, TotalVFs: 8, ParentPFAddress: "0000:0a:00.0"}},
-			},
+			allocatable: dualEntryGPUs(2),
 		}}
 		sets := d.collectCounterSets()
-		assert.Len(t, sets, 2)
-		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
-		assert.Equal(t, "pf-0000-0b-00-0-counter-set", sets[1].Name)
+		require.Len(t, sets, 2)
+		assert.Equal(t, "pf-0000-10-00-0-counter-set", sets[0].Name)
+		assert.Equal(t, "pf-0000-11-00-0-counter-set", sets[1].Name)
+		for _, set := range sets {
+			assert.Len(t, set.Counters, 1)
+		}
 	})
 
 	t.Run("no VFIO devices returns empty", func(t *testing.T) {
@@ -74,86 +67,66 @@ func TestCollectCounterSets(t *testing.T) {
 		assert.Empty(t, sets)
 	})
 
-	t.Run("compute VFs publish the counter set when VFIO siblings are unavailable", func(t *testing.T) {
+	t.Run("compute device without a VFIO sibling has no counter set", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
 				"gpu-0-128": {AmdGpu: &AmdGpuInfo{
-					cardIndex:       0,
-					renderIndex:     128,
-					ParentPFAddress: "0000:0a:00.0",
-					TotalVFs:        8,
-					IsVF:            true,
+					PCIAddress:  "0000:0a:00.0",
+					cardIndex:   0,
+					renderIndex: 128,
 				}},
 			},
 		}}
-		sets := d.collectCounterSets()
-		require.Len(t, sets, 1)
-		assert.Equal(t, "pf-0000-0a-00-0-counter-set", sets[0].Name)
+		assert.Empty(t, d.collectCounterSets())
 	})
 }
 
 func TestBuildDriverResourcesWithCounters(t *testing.T) {
-	t.Run("compute VF publishes matching counter consumption", func(t *testing.T) {
+	t.Run("dual entry pair publishes matching counter consumption", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
-			allocatable: AllocatableDevices{
-				"gpu-0-128": {AmdGpu: &AmdGpuInfo{
-					cardIndex:       0,
-					renderIndex:     128,
-					ParentPFAddress: "0000:0a:00.0",
-					TotalVFs:        8,
-					IsVF:            true,
-				}},
-			},
+			allocatable: dualEntryGPUs(1),
 		}}
 
 		res := d.buildDriverResources("test-node")
 		pool := res.Pools["test-node"]
 		require.Len(t, pool.Slices, 2)
 		require.Len(t, pool.Slices[0].SharedCounters, 1)
-		require.Len(t, pool.Slices[1].Devices, 1)
+		require.Len(t, pool.Slices[1].Devices, 2)
 
 		counterSet := pool.Slices[0].SharedCounters[0]
-		assert.Equal(t, "pf-0000-0a-00-0-counter-set", counterSet.Name)
-		assert.Equal(t, *resource.NewQuantity(8, resource.BinarySI), counterSet.Counters[VFSlotCounterName].Value)
-
-		device := pool.Slices[1].Devices[0]
-		require.Len(t, device.ConsumesCounters, 1)
-		consumption := device.ConsumesCounters[0]
-		assert.Equal(t, counterSet.Name, consumption.CounterSet)
-		assert.Equal(t, *resource.NewQuantity(1, resource.BinarySI), consumption.Counters[VFSlotCounterName].Value)
+		assert.Equal(t, "pf-0000-10-00-0-counter-set", counterSet.Name)
+		require.Len(t, counterSet.Counters, 1)
+		counter := counterSet.Counters["fn-0000-10-00-0"]
+		assert.Equal(t, int64(1), counter.Value.Value())
+		for _, device := range pool.Slices[1].Devices {
+			require.Len(t, device.ConsumesCounters, 1)
+			consumption := device.ConsumesCounters[0]
+			assert.Equal(t, counterSet.Name, consumption.CounterSet)
+			counter := consumption.Counters["fn-0000-10-00-0"]
+			assert.Equal(t, int64(1), counter.Value.Value())
+		}
 	})
 
-	t.Run("VFIO PF publishes matching full counter consumption", func(t *testing.T) {
+	t.Run("prebound VFIO PF has no counter consumption", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
 			allocatable: AllocatableDevices{
 				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{
-					IsVF:            false,
-					TotalVFs:        4,
-					ParentPFAddress: "0000:0a:00.0",
-					IOMMUGroup:      "42",
-					PCIAddress:      "0000:0a:00.0",
+					IOMMUGroup: "42",
+					PCIAddress: "0000:0a:00.0",
 				}},
 			},
 		}}
 
 		res := d.buildDriverResources("test-node")
 		pool := res.Pools["test-node"]
-		require.Len(t, pool.Slices, 2)
-		require.Len(t, pool.Slices[0].SharedCounters, 1)
-		require.Len(t, pool.Slices[1].Devices, 1)
-
-		counterSet := pool.Slices[0].SharedCounters[0]
-		device := pool.Slices[1].Devices[0]
-		require.Len(t, device.ConsumesCounters, 1)
-		assert.Equal(t, counterSet.Name, device.ConsumesCounters[0].CounterSet)
-		assert.Equal(t, *resource.NewQuantity(4, resource.BinarySI), device.ConsumesCounters[0].Counters[VFSlotCounterName].Value)
+		require.Len(t, pool.Slices, 1)
+		require.Len(t, pool.Slices[0].Devices, 1)
+		assert.Empty(t, pool.Slices[0].Devices[0].ConsumesCounters)
 	})
 
 	t.Run("with counters has 2 slices", func(t *testing.T) {
 		d := &driver{state: &DeviceState{
-			allocatable: AllocatableDevices{
-				"gpu-vfio-0": {Vfio: &AmdGpuVFIOInfo{IsVF: false, TotalVFs: 4, ParentPFAddress: "0000:0a:00.0", IOMMUGroup: "42", PCIAddress: "0000:0a:00.0"}},
-			},
+			allocatable: dualEntryGPUs(1),
 		}}
 		res := d.buildDriverResources("test-node")
 		pool := res.Pools["test-node"]
@@ -304,23 +277,28 @@ func TestChunkCounterSets(t *testing.T) {
 	}
 }
 
-// vfioVFs returns allocatable VFIO VFs spread over numPFs SR-IOV PFs,
-// vfsPerPF each. Every VF consumes its PF's vf-slots counter.
-func vfioVFs(numPFs, vfsPerPF int) AllocatableDevices {
+// dualEntryGPUs creates compute/VFIO sibling pairs with distinct PCI addresses.
+func dualEntryGPUs(n int) AllocatableDevices {
 	devs := make(AllocatableDevices)
-	idx := 0
-	for pf := 0; pf < numPFs; pf++ {
-		pfAddr := fmt.Sprintf("0000:%02x:00.0", 0x10+pf)
-		for vf := 0; vf < vfsPerPF; vf++ {
-			devs[fmt.Sprintf("gpu-vfio-%d", idx)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
-				PCIAddress:      fmt.Sprintf("0000:%02x:00.%d", 0x10+pf, vf+1),
-				IsVF:            true,
-				ParentPFAddress: pfAddr,
-				TotalVFs:        vfsPerPF,
-				NumVFs:          vfsPerPF,
-			}}
-			idx++
-		}
+	for i := 0; i < n; i++ {
+		pci := fmt.Sprintf("0000:%02x:00.0", 0x10+i)
+		devs[fmt.Sprintf("gpu-%d-%d", i, 128+i)] = &AllocatableDevice{AmdGpu: &AmdGpuInfo{
+			PCIAddress: pci, cardIndex: i, renderIndex: 128 + i,
+		}}
+		devs["gpu-vfio-"+pciAddrToDNSLabel(pci)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{PCIAddress: pci}}
+	}
+	markSiblingPairs(devs)
+	return devs
+}
+
+// vfioVFs creates standalone GIM VF devices with distinct PCI addresses.
+func vfioVFs(n int) AllocatableDevices {
+	devs := make(AllocatableDevices)
+	for i := 0; i < n; i++ {
+		pci := fmt.Sprintf("0000:%02x:00.1", 0x10+i)
+		devs["gpu-vfio-"+pciAddrToDNSLabel(pci)] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+			PCIAddress: pci, IsVF: true,
+		}}
 	}
 	return devs
 }
@@ -370,29 +348,25 @@ func TestBuildDriverResources_SliceLimits(t *testing.T) {
 		return d.buildDriverResources("test-node").Pools["test-node"]
 	}
 
-	t.Run("9 SR-IOV PFs split counter sets across slices", func(t *testing.T) {
-		counterSlices, deviceSlices := checkSliceLimits(t, build(vfioVFs(9, 1)), 9)
+	t.Run("9 dual entry pairs split counter sets across slices", func(t *testing.T) {
+		counterSlices, deviceSlices := checkSliceLimits(t, build(dualEntryGPUs(9)), 18)
 		assert.Equal(t, 2, counterSlices, "8 + 1 counter sets")
 		assert.Equal(t, 1, deviceSlices)
 	})
 
-	t.Run("65 counter-consuming devices split at 64", func(t *testing.T) {
-		counterSlices, deviceSlices := checkSliceLimits(t, build(vfioVFs(5, 13)), 65)
-		assert.Equal(t, 1, counterSlices)
-		assert.Equal(t, 2, deviceSlices, "64 + 1 devices")
+	t.Run("66 counter-consuming devices split at 64", func(t *testing.T) {
+		counterSlices, deviceSlices := checkSliceLimits(t, build(dualEntryGPUs(33)), 66)
+		assert.Equal(t, 5, counterSlices)
+		assert.Equal(t, 2, deviceSlices, "64 + 2 devices")
 	})
 
 	t.Run("64 counter-consuming devices fit one slice", func(t *testing.T) {
-		_, deviceSlices := checkSliceLimits(t, build(vfioVFs(8, 8)), 64)
+		_, deviceSlices := checkSliceLimits(t, build(dualEntryGPUs(32)), 64)
 		assert.Equal(t, 1, deviceSlices)
 	})
 
-	t.Run("devices without counters keep the 128 limit", func(t *testing.T) {
-		devs := make(AllocatableDevices)
-		for i := 0; i < 129; i++ {
-			devs[fmt.Sprintf("gpu-%d-%d", i, 128+i)] = &AllocatableDevice{AmdGpu: &AmdGpuInfo{cardIndex: i, renderIndex: 128 + i}}
-		}
-		counterSlices, deviceSlices := checkSliceLimits(t, build(devs), 129)
+	t.Run("GIM VFs without counters keep the 128 limit", func(t *testing.T) {
+		counterSlices, deviceSlices := checkSliceLimits(t, build(vfioVFs(129)), 129)
 		assert.Equal(t, 0, counterSlices)
 		assert.Equal(t, 2, deviceSlices, "128 + 1 devices")
 	})

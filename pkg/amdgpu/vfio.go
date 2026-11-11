@@ -155,7 +155,6 @@ type VFInfo struct {
 	ProductName string
 	// NumaNode is the NUMA node affinity.
 	NumaNode int
-	TotalVFs int
 	NumVFs   int
 }
 
@@ -169,11 +168,6 @@ func readSysfsInt(path string) int {
 		return 0
 	}
 	return val
-}
-
-// ReadSRIOVTotalVFs reads the maximum number of SR-IOV VFs supported by a PF.
-func ReadSRIOVTotalVFs(pfPCIAddress string) int {
-	return readSysfsInt(filepath.Join(PCIDevicePath, pfPCIAddress, "sriov_totalvfs"))
 }
 
 // ReadSRIOVNumVFs reads the number of SR-IOV VFs currently active on a PF.
@@ -225,7 +219,6 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 		}
 
 		pfProductName := readProductName(pfAddr)
-		pfTotalVFs := ReadSRIOVTotalVFs(pfAddr)
 		pfNumVFs := ReadSRIOVNumVFs(pfAddr)
 
 		for _, vfPath := range vfPaths {
@@ -264,7 +257,6 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 				IOMMUGroup:       iommuGroup,
 				ProductName:      pfProductName,
 				NumaNode:         numaNode,
-				TotalVFs:         pfTotalVFs,
 				NumVFs:           pfNumVFs,
 			}
 			vfMap[iommuGroup] = append(vfMap[iommuGroup], vfInfo)

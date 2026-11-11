@@ -652,8 +652,6 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 							VendorID:           consts.AMDVendorID,
 							ProductName:        allocDev.AmdGpu.ProductName,
 							NumaNode:           allocDev.AmdGpu.NumaNode,
-							ParentPFAddress:    allocDev.AmdGpu.ParentPFAddress,
-							TotalVFs:           allocDev.AmdGpu.TotalVFs,
 							IsVF:               isVF,
 							MemoryBytes:        allocDev.AmdGpu.MemoryBytes,
 							ComputeUnits:       allocDev.AmdGpu.ComputeUnits,
