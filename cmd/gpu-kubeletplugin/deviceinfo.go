@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 
@@ -42,6 +43,9 @@ type AmdGpuInfo struct {
 	ComputeUnits     int
 	SimdUnits        int
 	NumaNode         int
+	// siblingExclusive is set when this GPU also has a type=vfio entry; both
+	// entries then consume the function's exclusion counter.
+	siblingExclusive bool
 	cardIndex        int // unexported: for CanonicalName and CDI path derivation
 	renderIndex      int // unexported: for CanonicalName and CDI path derivation
 	pcieRootAttr     deviceattribute.DeviceAttribute
@@ -94,8 +98,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
 	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: consumesCounters(d.PCIAddress, d.siblingExclusive),
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"memory":       {Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)},
 			"computeUnits": {Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)},
@@ -104,13 +109,55 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 }
 
-// AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
+// KEP-4815 counters.
+//
+// A function advertised both as a compute GPU and as a VFIO device has one
+// capacity-1 fn-<bdf> counter. Both entries consume it, so the scheduler can
+// allocate at most one of them without withdrawing either ResourceSlice entry.
+
+// functionCounterName names the capacity-1 exclusion counter shared by the
+// compute and VFIO entries of one PCI function.
+func functionCounterName(pciAddr string) string {
+	return "fn-" + pciAddrToDNSLabel(pciAddr)
+}
+
+// counterSetName names the counter set of a PCI function with sibling entries.
+func counterSetName(pciAddr string) string {
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(pciAddr))
+}
+
+// deviceCounters returns the counter consumed by sibling entries, or nil.
+// Its value is also the counter set's capacity.
+func deviceCounters(pciAddr string, siblingExclusive bool) map[string]int64 {
+	if !siblingExclusive {
+		return nil
+	}
+	return map[string]int64{functionCounterName(pciAddr): 1}
+}
+
+// consumesCounters returns the ConsumesCounters of one advertised device.
+func consumesCounters(pciAddr string, siblingExclusive bool) []resourceapi.DeviceCounterConsumption {
+	consumed := deviceCounters(pciAddr, siblingExclusive)
+	if len(consumed) == 0 {
+		return nil
+	}
+	counters := make(map[string]resourceapi.Counter, len(consumed))
+	for name, amount := range consumed {
+		counters[name] = resourceapi.Counter{Value: *resource.NewQuantity(amount, resource.BinarySI)}
+	}
+	return []resourceapi.DeviceCounterConsumption{{
+		CounterSet: counterSetName(pciAddr),
+		Counters:   counters,
+	}}
+}
+
+// AmdGpuVFIOInfo represents a VFIO passthrough device: a GIM SR-IOV VF, a
+// pre-bound PF, or the type=vfio sibling of a compute GPU.
 type AmdGpuVFIOInfo struct {
 	PCIAddress         string
 	DeviceID           string
 	VendorID           string
 	IOMMUGroup         string
-	Index              int
 	ProductName        string
 	NumaNode           int
 	IsVF               bool
@@ -124,14 +171,53 @@ type AmdGpuVFIOInfo struct {
 	// GPU, since the conversion is an implementation detail of the claim the
 	// scheduler already allocated it to.
 	convertedFrom *AmdGpuInfo
+	NumVFs        int
+	MemoryBytes   uint64
+	ComputeUnits  int
+	SimdUnits     int
+	// siblingExclusive is set when this device is the type=vfio sibling of a
+	// compute GPU; both entries then consume the function's exclusion counter.
+	siblingExclusive bool
 }
 
-// CanonicalName returns the canonical name for this VFIO device
+func (d *AmdGpuVFIOInfo) partitionMode() string {
+	switch d.NumVFs {
+	case 1:
+		return "spx"
+	case 2:
+		return "dpx"
+	case 3:
+		return "tpx"
+	case 4:
+		return "qpx"
+	case 8:
+		return "cpx"
+	default:
+		return ""
+	}
+}
+
+// CanonicalName returns the canonical name for this VFIO device. It is
+// derived from the device's own PCI address rather than discovery order, so
+// it stays stable across restarts regardless of which discovery pass (amdgpu
+// sibling, pre-bound PF, or SR-IOV VF) finds the device this time — a device
+// that moves between passes because its host driver binding changed (e.g. an
+// active claim rebinding it to vfio-pci) keeps the same name.
 func (d *AmdGpuVFIOInfo) CanonicalName() string {
 	if d.convertedFrom != nil {
 		return d.convertedFrom.CanonicalName()
 	}
-	return fmt.Sprintf("gpu-vfio-%d", d.Index)
+	return fmt.Sprintf("gpu-vfio-%s", pciAddrToDNSLabel(d.PCIAddress))
+}
+
+func pciAddrToDNSLabel(addr string) string {
+	return strings.NewReplacer(":", "-", ".", "-").Replace(addr)
+}
+
+// GetConsumesCounters returns the KEP-4815 counter consumption for this
+// device (see deviceCounters).
+func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	return consumesCounters(d.PCIAddress, d.siblingExclusive)
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU.
@@ -165,10 +251,27 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	if d.numaNodeAttr.Name != "" {
 		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
-	return resourceapi.Device{
-		Name:       d.CanonicalName(),
-		Attributes: attributes,
+	if mode := d.partitionMode(); mode != "" {
+		attributes["partitionProfile"] = resourceapi.DeviceAttribute{StringValue: ptr.To(mode)}
 	}
+	dev := resourceapi.Device{
+		Name:             d.CanonicalName(),
+		Attributes:       attributes,
+		ConsumesCounters: d.GetConsumesCounters(),
+	}
+	if d.MemoryBytes > 0 || d.ComputeUnits > 0 || d.SimdUnits > 0 {
+		dev.Capacity = map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{}
+		if d.MemoryBytes > 0 {
+			dev.Capacity["memory"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)}
+		}
+		if d.ComputeUnits > 0 {
+			dev.Capacity["computeUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)}
+		}
+		if d.SimdUnits > 0 {
+			dev.Capacity["simdUnits"] = resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)}
+		}
+	}
+	return dev
 }
 
 // CanonicalName returns the canonical name for this partition

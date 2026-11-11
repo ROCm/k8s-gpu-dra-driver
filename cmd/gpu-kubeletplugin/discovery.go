@@ -123,6 +123,54 @@ func getPcieInfo(pciAddr string, mods ...deviceattribute.MachineModifier) (topol
 	return topo, errors.Join(errs...)
 }
 
+// getVFIOFunctionInfo identifies a VF and counts active VFs on a PF.
+func getVFIOFunctionInfo(pciAddr string) (isVF bool, numVFs int) {
+	if _, err := amdgpu.GetPFAddress(pciAddr); err == nil {
+		return true, 0
+	}
+	return false, amdgpu.ReadSRIOVNumVFs(pciAddr)
+}
+
+// newVFIOSibling returns the direct type=vfio entry advertised alongside a
+// compute GPU (dual-entry advertising). SR-IOV VFs get no such entry; callers
+// only use it for non-VF GPUs. The GPU is bound to amdgpu at discovery, so
+// that is the driver Unconfigure must rebind it to when the claim is released:
+// an empty preConfigureDriver would mean "originally unbound" and leave the GPU
+// without a driver.
+func newVFIOSibling(gpu *AmdGpuInfo) *AllocatableDevice {
+	iommuGroup, _ := amdgpu.GetIOMMUGroup(gpu.PCIAddress)
+	return &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
+		PCIAddress:         gpu.PCIAddress,
+		DeviceID:           gpu.DeviceID,
+		VendorID:           consts.AMDVendorID,
+		ProductName:        gpu.ProductName,
+		NumaNode:           gpu.NumaNode,
+		IOMMUGroup:         iommuGroup,
+		pciBusIDAttr:       gpu.pciBusIDAttr,
+		pcieRootAttr:       gpu.pcieRootAttr,
+		MemoryBytes:        gpu.MemoryBytes,
+		ComputeUnits:       gpu.ComputeUnits,
+		SimdUnits:          gpu.SimdUnits,
+		preConfigureDriver: consts.AMDGPUDriverName,
+	}}
+}
+
+// addVFIOSibling adds the type=vfio sibling of a non-VF compute GPU and
+// reports whether it did. A PF with active SR-IOV VFs is already partitioned
+// and cannot be passed through, so it gets no sibling.
+func addVFIOSibling(alldevices AllocatableDevices, gpu *AmdGpuInfo, isVF bool, numVFs int) bool {
+	if !featuregates.Enabled(featuregates.VFIOPassthrough) || isVF {
+		return false
+	}
+	if numVFs > 0 {
+		klog.Warningf("Not advertising %s for VFIO passthrough: %d active SR-IOV VFs", gpu.PCIAddress, numVFs)
+		return false
+	}
+	vfioDev := newVFIOSibling(gpu)
+	alldevices[vfioDev.CanonicalName()] = vfioDev
+	return true
+}
+
 // enumerateAllPossibleDevices discovers AMD GPUs and returns allocatable devices.
 //
 // When enableSyntheticPartition is false, it discovers physical GPUs and
@@ -137,6 +185,7 @@ func getPcieInfo(pciAddr string, mods ...deviceattribute.MachineModifier) (topol
 // counter sets).
 func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevices, map[int]string, []int, error) {
 	alldevices := make(AllocatableDevices)
+	vfioCount := 0
 	allAMDGPUs := amdgpu.GetAMDGPUs()
 
 	// Sort PCI addresses for deterministic GPU index assignment
@@ -197,6 +246,11 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 			supportsPartitioning := computePartitionType != ""
 
 			if !supportsPartitioning {
+				var isVF bool
+				var numVFs int
+				if featuregates.Enabled(featuregates.VFIOPassthrough) {
+					isVF, numVFs = getVFIOFunctionInfo(pciAddr)
+				}
 				// GPU doesn't support partitioning - advertise as a normal full GPU
 				amdGpuInfo := &AmdGpuInfo{
 					PCIAddress:       pciAddr,
@@ -217,6 +271,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				}
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
+				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
+					vfioCount++
+				}
 				klog.Infof("GPU %d (%s) does not support partitioning, advertising as normal GPU: %s",
 					gpuIndex, pciAddr, device.CanonicalName())
 				gpuIndex++
@@ -261,6 +318,11 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 				if computePartitionType != "" && memoryPartitionType != "" {
 					partitionProfile = fmt.Sprintf("%s_%s", computePartitionType, memoryPartitionType)
 				}
+				var isVF bool
+				var numVFs int
+				if featuregates.Enabled(featuregates.VFIOPassthrough) {
+					isVF, numVFs = getVFIOFunctionInfo(pciAddr)
+				}
 
 				amdGpuInfo := &AmdGpuInfo{
 					PCIAddress:       pciAddr,
@@ -288,6 +350,10 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 
 				klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 					device.CanonicalName(), computePartitionType, memoryPartitionType)
+
+				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
+					vfioCount++
+				}
 			} else if computePartitionType != "" {
 				// This is a partition - create both parent GPU info and partition info
 
@@ -332,8 +398,6 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 	// Discover VFIO passthrough devices:
 	// - PFs already bound to vfio-pci by the GPU Operator (pf-passthrough mode)
 	// - GIM SR-IOV VFs (vf-passthrough mode)
-	vfioIndex := 0
-
 	if featuregates.Enabled(featuregates.VFIOPassthrough) {
 		pfMap, err := amdgpu.GetPFMapping()
 		if err != nil {
@@ -358,7 +422,6 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						DeviceID:           pf.DeviceID,
 						VendorID:           pf.VendorID,
 						IOMMUGroup:         pf.IOMMUGroup,
-						Index:              vfioIndex,
 						ProductName:        pf.ProductName,
 						NumaNode:           pf.NumaNode,
 						IsVF:               false,
@@ -369,7 +432,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 					klog.Infof("Found VFIO PF device (pre-bound): %s (PCI: %s, IOMMU: %s)", device.CanonicalName(), pf.PCIAddress, pf.IOMMUGroup)
-					vfioIndex++
+					vfioCount++
 				}
 			}
 		}
@@ -380,6 +443,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 		if err != nil {
 			klog.V(2).Infof("No VFIO VF devices found: %v", err)
 		} else {
+			pfCapCache := make(map[string][3]uint64)
 			vfKeys := make([]string, 0, len(vfMap))
 			for k := range vfMap {
 				vfKeys = append(vfKeys, k)
@@ -394,12 +458,23 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						klog.Warning(err.Error())
 					}
 					currentDriver, _ := amdgpu.GetPCIDriver(vf.PCIAddress)
+					var memPerVF uint64
+					var cuPerVF, simdPerVF int
+					if vf.NumVFs > 0 {
+						cap, ok := pfCapCache[vf.ParentPCIAddress]
+						if !ok {
+							cap = amdgpu.ReadPFCapacity(vf.ParentPCIAddress)
+							pfCapCache[vf.ParentPCIAddress] = cap
+						}
+						memPerVF = cap[0] / uint64(vf.NumVFs)
+						cuPerVF = int(cap[1]) / vf.NumVFs
+						simdPerVF = int(cap[2]) / vf.NumVFs
+					}
 					device := &AmdGpuVFIOInfo{
 						PCIAddress:         vf.PCIAddress,
 						DeviceID:           vf.DeviceID,
 						VendorID:           vf.VendorID,
 						IOMMUGroup:         vf.IOMMUGroup,
-						Index:              vfioIndex,
 						ProductName:        vf.ProductName,
 						NumaNode:           vf.NumaNode,
 						IsVF:               true,
@@ -407,17 +482,21 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						pcieRootAttr:       topo.pcieRoot,
 						numaNodeAttr:       topo.numaNode,
 						preConfigureDriver: currentDriver,
+						NumVFs:             vf.NumVFs,
+						MemoryBytes:        memPerVF,
+						ComputeUnits:       cuPerVF,
+						SimdUnits:          simdPerVF,
 					}
 					alldevices[device.CanonicalName()] = &AllocatableDevice{Vfio: device}
 					klog.Infof("Found VFIO VF device: %s (PCI: %s, PF: %s, IOMMU: %s)", device.CanonicalName(), vf.PCIAddress, vf.ParentPCIAddress, vf.IOMMUGroup)
-					vfioIndex++
+					vfioCount++
 				}
 			}
 		}
 	}
 
-	if vfioIndex > 0 {
-		klog.Infof("Discovered %d VFIO passthrough devices", vfioIndex)
+	if vfioCount > 0 {
+		klog.Infof("Discovered %d VFIO passthrough devices", vfioCount)
 	}
 
 	if enableSyntheticPartition {
