@@ -171,8 +171,8 @@ func (d *driver) buildSyntheticPartitionResources() resourceslice.DriverResource
 	for _, gpuIndex := range d.partitionableGPUs {
 		counterSets = append(counterSets, buildMutexCounterSet(gpuIndex))
 	}
-	// Non-partitionable GPUs and VFIO devices consume their family's counter
-	// sets (vf-slots, sibling exclusion) in this mode too, so publish them.
+	// Non-partitionable GPU/VFIO sibling pairs consume exclusion counters in
+	// this mode too, so publish their counter sets.
 	counterSets = append(counterSets, d.collectCounterSets()...)
 
 	// Build device list. Snapshot under the partition-state lock so reads of the
@@ -241,8 +241,8 @@ func (d *driver) buildResources() resourceslice.DriverResources {
 // ResourceSliceMaxCounterSets counter sets per slice, and at most
 // ResourceSliceMaxDevicesWithAdvancedFeatures devices per slice once any
 // device consumes counters (ResourceSliceMaxDevices otherwise). A node with
-// more than 8 SR-IOV PFs or more than 64 dual/VF entries would otherwise
-// publish an invalid ResourceSlice.
+// more than 8 dual-entry GPUs or more than 64 counter-consuming entries
+// would otherwise publish an invalid ResourceSlice.
 func (d *driver) buildDriverResources(nodeName string) resourceslice.DriverResources {
 	devices := resourceSliceDevices(d.state.allocatable)
 	counterSets := d.collectCounterSets()
@@ -276,30 +276,28 @@ func maxDevicesPerSlice(devices []resourceapi.Device) int {
 }
 
 // collectCounterSets returns the KEP-4815 counter sets consumed by the
-// compute and VFIO devices, one per device family, sorted by name. Each set
-// merges the counters its devices consume (see deviceCounters), so it always
-// declares every counter a device references.
+// compute and VFIO siblings, one per PCI function, sorted by name. Each set
+// declares the capacity-1 function counter consumed by both entries.
 func (d *driver) collectCounterSets() []resourceapi.CounterSet {
 	sets := make(map[string]map[string]int64)
 	for _, device := range d.state.allocatable {
-		var parentPF, pciAddr string
-		var totalVFs int
-		var isVF, siblingExclusive bool
+		var pciAddr string
+		var siblingExclusive bool
 		switch device.Type() {
 		case consts.VfioDeviceType:
 			v := device.Vfio
-			parentPF, pciAddr, totalVFs, isVF, siblingExclusive = v.ParentPFAddress, v.PCIAddress, v.TotalVFs, v.IsVF, v.siblingExclusive
+			pciAddr, siblingExclusive = v.PCIAddress, v.siblingExclusive
 		case consts.AmdGpuDeviceType:
 			g := device.AmdGpu
-			parentPF, pciAddr, totalVFs, isVF, siblingExclusive = g.ParentPFAddress, g.PCIAddress, g.TotalVFs, g.IsVF, g.siblingExclusive
+			pciAddr, siblingExclusive = g.PCIAddress, g.siblingExclusive
 		default:
 			continue
 		}
-		_, capacity := deviceCounters(parentPF, pciAddr, totalVFs, isVF, siblingExclusive)
+		capacity := deviceCounters(pciAddr, siblingExclusive)
 		if len(capacity) == 0 {
 			continue
 		}
-		name := counterSetName(counterFamily(parentPF, pciAddr))
+		name := counterSetName(pciAddr)
 		if sets[name] == nil {
 			sets[name] = make(map[string]int64)
 		}

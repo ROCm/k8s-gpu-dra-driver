@@ -76,9 +76,9 @@ func newDualEntryState(t *testing.T, n int) (*DeviceState, string, string) {
 		require.NoError(t, os.Symlink(fmt.Sprintf("../../../kernel/iommu_groups/%d", 42+i),
 			filepath.Join(root, "sys/bus/pci/devices", pci, "iommu_group")))
 		createDevNode(t, root, fmt.Sprintf("dev/vfio/%d", 42+i))
-		compute := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pci, ParentPFAddress: pci, cardIndex: i, renderIndex: 128 + i}}
+		compute := &AllocatableDevice{AmdGpu: &AmdGpuInfo{PCIAddress: pci, cardIndex: i, renderIndex: 128 + i}}
 		allocatable[compute.CanonicalName()] = compute
-		sibling := newVFIOSibling(compute.AmdGpu, 0)
+		sibling := newVFIOSibling(compute.AmdGpu)
 		allocatable[sibling.CanonicalName()] = sibling
 	}
 	markSiblingPairs(allocatable)
@@ -141,18 +141,16 @@ func TestNewVFIOSibling(t *testing.T) {
 
 	gpu := &AmdGpuInfo{
 		PCIAddress: pci, DeviceID: "0x74a1", ProductName: "MI300X", NumaNode: 1,
-		ParentPFAddress: pci, TotalVFs: 8, MemoryBytes: 192 << 30, ComputeUnits: 304, SimdUnits: 1216,
+		MemoryBytes: 192 << 30, ComputeUnits: 304, SimdUnits: 1216,
 	}
-	dev := newVFIOSibling(gpu, 4)
+	dev := newVFIOSibling(gpu)
 	require.NotNil(t, dev.Vfio)
 	v := dev.Vfio
 	assert.Equal(t, consts.AMDGPUDriverName, v.preConfigureDriver, "release must rebind the GPU to amdgpu")
 	assert.Equal(t, "gpu-vfio-"+pciAddrToDNSLabel(pci), dev.CanonicalName())
 	assert.Equal(t, "42", v.IOMMUGroup)
 	assert.Equal(t, consts.AMDVendorID, v.VendorID)
-	assert.Equal(t, 4, v.NumVFs)
-	assert.Equal(t, gpu.TotalVFs, v.TotalVFs)
-	assert.Equal(t, gpu.ParentPFAddress, v.ParentPFAddress)
+	assert.Zero(t, v.NumVFs)
 	assert.Equal(t, gpu.MemoryBytes, v.MemoryBytes)
 	assert.Equal(t, gpu.ComputeUnits, v.ComputeUnits)
 	assert.Equal(t, gpu.SimdUnits, v.SimdUnits)

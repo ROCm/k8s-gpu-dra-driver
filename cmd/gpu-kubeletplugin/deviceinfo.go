@@ -43,9 +43,6 @@ type AmdGpuInfo struct {
 	ComputeUnits     int
 	SimdUnits        int
 	NumaNode         int
-	ParentPFAddress  string
-	TotalVFs         int
-	IsVF             bool
 	// siblingExclusive is set when this GPU also has a type=vfio entry; both
 	// entries then consume the function's exclusion counter.
 	siblingExclusive bool
@@ -103,7 +100,7 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	return resourceapi.Device{
 		Name:             d.CanonicalName(),
 		Attributes:       attributes,
-		ConsumesCounters: consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive),
+		ConsumesCounters: consumesCounters(d.PCIAddress, d.siblingExclusive),
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"memory":       {Value: *resource.NewQuantity(int64(d.MemoryBytes), resource.BinarySI)},
 			"computeUnits": {Value: *resource.NewQuantity(int64(d.ComputeUnits), resource.BinarySI)},
@@ -114,19 +111,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 
 // KEP-4815 counters.
 //
-// Counters live in one counter set per PCI device family: the parent PF for
-// SR-IOV functions, or the GPU itself otherwise. A family set holds:
-//   - vf-slots (capacity TotalVFs) when the PF supports SR-IOV: a VF entry
-//     consumes one slot and a PF entry consumes all of them, so PF and VF
-//     allocations exclude each other (a PF with active VFs gets no VFIO entry,
-//     but its compute entry and its VFs bound to amdgpu still share this set);
-//   - fn-<bdf> (capacity 1) for each PCI function advertised both as a compute
-//     GPU and as a VFIO device. Both entries consume it, so the scheduler can
-//     allocate at most one of them. This exclusion is enforced at allocation
-//     time; nothing has to be withdrawn from the ResourceSlice afterwards.
-
-// VFSlotCounterName is the per-PF counter that bounds VF allocations.
-const VFSlotCounterName = "vf-slots"
+// A function advertised both as a compute GPU and as a VFIO device has one
+// capacity-1 fn-<bdf> counter. Both entries consume it, so the scheduler can
+// allocate at most one of them without withdrawing either ResourceSlice entry.
 
 // functionCounterName names the capacity-1 exclusion counter shared by the
 // compute and VFIO entries of one PCI function.
@@ -134,45 +121,23 @@ func functionCounterName(pciAddr string) string {
 	return "fn-" + pciAddrToDNSLabel(pciAddr)
 }
 
-// counterFamily returns the address whose counter set holds a device's
-// counters: its parent PF when known, otherwise the device itself.
-func counterFamily(parentPFAddress, pciAddress string) string {
-	if parentPFAddress != "" {
-		return parentPFAddress
-	}
-	return pciAddress
+// counterSetName names the counter set of a PCI function with sibling entries.
+func counterSetName(pciAddr string) string {
+	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(pciAddr))
 }
 
-// counterSetName names the counter set of a device family.
-func counterSetName(familyAddr string) string {
-	return fmt.Sprintf("pf-%s-counter-set", pciAddrToDNSLabel(familyAddr))
-}
-
-// deviceCounters returns, for one advertised device, the amount it consumes
-// of each counter in its family's set, and the capacity the set must publish
-// for each of those counters. Both maps are empty when the device consumes
-// nothing.
-func deviceCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) (consumed, capacity map[string]int64) {
-	consumed = make(map[string]int64)
-	capacity = make(map[string]int64)
-	if parentPFAddress != "" && totalVFs > 0 {
-		capacity[VFSlotCounterName] = int64(totalVFs)
-		consumed[VFSlotCounterName] = int64(totalVFs)
-		if isVF {
-			consumed[VFSlotCounterName] = 1
-		}
+// deviceCounters returns the counter consumed by sibling entries, or nil.
+// Its value is also the counter set's capacity.
+func deviceCounters(pciAddr string, siblingExclusive bool) map[string]int64 {
+	if !siblingExclusive {
+		return nil
 	}
-	if siblingExclusive {
-		name := functionCounterName(pciAddress)
-		capacity[name] = 1
-		consumed[name] = 1
-	}
-	return consumed, capacity
+	return map[string]int64{functionCounterName(pciAddr): 1}
 }
 
 // consumesCounters returns the ConsumesCounters of one advertised device.
-func consumesCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, siblingExclusive bool) []resourceapi.DeviceCounterConsumption {
-	consumed, _ := deviceCounters(parentPFAddress, pciAddress, totalVFs, isVF, siblingExclusive)
+func consumesCounters(pciAddr string, siblingExclusive bool) []resourceapi.DeviceCounterConsumption {
+	consumed := deviceCounters(pciAddr, siblingExclusive)
 	if len(consumed) == 0 {
 		return nil
 	}
@@ -181,7 +146,7 @@ func consumesCounters(parentPFAddress, pciAddress string, totalVFs int, isVF, si
 		counters[name] = resourceapi.Counter{Value: *resource.NewQuantity(amount, resource.BinarySI)}
 	}
 	return []resourceapi.DeviceCounterConsumption{{
-		CounterSet: counterSetName(counterFamily(parentPFAddress, pciAddress)),
+		CounterSet: counterSetName(pciAddr),
 		Counters:   counters,
 	}}
 }
@@ -205,13 +170,11 @@ type AmdGpuVFIOInfo struct {
 	// converted to VFIO for a claim. The device keeps being advertised as that
 	// GPU, since the conversion is an implementation detail of the claim the
 	// scheduler already allocated it to.
-	convertedFrom   *AmdGpuInfo
-	ParentPFAddress string
-	TotalVFs        int
-	NumVFs          int
-	MemoryBytes     uint64
-	ComputeUnits    int
-	SimdUnits       int
+	convertedFrom *AmdGpuInfo
+	NumVFs        int
+	MemoryBytes   uint64
+	ComputeUnits  int
+	SimdUnits     int
 	// siblingExclusive is set when this device is the type=vfio sibling of a
 	// compute GPU; both entries then consume the function's exclusion counter.
 	siblingExclusive bool
@@ -254,7 +217,7 @@ func pciAddrToDNSLabel(addr string) string {
 // GetConsumesCounters returns the KEP-4815 counter consumption for this
 // device (see deviceCounters).
 func (d *AmdGpuVFIOInfo) GetConsumesCounters() []resourceapi.DeviceCounterConsumption {
-	return consumesCounters(d.ParentPFAddress, d.PCIAddress, d.TotalVFs, d.IsVF, d.siblingExclusive)
+	return consumesCounters(d.PCIAddress, d.siblingExclusive)
 }
 
 // GetDevice returns the DRA Device representation for a VFIO passthrough GPU.

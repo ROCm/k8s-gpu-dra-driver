@@ -83,7 +83,7 @@ func TestGetMemoryBytes(t *testing.T) {
 	assert.Equal(t, uint64(0), getMemoryBytes(map[string]interface{}{"vramBytes": uint64(0)}, "partition", "0000:00:00.0"))
 }
 
-func TestGetVFIOParentInfoForVF(t *testing.T) {
+func TestGetVFIOFunctionInfoForVF(t *testing.T) {
 	root := t.TempDir()
 	amdgpu.SetSysfsRoot(root)
 	t.Cleanup(amdgpu.ResetSysfsRoot)
@@ -93,30 +93,24 @@ func TestGetVFIOParentInfoForVF(t *testing.T) {
 	vf := filepath.Join(devices, "0000:01:00.2")
 	require.NoError(t, os.MkdirAll(pf, 0o755))
 	require.NoError(t, os.MkdirAll(vf, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_totalvfs"), []byte("8\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("4\n"), 0o644))
 	require.NoError(t, os.Symlink("../0000:01:00.0", filepath.Join(vf, "physfn")))
 
-	isVF, parent, total, active := getVFIOParentInfo("0000:01:00.2")
-	assert.Equal(t, "0000:01:00.0", parent)
-	assert.Equal(t, 8, total)
-	assert.Equal(t, 4, active)
+	isVF, active := getVFIOFunctionInfo("0000:01:00.2")
+	assert.Zero(t, active)
 	assert.True(t, isVF)
 }
 
-func TestGetVFIOParentInfoForPF(t *testing.T) {
+func TestGetVFIOFunctionInfoForPF(t *testing.T) {
 	root := t.TempDir()
 	amdgpu.SetSysfsRoot(root)
 	t.Cleanup(amdgpu.ResetSysfsRoot)
 
 	pf := filepath.Join(root, "sys/bus/pci/devices/0000:01:00.0")
 	require.NoError(t, os.MkdirAll(pf, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_totalvfs"), []byte("4\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("2\n"), 0o644))
 
-	isVF, parent, total, active := getVFIOParentInfo("0000:01:00.0")
-	assert.Equal(t, "0000:01:00.0", parent)
-	assert.Equal(t, 4, total)
+	isVF, active := getVFIOFunctionInfo("0000:01:00.0")
 	assert.Equal(t, 2, active)
 	assert.False(t, isVF)
 }

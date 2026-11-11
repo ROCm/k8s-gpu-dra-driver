@@ -221,22 +221,6 @@ released. No action is needed. To see which counter the entries share:
 kubectl get resourceslices -o json | jq '.items[].spec.devices[]? | {name, consumesCounters}'
 ```
 
-### VFIO device cannot be allocated — VF slots exhausted
-
-**Symptom:** A ResourceClaim for a VFIO device stays Pending even though
-VFIO devices appear in the ResourceSlice.
-
-**Cause:** All `vf-slots` counters for the PF are consumed by existing
-allocations. The scheduler cannot allocate more VFs (or the PF) until
-slots are freed.
-
-**Resolution:**
-1. Check counter consumption: `kubectl get resourceslices -o yaml` and
-   look for `sharedCounters` and `consumesCounters` entries.
-2. Release existing VFIO claims to free slots.
-3. If a PF is allocated (consuming all slots), no VFs can be allocated
-   until the PF claim is released.
-
 ### Device stuck on vfio-pci after VM deletion
 
 If `Unconfigure` fails during Unprepare, the device remains bound to `vfio-pci`.

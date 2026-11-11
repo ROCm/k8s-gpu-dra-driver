@@ -481,23 +481,18 @@ changing `sriov_numvfs` to refresh the ResourceSlice.
 
 ### KEP-4815 SharedCounters for mutual exclusion
 
-The driver publishes one `SharedCounterSet` per PCI device family (a PF and
-its VFs, or a GPU without SR-IOV) whenever a device in it needs one:
+The driver publishes one `SharedCounterSet` for each PCI function advertised
+as both a compute GPU and a VFIO device:
 
 - **Counter set name:** `pf-<pci-addr>-counter-set` (PCI address in DNS label
   form, e.g., `pf-0000-0a-00-0-counter-set`)
-- **`vf-slots`** (GPUs with SR-IOV, `TotalVFs > 0`): value `TotalVFs`. Each VF
-  consumes 1 slot; the PF consumes `TotalVFs` slots (the entire budget).
-  Allocating the PF exhausts all slots, preventing any VF from being allocated
-  on the same physical GPU; conversely, if VF allocations consume all slots,
-  the PF cannot be allocated.
 - **`fn-<pci-addr>`** (functions with dual entries): value 1. The compute and
   the VFIO entry of that PCI function each consume 1, so only one of them can
   be allocated at a time.
 
-A GPU without SR-IOV and without a VFIO sibling consumes no counters and
-publishes no counter set. Counter sets are published in their own
-ResourceSlices, at most 8 per slice.
+GIM VFs, pre-bound VFIO PFs, and compute GPUs without a VFIO sibling consume
+no shared counters. Counter sets are published in their own ResourceSlices,
+at most 8 per slice.
 
 ---
 
