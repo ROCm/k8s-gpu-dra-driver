@@ -28,7 +28,7 @@
 #
 
 ARG GOLANG_VERSION=undefined
-ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:9.6
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:9.9
 FROM golang:${GOLANG_VERSION} as build
 
 WORKDIR /build
