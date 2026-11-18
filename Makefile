@@ -87,6 +87,10 @@ build:
 	@echo "Running repository build script: scripts/build-driver-image.sh"
 	@bash scripts/build-driver-image.sh
 
+.PHONY: archive
+archive: build
+	@bash scripts/archive-driver-image.sh
+
 all: build helm
 check: $(CHECK_TARGETS)
 
