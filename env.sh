@@ -35,7 +35,7 @@
 # Container/image defaults
 : ${DRIVER_IMAGE_REGISTRY:=docker.io/rocm}
 : ${DRIVER_IMAGE_NAME:="${DRIVER_NAME}"}
-: ${DRIVER_IMAGE_PLATFORM:=ubi-minimal-9.6}
+: ${DRIVER_IMAGE_PLATFORM:=ubi-minimal-9.9}
 : ${DRIVER_IMAGE_TAG:="${VERSION}"}
 
 # Helm/chart defaults

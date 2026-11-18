@@ -29,7 +29,7 @@
 
 ##### Global variables #####
 MKDIR ?= mkdir
-DISTRIBUTIONS := ubi-minimal-9.6
+DISTRIBUTIONS := ubi-minimal-9.9
 DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
 
 include $(CURDIR)/env.mk
@@ -40,7 +40,7 @@ IMAGE ?= $(DRIVER_IMAGE_REGISTRY)/$(DRIVER_IMAGE_NAME):$(DRIVER_IMAGE_TAG)
 ##### Public rules #####
 .PHONY: $(DISTRIBUTIONS)
 
-ubi-minimal-9.6: BASE_IMAGE = registry.access.redhat.com/ubi9/ubi-minimal:9.6
+ubi-minimal-9.9: BASE_IMAGE = registry.access.redhat.com/ubi9/ubi-minimal:9.9
 
 # The prebuilt AMD SMI libraries are vendored under third_party/amd_smi and are
 # already part of the docker build context; no pre-build staging is needed.
