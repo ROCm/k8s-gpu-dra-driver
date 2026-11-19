@@ -399,8 +399,8 @@ func TestGetVFMapping_ValidatesVFCount(t *testing.T) {
 func TestReadPFCapacity(t *testing.T) {
 	for name, tc := range map[string]struct {
 		deviceID string
-		cu       uint64
-		simd     uint64
+		cu       int
+		simd     int
 	}{
 		"MI300X":          {deviceID: "0x74a1", cu: 304, simd: 1216},
 		"MI325X":          {deviceID: "0x74a5", cu: 304, simd: 1216},
@@ -417,7 +417,7 @@ func TestReadPFCapacity(t *testing.T) {
 				"mem_info_vram_total": "206158430208\n",
 				"device":              tc.deviceID,
 			}, nil)
-			assert.Equal(t, [3]uint64{206158430208, tc.cu, tc.simd}, ReadPFCapacity(pciAddr))
+			assert.Equal(t, PFCapacity{MemoryBytes: 206158430208, ComputeUnits: tc.cu, SimdUnits: tc.simd}, ReadPFCapacity(pciAddr))
 		})
 	}
 
@@ -426,7 +426,7 @@ func TestReadPFCapacity(t *testing.T) {
 		pciAddr := "0000:0a:00.0"
 		createFakePCIDevice(t, root, pciAddr, nil, nil)
 		cap := ReadPFCapacity(pciAddr)
-		assert.Equal(t, [3]uint64{0, 0, 0}, cap)
+		assert.Equal(t, PFCapacity{}, cap)
 	})
 
 	t.Run("missing device ID preserves memory", func(t *testing.T) {
@@ -435,7 +435,7 @@ func TestReadPFCapacity(t *testing.T) {
 		createFakePCIDevice(t, root, pciAddr, map[string]string{
 			"mem_info_vram_total": "206158430208\n",
 		}, nil)
-		assert.Equal(t, [3]uint64{206158430208, 0, 0}, ReadPFCapacity(pciAddr))
+		assert.Equal(t, PFCapacity{MemoryBytes: 206158430208}, ReadPFCapacity(pciAddr))
 	})
 }
 

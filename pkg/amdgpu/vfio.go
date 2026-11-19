@@ -392,10 +392,16 @@ func readSysfsFile(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// ReadPFCapacity reads the total memory for a GIM-managed PF from sysfs.
-// Returns [memoryBytes, cuCount, simdCount]. CU and SIMD counts are inferred
+// PFCapacity holds the total memory and compute capacity of a GIM-managed PF.
+type PFCapacity struct {
+	MemoryBytes  uint64
+	ComputeUnits int
+	SimdUnits    int
+}
+
+// ReadPFCapacity reads PF memory from sysfs. CU and SIMD counts are inferred
 // from the PF device ID since GIM does not expose topology files.
-func ReadPFCapacity(pfAddr string) [3]uint64 {
+func ReadPFCapacity(pfAddr string) PFCapacity {
 	var mem uint64
 	memStr, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "mem_info_vram_total"))
 	if memStr != "" {
@@ -412,7 +418,7 @@ func ReadPFCapacity(pfAddr string) [3]uint64 {
 	if err == nil && cu == 0 {
 		glog.Warningf("No CU/SIMD capacity mapping for PF %s device ID %q", pfAddr, deviceID)
 	}
-	return [3]uint64{mem, uint64(cu), uint64(simd)}
+	return PFCapacity{MemoryBytes: mem, ComputeUnits: cu, SimdUnits: simd}
 }
 
 // gpuCapacityByDeviceID returns (cuCount, simdCount) for known AMD GPU PF device IDs.

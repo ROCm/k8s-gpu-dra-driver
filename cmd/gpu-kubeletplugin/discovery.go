@@ -475,7 +475,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 		if err != nil {
 			klog.V(2).Infof("No VFIO VF devices found: %v", err)
 		} else {
-			pfCapCache := make(map[string][3]uint64)
+			pfCapCache := make(map[string]amdgpu.PFCapacity)
 			vfKeys := make([]string, 0, len(vfMap))
 			for k := range vfMap {
 				vfKeys = append(vfKeys, k)
@@ -498,9 +498,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 							cap = amdgpu.ReadPFCapacity(vf.ParentPCIAddress)
 							pfCapCache[vf.ParentPCIAddress] = cap
 						}
-						memPerVF = cap[0] / uint64(vf.NumVFs)
-						cuPerVF = int(cap[1]) / vf.NumVFs
-						simdPerVF = int(cap[2]) / vf.NumVFs
+						memPerVF = cap.MemoryBytes / uint64(vf.NumVFs)
+						cuPerVF = cap.ComputeUnits / vf.NumVFs
+						simdPerVF = cap.SimdUnits / vf.NumVFs
 					}
 					device := &AmdGpuVFIOInfo{
 						PCIAddress:         vf.PCIAddress,
