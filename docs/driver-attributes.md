@@ -438,6 +438,9 @@ The capacity map is omitted entirely when all three values are zero.
 
 ### Selecting VFIO devices
 
+When `VFIOPassthrough` is enabled, the Helm chart creates the
+`gpu.amd.com-vfio` DeviceClass for direct VFIO claims. Its selector is:
+
 ```yaml
 selectors:
 - cel:
@@ -445,6 +448,10 @@ selectors:
       device.driver == 'gpu.amd.com' &&
       device.attributes['gpu.amd.com'].type == 'vfio'
 ```
+
+Use `deviceClassName: gpu.amd.com-vfio` for direct claims. Compute claims and
+`VfioDeviceConfig` conversions use `gpu.amd.com` instead. Deployments with
+externally managed DeviceClasses need the same compute/VFIO class split.
 
 ### Dual-entry advertising and sibling exclusion
 

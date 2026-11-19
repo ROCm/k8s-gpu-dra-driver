@@ -15,6 +15,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      - name: Test Helm DeviceClasses
+        run: python3 scripts/test-deviceclasses.py
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
