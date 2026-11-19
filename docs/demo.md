@@ -80,7 +80,7 @@ spec:
   - name: gpu-0-128
     attributes:
       deviceID:
-        string: "0x740f"
+        string: "0x74a1"
       driverVersion:
         version: 6.12.12
       numaNode:

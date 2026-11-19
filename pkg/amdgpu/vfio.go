@@ -382,20 +382,26 @@ func ReadPFCapacity(pfAddr string) [3]uint64 {
 			mem = 0
 		}
 	}
-	deviceID, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "device"))
+	deviceID, err := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "device"))
+	if err != nil {
+		glog.Warningf("Unable to read device ID for PF %s: %v; CU/SIMD capacities omitted", pfAddr, err)
+	}
 	cu, simd := gpuCapacityByDeviceID(deviceID)
+	if err == nil && cu == 0 {
+		glog.Warningf("No CU/SIMD capacity mapping for PF %s device ID %q", pfAddr, deviceID)
+	}
 	return [3]uint64{mem, uint64(cu), uint64(simd)}
 }
 
 // gpuCapacityByDeviceID returns (cuCount, simdCount) for known AMD GPU PF device IDs.
 func gpuCapacityByDeviceID(deviceID string) (int, int) {
 	switch deviceID {
-	case "0x75a3": // MI355X PF — 8 XCCs, 32 CU/XCC, 4 SIMD/CU
+	case "0x74a1": // MI300X PF — 8 XCDs, 38 CU/XCD, 4 SIMD/CU
+		return 304, 1216
+	case "0x74a5": // MI325X PF — 8 XCDs, 38 CU/XCD, 4 SIMD/CU
+		return 304, 1216
+	case "0x75a3": // MI355X PF — 8 XCDs, 32 CU/XCD, 4 SIMD/CU
 		return 256, 1024
-	case "0x740f": // MI300X PF — 8 XCCs, 32 CU/XCC, 4 SIMD/CU
-		return 304, 1216
-	case "0x74a0": // MI325X PF — 8 XCCs, 38 CU/XCC, 4 SIMD/CU
-		return 304, 1216
 	default:
 		return 0, 0
 	}

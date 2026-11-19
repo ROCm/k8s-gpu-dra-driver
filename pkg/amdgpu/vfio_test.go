@@ -336,31 +336,29 @@ func TestReadSRIOVNumVFs(t *testing.T) {
 }
 
 func TestReadPFCapacity(t *testing.T) {
-	t.Run("all files present", func(t *testing.T) {
-		root := setupFakeSysfs(t)
-		pciAddr := "0000:0a:00.0"
-		createFakePCIDevice(t, root, pciAddr, map[string]string{
-			"mem_info_vram_total": "206158430208\n",
-			"device":              "0x740f",
-		}, nil)
-		cap := ReadPFCapacity(pciAddr)
-		assert.Equal(t, uint64(206158430208), cap[0])
-		assert.Equal(t, uint64(304), cap[1])
-		assert.Equal(t, uint64(1216), cap[2])
-	})
-
-	t.Run("unknown device ID", func(t *testing.T) {
-		root := setupFakeSysfs(t)
-		pciAddr := "0000:0a:00.0"
-		createFakePCIDevice(t, root, pciAddr, map[string]string{
-			"mem_info_vram_total": "1000000\n",
-			"device":              "0x9999",
-		}, nil)
-		cap := ReadPFCapacity(pciAddr)
-		assert.Equal(t, uint64(1000000), cap[0])
-		assert.Equal(t, uint64(0), cap[1])
-		assert.Equal(t, uint64(0), cap[2])
-	})
+	for name, tc := range map[string]struct {
+		deviceID string
+		cu       uint64
+		simd     uint64
+	}{
+		"MI300X":          {deviceID: "0x74a1", cu: 304, simd: 1216},
+		"MI325X":          {deviceID: "0x74a5", cu: 304, simd: 1216},
+		"MI355X":          {deviceID: "0x75a3", cu: 256, simd: 1024},
+		"MI210 unmapped":  {deviceID: "0x740f"},
+		"MI300A unmapped": {deviceID: "0x74a0"},
+		"unknown":         {deviceID: "0x9999"},
+		"empty":           {deviceID: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			pciAddr := "0000:0a:00.0"
+			createFakePCIDevice(t, root, pciAddr, map[string]string{
+				"mem_info_vram_total": "206158430208\n",
+				"device":              tc.deviceID,
+			}, nil)
+			assert.Equal(t, [3]uint64{206158430208, tc.cu, tc.simd}, ReadPFCapacity(pciAddr))
+		})
+	}
 
 	t.Run("missing files", func(t *testing.T) {
 		root := setupFakeSysfs(t)
@@ -369,28 +367,15 @@ func TestReadPFCapacity(t *testing.T) {
 		cap := ReadPFCapacity(pciAddr)
 		assert.Equal(t, [3]uint64{0, 0, 0}, cap)
 	})
-}
 
-func TestGpuCapacityByDeviceID(t *testing.T) {
-	tests := map[string]struct {
-		deviceID     string
-		expectedCU   int
-		expectedSIMD int
-	}{
-		"MI355X":  {deviceID: "0x75a3", expectedCU: 256, expectedSIMD: 1024},
-		"MI300X":  {deviceID: "0x740f", expectedCU: 304, expectedSIMD: 1216},
-		"MI325X":  {deviceID: "0x74a0", expectedCU: 304, expectedSIMD: 1216},
-		"unknown": {deviceID: "0x9999", expectedCU: 0, expectedSIMD: 0},
-		"empty":   {deviceID: "", expectedCU: 0, expectedSIMD: 0},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			cu, simd := gpuCapacityByDeviceID(tc.deviceID)
-			assert.Equal(t, tc.expectedCU, cu)
-			assert.Equal(t, tc.expectedSIMD, simd)
-		})
-	}
+	t.Run("missing device ID preserves memory", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, map[string]string{
+			"mem_info_vram_total": "206158430208\n",
+		}, nil)
+		assert.Equal(t, [3]uint64{206158430208, 0, 0}, ReadPFCapacity(pciAddr))
+	})
 }
 
 func TestGetPFMapping(t *testing.T) {
