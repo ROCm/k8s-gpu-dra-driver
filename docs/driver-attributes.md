@@ -516,6 +516,11 @@ PF with `active VFs must be removed first`, which covers VFs enabled after
 discovery. Discovery runs once at plugin startup, so restart the plugin after
 changing `sriov_numvfs` to refresh the ResourceSlice.
 
+If an existing `sriov_numvfs` value cannot be read or parsed, the driver
+withholds that PF's VFIO entry and rejects PF binding at Prepare. GIM VFs are
+withheld unless their PF has a valid count at least as large as its `virtfn*`
+link count. Compute entries remain available.
+
 ### KEP-4815 SharedCounters for mutual exclusion
 
 The driver publishes one `SharedCounterSet` for each PCI function advertised

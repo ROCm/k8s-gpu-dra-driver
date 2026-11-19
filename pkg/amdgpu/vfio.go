@@ -17,9 +17,11 @@ limitations under the License.
 package amdgpu
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
@@ -111,7 +113,12 @@ func GetPFMapping() (map[string][]PFInfo, error) {
 		}
 
 		// A PF with active VFs is already partitioned and cannot be passed through.
-		if n := ReadSRIOVNumVFs(pciAddr); n > 0 {
+		n, err := ReadSRIOVNumVFs(pciAddr)
+		if err != nil {
+			glog.Warningf("Skipping PF %s for VFIO passthrough: %v", pciAddr, err)
+			continue
+		}
+		if n > 0 {
 			glog.Warningf("Skipping PF %s for VFIO passthrough: %d active SR-IOV VFs", pciAddr, n)
 			continue
 		}
@@ -158,21 +165,28 @@ type VFInfo struct {
 	NumVFs   int
 }
 
-func readSysfsInt(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var val int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &val); err != nil {
-		return 0
-	}
-	return val
-}
-
 // ReadSRIOVNumVFs reads the number of SR-IOV VFs currently active on a PF.
-func ReadSRIOVNumVFs(pfPCIAddress string) int {
-	return readSysfsInt(filepath.Join(PCIDevicePath, pfPCIAddress, "sriov_numvfs"))
+// A missing attribute on an existing PCI device means it has no SR-IOV support.
+func ReadSRIOVNumVFs(pfPCIAddress string) (int, error) {
+	pciPath := filepath.Join(PCIDevicePath, pfPCIAddress)
+	value, err := readSysfsFile(filepath.Join(pciPath, "sriov_numvfs"))
+	if errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Stat(pciPath); statErr != nil {
+			return 0, fmt.Errorf("PCI device %s: %w", pfPCIAddress, statErr)
+		}
+		return 0, nil // An existing device without this attribute does not support SR-IOV.
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read sriov_numvfs for %s: %w", pfPCIAddress, err)
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid sriov_numvfs %q for %s: %w", value, pfPCIAddress, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid sriov_numvfs %q for %s: negative count", value, pfPCIAddress)
+	}
+	return n, nil
 }
 
 // GetVFMapping scans for AMD GPU Virtual Functions created by the GIM SR-IOV
@@ -218,8 +232,16 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 			continue
 		}
 
+		pfNumVFs, err := ReadSRIOVNumVFs(pfAddr)
+		if err != nil {
+			glog.Warningf("Skipping GIM PF %s VFs: %v", pfAddr, err)
+			continue
+		}
+		if pfNumVFs < len(vfPaths) {
+			glog.Warningf("Skipping GIM PF %s VFs: %d virtfn links exceed sriov_numvfs=%d", pfAddr, len(vfPaths), pfNumVFs)
+			continue
+		}
 		pfProductName := readProductName(pfAddr)
-		pfNumVFs := ReadSRIOVNumVFs(pfAddr)
 
 		for _, vfPath := range vfPaths {
 			vfTarget, err := os.Readlink(vfPath)

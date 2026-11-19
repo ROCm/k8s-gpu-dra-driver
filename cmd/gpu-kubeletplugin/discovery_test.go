@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
@@ -96,7 +97,8 @@ func TestGetVFIOFunctionInfoForVF(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("4\n"), 0o644))
 	require.NoError(t, os.Symlink("../0000:01:00.0", filepath.Join(vf, "physfn")))
 
-	isVF, active := getVFIOFunctionInfo("0000:01:00.2")
+	isVF, active, err := getVFIOFunctionInfo("0000:01:00.2")
+	require.NoError(t, err)
 	assert.Zero(t, active)
 	assert.True(t, isVF)
 }
@@ -110,7 +112,53 @@ func TestGetVFIOFunctionInfoForPF(t *testing.T) {
 	require.NoError(t, os.MkdirAll(pf, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(pf, "sriov_numvfs"), []byte("2\n"), 0o644))
 
-	isVF, active := getVFIOFunctionInfo("0000:01:00.0")
+	isVF, active, err := getVFIOFunctionInfo("0000:01:00.0")
+	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 	assert.False(t, isVF)
+}
+
+func TestGetVFIOFunctionInfoRejectsUncertainIdentityOrCount(t *testing.T) {
+	root := t.TempDir()
+	amdgpu.SetSysfsRoot(root)
+	t.Cleanup(amdgpu.ResetSysfsRoot)
+	const pciAddr = "0000:01:00.0"
+	pciPath := filepath.Join(root, "sys/bus/pci/devices", pciAddr)
+	require.NoError(t, os.MkdirAll(pciPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(pciPath, "sriov_numvfs"), []byte("bad\n"), 0644))
+	_, _, err := getVFIOFunctionInfo(pciAddr)
+	require.ErrorContains(t, err, "sriov_numvfs")
+
+	require.NoError(t, os.Mkdir(filepath.Join(pciPath, "physfn"), 0755))
+	_, _, err = getVFIOFunctionInfo(pciAddr)
+	require.ErrorContains(t, err, "physfn")
+
+	_, _, err = getVFIOFunctionInfo("0000:ff:00.0")
+	require.Error(t, err)
+}
+
+func TestMalformedSRIOVCountWithholdsVFIOSibling(t *testing.T) {
+	setVFIOPassthrough(t, true)
+	root := setupFakeVfioSysfs(t)
+	const pciAddr = "0000:0a:00.0"
+	createPCIDevice(t, root, pciAddr, consts.AMDGPUDriverName)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices", pciAddr, "sriov_numvfs"), []byte("bad\n"), 0644))
+	previousDiscovery := discoverAMDGPUs
+	discoverAMDGPUs = func() map[string]map[string]interface{} {
+		return map[string]map[string]interface{}{
+			pciAddr: {
+				"card": 0, "renderD": 128, "kfdID": "", "deviceID": "",
+				"driverVersion": "", "computePartitionType": "", "memoryPartitionType": "",
+				"productName": "", "numaNode": 0, "pciAddr": pciAddr,
+			},
+		}
+	}
+	t.Cleanup(func() { discoverAMDGPUs = previousDiscovery })
+
+	for _, autoPartition := range []bool{false, true} {
+		allocatable, _, _, err := enumerateAllPossibleDevices(autoPartition)
+		require.NoError(t, err)
+		assert.Contains(t, allocatable, "gpu-0-128")
+		assert.NotContains(t, allocatable, "gpu-vfio-"+pciAddrToDNSLabel(pciAddr))
+	}
 }

@@ -35,6 +35,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 
@@ -125,11 +126,15 @@ func getPcieInfo(pciAddr string, mods ...deviceattribute.MachineModifier) (topol
 }
 
 // getVFIOFunctionInfo identifies a VF and counts active VFs on a PF.
-func getVFIOFunctionInfo(pciAddr string) (isVF bool, numVFs int) {
+// Unreadable identity or count is returned so callers can withhold its VFIO entry.
+func getVFIOFunctionInfo(pciAddr string) (isVF bool, numVFs int, err error) {
 	if _, err := amdgpu.GetPFAddress(pciAddr); err == nil {
-		return true, 0
+		return true, 0, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, 0, fmt.Errorf("read physfn for %s: %w", pciAddr, err)
 	}
-	return false, amdgpu.ReadSRIOVNumVFs(pciAddr)
+	numVFs, err = amdgpu.ReadSRIOVNumVFs(pciAddr)
+	return false, numVFs, err
 }
 
 // newVFIOSibling returns the direct type=vfio entry advertised alongside a
@@ -269,8 +274,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 			if !supportsPartitioning {
 				var isVF bool
 				var numVFs int
+				var vfioErr error
 				if featuregates.Enabled(featuregates.VFIOPassthrough) {
-					isVF, numVFs = getVFIOFunctionInfo(pciAddr)
+					isVF, numVFs, vfioErr = getVFIOFunctionInfo(pciAddr)
 				}
 				// GPU doesn't support partitioning - advertise as a normal full GPU
 				amdGpuInfo := &AmdGpuInfo{
@@ -292,7 +298,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 				}
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
-				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
+				if vfioErr != nil {
+					klog.Warningf("Not advertising %s for VFIO passthrough: %v", pciAddr, vfioErr)
+				} else if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
 					vfioCount++
 				}
 				klog.Infof("GPU %d (%s) does not support partitioning, advertising as normal GPU: %s",
@@ -341,8 +349,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 				}
 				var isVF bool
 				var numVFs int
+				var vfioErr error
 				if featuregates.Enabled(featuregates.VFIOPassthrough) {
-					isVF, numVFs = getVFIOFunctionInfo(pciAddr)
+					isVF, numVFs, vfioErr = getVFIOFunctionInfo(pciAddr)
 				}
 
 				amdGpuInfo := &AmdGpuInfo{
@@ -372,7 +381,9 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...
 				klog.Infof("Found full AMD GPU: %s, compute type: %s, memory type: %s",
 					device.CanonicalName(), computePartitionType, memoryPartitionType)
 
-				if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
+				if vfioErr != nil {
+					klog.Warningf("Not advertising %s for VFIO passthrough: %v", pciAddr, vfioErr)
+				} else if addVFIOSibling(alldevices, amdGpuInfo, isVF, numVFs) {
 					vfioCount++
 				}
 			} else if computePartitionType != "" {

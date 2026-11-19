@@ -313,12 +313,16 @@ func TestReadSRIOVNumVFs(t *testing.T) {
 		fileContent string
 		createFile  bool
 		expected    int
+		expectErr   bool
 	}{
 		"8 VFs active": {fileContent: "8\n", createFile: true, expected: 8},
 		"4 VFs active": {fileContent: "4\n", createFile: true, expected: 4},
 		"1 VF active":  {fileContent: "1\n", createFile: true, expected: 1},
 		"0 VFs active": {fileContent: "0\n", createFile: true, expected: 0},
 		"file missing": {createFile: false, expected: 0},
+		"malformed":    {fileContent: "bad\n", createFile: true, expectErr: true},
+		"negative":     {fileContent: "-1\n", createFile: true, expectErr: true},
+		"empty":        {fileContent: "\n", createFile: true, expectErr: true},
 	}
 
 	for name, tc := range tests {
@@ -330,7 +334,64 @@ func TestReadSRIOVNumVFs(t *testing.T) {
 				files["sriov_numvfs"] = tc.fileContent
 			}
 			createFakePCIDevice(t, root, pciAddr, files, nil)
-			assert.Equal(t, tc.expected, ReadSRIOVNumVFs(pciAddr))
+			got, err := ReadSRIOVNumVFs(pciAddr)
+			if tc.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+
+	t.Run("device missing", func(t *testing.T) {
+		setupFakeSysfs(t)
+		_, err := ReadSRIOVNumVFs("0000:ff:00.0")
+		require.Error(t, err)
+	})
+
+	t.Run("attribute unreadable", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		pciPath := createFakePCIDevice(t, root, pciAddr, nil, nil)
+		require.NoError(t, os.Mkdir(filepath.Join(pciPath, "sriov_numvfs"), 0755))
+		_, err := ReadSRIOVNumVFs(pciAddr)
+		require.Error(t, err)
+	})
+}
+
+func TestGetVFMapping_ValidatesVFCount(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		count   string
+		wantVFs int
+	}{
+		{name: "malformed", count: "bad\n"},
+		{name: "missing"},
+		{name: "zero", count: "0\n"},
+		{name: "fewer than links", count: "1\n"},
+		{name: "more than links", count: "3\n", wantVFs: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			const pfAddr = "0000:0a:00.0"
+			setupGIMPFWithVFs(t, root, pfAddr, []string{"0000:0b:00.0", "0000:0b:01.0"}, nil)
+			countPath := filepath.Join(root, "sys/bus/pci/devices", pfAddr, "sriov_numvfs")
+			if tc.count == "" {
+				require.NoError(t, os.Remove(countPath))
+			} else {
+				require.NoError(t, os.WriteFile(countPath, []byte(tc.count), 0644))
+			}
+			vfMap, err := GetVFMapping()
+			require.NoError(t, err)
+			got := 0
+			for _, vfs := range vfMap {
+				got += len(vfs)
+				for _, vf := range vfs {
+					assert.Equal(t, 3, vf.NumVFs)
+				}
+			}
+			assert.Equal(t, tc.wantVFs, got)
 		})
 	}
 }
@@ -401,8 +462,8 @@ func TestGetPFMapping(t *testing.T) {
 		assert.Equal(t, 1, total)
 	})
 
-	t.Run("PF with active VFs skipped", func(t *testing.T) {
-		for numVFs, wantTotal := range map[string]int{"0\n": 1, "2\n": 0} {
+	t.Run("PF VF count controls publication", func(t *testing.T) {
+		for numVFs, wantTotal := range map[string]int{"0\n": 1, "2\n": 0, "bad\n": 0} {
 			root := setupFakeSysfs(t)
 			devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
 				map[string]string{

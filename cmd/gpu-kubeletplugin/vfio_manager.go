@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 
 	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
@@ -89,12 +88,12 @@ func (vm *VfioPciManager) Configure(info *AmdGpuVFIOInfo) error {
 	// already-bound shortcut: a PF pre-bound to vfio-pci can have VFs enabled
 	// after discovery.
 	if !info.IsVF {
-		numVFsPath := filepath.Join(amdgpu.PCIDevicePath, info.PCIAddress, "sriov_numvfs")
-		if data, err := os.ReadFile(numVFsPath); err == nil {
-			numVFs := strings.TrimSpace(string(data))
-			if numVFs != "0" && numVFs != "" {
-				return fmt.Errorf("cannot passthrough PF %s: %s active VFs must be removed first", info.PCIAddress, numVFs)
-			}
+		numVFs, err := amdgpu.ReadSRIOVNumVFs(info.PCIAddress)
+		if err != nil {
+			return fmt.Errorf("cannot passthrough PF %s: %w", info.PCIAddress, err)
+		}
+		if numVFs > 0 {
+			return fmt.Errorf("cannot passthrough PF %s: %d active VFs must be removed first", info.PCIAddress, numVFs)
 		}
 	}
 
