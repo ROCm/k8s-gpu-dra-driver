@@ -90,18 +90,30 @@ func (d *AllocatableDevice) GetPCIAddress() string {
 func markSiblingPairs(allocatable AllocatableDevices) {
 	compute := make(map[string]*AmdGpuInfo)
 	vfio := make(map[string]*AmdGpuVFIOInfo)
+	converted := make(map[string]*AmdGpuVFIOInfo)
 	for _, d := range allocatable {
 		switch d.Type() {
 		case consts.AmdGpuDeviceType:
+			d.AmdGpu.siblingExclusive = false
 			compute[d.AmdGpu.PCIAddress] = d.AmdGpu
 		case consts.VfioDeviceType:
-			vfio[d.Vfio.PCIAddress] = d.Vfio
+			d.Vfio.siblingExclusive = false
+			if d.Vfio.convertedFrom != nil {
+				d.Vfio.convertedFrom.siblingExclusive = false
+				compute[d.Vfio.PCIAddress] = d.Vfio.convertedFrom
+				converted[d.Vfio.PCIAddress] = d.Vfio
+			} else {
+				vfio[d.Vfio.PCIAddress] = d.Vfio
+			}
 		}
 	}
 	for addr, gpu := range compute {
 		if v, ok := vfio[addr]; ok && addr != "" {
 			gpu.siblingExclusive = true
 			v.siblingExclusive = true
+			if c := converted[addr]; c != nil {
+				c.siblingExclusive = true
+			}
 		}
 	}
 }

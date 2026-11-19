@@ -35,6 +35,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
@@ -183,10 +184,15 @@ func addVFIOSibling(alldevices AllocatableDevices, gpu *AmdGpuInfo, isVF bool, n
 // also returns a map from GPU index to PCI address (for amd-smi targeting) and
 // the list of GPU indices that support partitioning (for building shared
 // counter sets).
-func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevices, map[int]string, []int, error) {
+
+// discoverAMDGPUs is replaceable in tests that exercise rebinding without
+// accessing the host's /sys tree.
+var discoverAMDGPUs = amdgpu.GetAMDGPUs
+
+func enumerateAllPossibleDevices(enableSyntheticPartition bool, reservedBDFs ...string) (AllocatableDevices, map[int]string, []int, error) {
 	alldevices := make(AllocatableDevices)
 	vfioCount := 0
-	allAMDGPUs := amdgpu.GetAMDGPUs()
+	allAMDGPUs := discoverAMDGPUs()
 
 	// Sort PCI addresses for deterministic GPU index assignment
 	// (needed for synthetic-partition mode, but harmless in normal mode)
@@ -194,7 +200,15 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 	for pciAddr := range allAMDGPUs {
 		pciAddrs = append(pciAddrs, pciAddr)
 	}
+	if enableSyntheticPartition {
+		for _, pciAddr := range reservedBDFs {
+			if _, present := allAMDGPUs[pciAddr]; !present {
+				pciAddrs = append(pciAddrs, pciAddr)
+			}
+		}
+	}
 	sort.Strings(pciAddrs)
+	pciAddrs = slices.Compact(pciAddrs)
 
 	var gpuPCIAddresses map[int]string
 	var partitionableGPUs []int
@@ -205,7 +219,14 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 	}
 
 	for _, pciAddr := range pciAddrs {
-		gpuInfoMap := allAMDGPUs[pciAddr]
+		gpuInfoMap, present := allAMDGPUs[pciAddr]
+		if !present {
+			// A claim temporarily bound this GPU to vfio-pci. Keep the
+			// logical index of every later amdgpu GPU stable across restart,
+			// but do not advertise this one or ask AMD SMI for its handle.
+			gpuIndex++
+			continue
+		}
 
 		// In synthetic-partition mode the driver owns partitioning and advertises
 		// from the physical-GPU baseline. When a GPU is already partitioned (CPX/DPX),

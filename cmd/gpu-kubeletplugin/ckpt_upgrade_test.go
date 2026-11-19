@@ -35,7 +35,7 @@ func TestCheckpointPartitionFieldsOmittedWhenUnset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, field := range []string{"activeMemoryMode", "gpuComputeModes", "memoryReload", "assignedSlots", "vfioConversions"} {
+	for _, field := range []string{"activeMemoryMode", "gpuComputeModes", "memoryReload", "assignedSlots", "vfioConversions", "directVfioBindings"} {
 		var decoded map[string]interface{}
 		if err := json.Unmarshal(out, &decoded); err != nil {
 			t.Fatal(err)
@@ -43,6 +43,34 @@ func TestCheckpointPartitionFieldsOmittedWhenUnset(t *testing.T) {
 		if _, present := decoded[field]; present {
 			t.Errorf("field %q serialized while unset; an older driver would reject the checkpoint as corrupted (got %s)", field, out)
 		}
+	}
+}
+
+func TestCheckpointRoundTripWithDirectVfioBinding(t *testing.T) {
+	cp := newCheckpoint()
+	cp.V1.DirectVfioBindings = map[string]*DirectVfioClaim{
+		"claim-a": {
+			Devices: map[string]*DirectVfioBinding{
+				"gpu-vfio-0000-0a-00-0": {PCIAddress: "0000:0a:00.0", OriginalDriver: "amdgpu"},
+			},
+			Releasing: true,
+		},
+	}
+	data, err := cp.MarshalCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := &Checkpoint{}
+	if err := got.UnmarshalCheckpoint(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := got.VerifyChecksum(); err != nil {
+		t.Fatal(err)
+	}
+	claim := got.V1.DirectVfioBindings["claim-a"]
+	if claim == nil || !claim.Releasing || claim.Devices["gpu-vfio-0000-0a-00-0"] == nil ||
+		claim.Devices["gpu-vfio-0000-0a-00-0"].OriginalDriver != "amdgpu" {
+		t.Fatalf("direct VFIO binding not preserved: %+v", claim)
 	}
 }
 

@@ -465,6 +465,12 @@ device (`type=amdgpu`) and a VFIO device (`type=vfio`). The scheduler allocates
 whichever type the claim requests. A `type=vfio` entry claimed without a
 `VfioDeviceConfig` gets the default VFIO configuration.
 
+If the plugin restarts while a direct VFIO claim has rebound its PF to
+`vfio-pci`, it publishes that PF's VFIO entry alone until release. Release
+returns the PF to `amdgpu`, rediscovers both entries, and republishes their
+shared exclusion counter. A PF whose release is still failing is withheld
+until cleanup succeeds.
+
 Compute VFs (SR-IOV VFs bound to `amdgpu`) are advertised only as
 `type=amdgpu`. Unbound GIM VFs are discovered separately and advertised only as
 `type=vfio`. To use a compute VF for passthrough, claim it with a
@@ -473,9 +479,10 @@ Compute VFs (SR-IOV VFs bound to `amdgpu`) are advertised only as
 Sibling exclusion is bidirectional and enforced by the scheduler at allocation
 time: both entries of a GPU consume the same capacity-1 counter (see below),
 so once either one is allocated the other cannot be. Both entries stay in the
-ResourceSlice; the one that is not allocated simply cannot be satisfied until
-the claim is released. This relies on KEP-4815 partitionable devices
-(`DRAPartitionableDevices`, beta and enabled by default since Kubernetes 1.36).
+ResourceSlice while the plugin is running; the one that is not allocated
+simply cannot be satisfied until the claim is released. This relies on KEP-4815
+partitionable devices (`DRAPartitionableDevices`, beta and enabled by default
+since Kubernetes 1.36).
 
 Pre-bound PF-passthrough devices (GPUs already bound to `vfio-pci` at discovery
 time, e.g., by the GPU Operator) are different. They appear as VFIO-only
