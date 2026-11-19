@@ -150,7 +150,6 @@ func TestNewVFIOSibling(t *testing.T) {
 	assert.Equal(t, "gpu-vfio-"+pciAddrToDNSLabel(pci), dev.CanonicalName())
 	assert.Equal(t, "42", v.IOMMUGroup)
 	assert.Equal(t, consts.AMDVendorID, v.VendorID)
-	assert.Zero(t, v.NumVFs)
 	assert.Equal(t, gpu.MemoryBytes, v.MemoryBytes)
 	assert.Equal(t, gpu.ComputeUnits, v.ComputeUnits)
 	assert.Equal(t, gpu.SimdUnits, v.SimdUnits)

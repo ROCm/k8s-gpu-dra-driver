@@ -174,7 +174,10 @@ func TestCheckVFIODriverLoaded(t *testing.T) {
 func setupGIMPFWithVFs(t *testing.T, root, pfAddr string, vfAddrs []string, vfDrivers map[string]string) {
 	t.Helper()
 	pfPath := createFakePCIDevice(t, root, pfAddr,
-		map[string]string{"vendor": consts.AMDVendorID},
+		map[string]string{
+			"vendor":       consts.AMDVendorID,
+			"sriov_numvfs": fmt.Sprintf("%d\n", len(vfAddrs)),
+		},
 		map[string]string{"driver": "../../../../bus/pci/drivers/gim"},
 	)
 
@@ -210,8 +213,32 @@ func TestGetVFMapping(t *testing.T) {
 		total := 0
 		for _, vfs := range vfMap {
 			total += len(vfs)
+			for _, vf := range vfs {
+				assert.Equal(t, 1, vf.NumVFs)
+			}
 		}
 		assert.Equal(t, 1, total)
+	})
+
+	t.Run("eight VFs remain eight distinct devices", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		vfAddrs := make([]string, 8)
+		for i := range vfAddrs {
+			vfAddrs[i] = fmt.Sprintf("0000:0b:%02x.0", i)
+		}
+		setupGIMPFWithVFs(t, root, "0000:0a:00.0", vfAddrs, nil)
+
+		vfMap, err := GetVFMapping()
+		require.NoError(t, err)
+		seen := make(map[string]bool)
+		for _, vfs := range vfMap {
+			for _, vf := range vfs {
+				assert.Equal(t, 8, vf.NumVFs)
+				assert.False(t, seen[vf.PCIAddress], "duplicate VF %s", vf.PCIAddress)
+				seen[vf.PCIAddress] = true
+			}
+		}
+		assert.Len(t, seen, 8)
 	})
 
 	t.Run("VF on vfio-pci is included", func(t *testing.T) {

@@ -417,10 +417,14 @@ passthrough devices with `type = vfio`. These come from two sources:
 | `productName` | string | GPU product name (e.g., `Instinct_MI300X`) |
 | `deviceID` | string | PCI device ID (e.g., `0x740f`) |
 | `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
-| `partitionProfile` | string | Compute partition mode (e.g., `cpx`, `qpx`, `tpx`, `dpx`, `spx`). Only present on GIM VFs with a recognized partition mode. Not set on dual-entry PF siblings. |
 
 Standard topology attributes (`resource.kubernetes.io/pciBusID`,
 `resource.kubernetes.io/pcieRoot`) are also published when available.
+
+Devices advertised as `type=vfio` do not publish `partitionProfile`. For GIM
+VFs, the active accelerator partition mode cannot be determined from the VF
+count. A VF may expose multiple logical compute partitions inside its guest,
+but remains one allocatable PCI VF.
 
 ### Capacity for VFIO devices
 

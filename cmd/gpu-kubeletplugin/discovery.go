@@ -482,7 +482,6 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 						pcieRootAttr:       topo.pcieRoot,
 						numaNodeAttr:       topo.numaNode,
 						preConfigureDriver: currentDriver,
-						NumVFs:             vf.NumVFs,
 						MemoryBytes:        memPerVF,
 						ComputeUnits:       cuPerVF,
 						SimdUnits:          simdPerVF,

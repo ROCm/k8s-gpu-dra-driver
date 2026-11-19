@@ -171,30 +171,12 @@ type AmdGpuVFIOInfo struct {
 	// GPU, since the conversion is an implementation detail of the claim the
 	// scheduler already allocated it to.
 	convertedFrom *AmdGpuInfo
-	NumVFs        int
 	MemoryBytes   uint64
 	ComputeUnits  int
 	SimdUnits     int
 	// siblingExclusive is set when this device is the type=vfio sibling of a
 	// compute GPU; both entries then consume the function's exclusion counter.
 	siblingExclusive bool
-}
-
-func (d *AmdGpuVFIOInfo) partitionMode() string {
-	switch d.NumVFs {
-	case 1:
-		return "spx"
-	case 2:
-		return "dpx"
-	case 3:
-		return "tpx"
-	case 4:
-		return "qpx"
-	case 8:
-		return "cpx"
-	default:
-		return ""
-	}
 }
 
 // CanonicalName returns the canonical name for this VFIO device. It is
@@ -250,9 +232,6 @@ func (d *AmdGpuVFIOInfo) GetDevice() resourceapi.Device {
 	}
 	if d.numaNodeAttr.Name != "" {
 		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
-	}
-	if mode := d.partitionMode(); mode != "" {
-		attributes["partitionProfile"] = resourceapi.DeviceAttribute{StringValue: ptr.To(mode)}
 	}
 	dev := resourceapi.Device{
 		Name:             d.CanonicalName(),
