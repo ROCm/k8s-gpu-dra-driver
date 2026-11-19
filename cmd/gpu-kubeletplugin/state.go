@@ -93,24 +93,21 @@ func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
 
 type DeviceState struct {
 	sync.Mutex
-	cdi                *CDIHandler
-	allocatable        AllocatableDevices
-	checkpointManager  checkpointmanager.CheckpointManager
-	vfioManager        *VfioPciManager
-	vfioConversions    map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU; see vfio_conversions.go
-	partitionState     *PartitionState
-	driver             *driver // back-reference for re-publishing resources
-	syntheticPartition bool    // whether synthetic-partition mode is enabled
-	nodeName           string  // this node's name, matched against allocation results' Pool
+	cdi                 *CDIHandler
+	allocatable         AllocatableDevices
+	checkpointManager   checkpointmanager.CheckpointManager
+	vfioManager         *VfioPciManager
+	vfioConversions     map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU; see vfio_conversions.go
+	directVfioBindings  map[string]*DirectVfioClaim
+	partitionState      *PartitionState
+	driver              *driver // back-reference for re-publishing resources
+	syntheticPartition  bool    // whether synthetic-partition mode is enabled
+	nodeName            string  // this node's name, matched against allocation results' Pool
+	recoveryUnavailable bool    // an existing checkpoint could not be read at startup
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
 	autoPartition := featuregates.Enabled(featuregates.AutoPartition)
-	allocatable, gpuPCIAddresses, partitionableGPUs, err := enumerateAllPossibleDevices(autoPartition)
-	if err != nil {
-		return nil, fmt.Errorf("error enumerating devices: %v", err)
-	}
-
 	cdi, err := NewCDIHandler(config)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create CDI handler: %v", err)
@@ -124,6 +121,30 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
 	if err != nil {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
+	}
+	checkpoints, err := checkpointManager.ListCheckpoints()
+	if err != nil {
+		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
+	}
+	checkpoint := newCheckpoint()
+	recoveryUnavailable := false
+	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
+		if err := checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			if featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+			}
+			klog.Warningf("Failed to read checkpoint for state recovery: %v; no devices will be advertised until the checkpoint is repaired and the plugin restarted", err)
+			// GetCheckpoint can decode fields before checksum verification fails.
+			checkpoint = newCheckpoint()
+			recoveryUnavailable = true
+		}
+	} else if err := checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+	}
+
+	allocatable, gpuPCIAddresses, partitionableGPUs, err := enumerateAllPossibleDevices(autoPartition, checkpointReservedBDFs(checkpoint.V1)...)
+	if err != nil {
+		return nil, fmt.Errorf("error enumerating devices: %v", err)
 	}
 
 	var vfioMgr *VfioPciManager
@@ -141,13 +162,17 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		}
 	}
 
+	markSiblingPairs(allocatable)
+
 	state := &DeviceState{
-		cdi:                cdi,
-		allocatable:        allocatable,
-		vfioManager:        vfioMgr,
-		checkpointManager:  checkpointManager,
-		syntheticPartition: autoPartition,
-		nodeName:           config.flags.nodeName,
+		cdi:                 cdi,
+		allocatable:         allocatable,
+		vfioManager:         vfioMgr,
+		checkpointManager:   checkpointManager,
+		directVfioBindings:  checkpoint.V1.DirectVfioBindings,
+		syntheticPartition:  autoPartition,
+		nodeName:            config.flags.nodeName,
+		recoveryUnavailable: recoveryUnavailable,
 	}
 
 	// Set up partition state for synthetic-partition mode
@@ -163,48 +188,27 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		}
 		state.partitionState = NewPartitionState(gpuPCIAddresses, partitionableGPUs, allocatable, kmmEnabled, recoverer)
 	}
-
-	checkpoints, err := state.checkpointManager.ListCheckpoints()
-	if err != nil {
-		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
-	}
-
-	checkpointExists := false
-	for _, c := range checkpoints {
-		if c == DriverPluginCheckpointFile {
-			checkpointExists = true
-			break
-		}
-	}
-
-	if checkpointExists {
-		checkpoint := newCheckpoint()
-		if err := state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-			klog.Warningf("Failed to read checkpoint for state recovery: %v", err)
-			return state, nil
-		}
-		// Recover partition state from checkpoint if synthetic-partition is enabled
-		if autoPartition && state.partitionState != nil {
-			state.partitionState.RecoverFromCheckpoint(
-				checkpoint.V1.ActiveMemoryMode,
-				checkpoint.V1.GPUComputeModes,
-				checkpoint.V1.MemoryReload,
-				checkpoint.V1.PreparedClaims,
-				checkpoint.V1.AssignedSlots,
-			)
-		}
-		if state.recoverVfioConversions(checkpoint.V1.VfioConversions) {
-			state.saveVfioConversions(checkpoint)
-			if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-				klog.Warningf("Failed to remove stale VFIO conversion intents from checkpoint: %v", err)
-			}
-		}
+	if recoveryUnavailable {
 		return state, nil
 	}
 
-	checkpoint := newCheckpoint()
-	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+	if autoPartition && state.partitionState != nil {
+		state.partitionState.RecoverFromCheckpoint(
+			checkpoint.V1.ActiveMemoryMode,
+			checkpoint.V1.GPUComputeModes,
+			checkpoint.V1.MemoryReload,
+			checkpoint.V1.PreparedClaims,
+			checkpoint.V1.AssignedSlots,
+		)
+	}
+	if state.recoverVfioConversions(checkpoint.V1.VfioConversions) {
+		state.saveVfioConversions(checkpoint)
+		if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			klog.Warningf("Failed to remove stale VFIO conversion intents from checkpoint: %v", err)
+		}
+	}
+	if err := state.recoverDirectVfioBindings(checkpoint); err != nil {
+		return nil, err
 	}
 
 	return state, nil
@@ -213,6 +217,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.Device, err error) {
 	s.Lock()
 	defer s.Unlock()
+	if s.recoveryUnavailable {
+		return nil, fmt.Errorf("checkpoint recovery unavailable; repair the checkpoint and restart the plugin")
+	}
 
 	claimUID := string(claim.UID)
 
@@ -223,10 +230,16 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
+		if err := s.validatePreparedDirectVfio(claimUID); err != nil {
+			return nil, err
+		}
 		return preparedClaims[claimUID].GetDevices(), nil
 	}
 
 	if err := validateNoOverlappingPreparedDevices(claim, preparedClaims); err != nil {
+		return nil, err
+	}
+	if err := s.validateNoOverlappingPFs(claim, preparedClaims); err != nil {
 		return nil, err
 	}
 
@@ -234,7 +247,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 	// rebind; persist those records so a restart can still return them.
 	defer func() {
 		if err != nil {
-			s.persistVfioConversionsAfterFailure(checkpoint, claimUID)
+			s.persistVfioIntentsAfterFailure(checkpoint, claimUID)
 		}
 	}()
 
@@ -276,7 +289,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 		// Phase 1.5: publish taints before the slow apply. If this fails we have no
 		// scheduler-visible protection for the reload window, so roll back and fail.
 		if taintsChanged && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				s.rollbackPartitions(claimUID, partitionShares)
 				return nil, fmt.Errorf("failed to publish partition taints before apply: %v", err)
 			}
@@ -294,7 +307,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 				// kubelet re-drives Prepare (which re-enters ApplyPartition to poll).
 				if IsReloadInProgress(err) {
 					s.savePartitionCheckpoint(checkpoint)
-					s.saveVfioConversions(checkpoint)
+					s.saveVfioIntents(checkpoint)
 					if cperr := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); cperr != nil {
 						klog.Warningf("failed to checkpoint in-flight KMM reload marker: %v", cperr)
 					}
@@ -329,7 +342,7 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 
 	// Save partition state to checkpoint if synthetic-partition mode is enabled
 	s.savePartitionCheckpoint(checkpoint)
-	s.saveVfioConversions(checkpoint)
+	s.saveVfioIntents(checkpoint)
 
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		// The CDI spec file was already written for this claim; without deleting it
@@ -480,7 +493,7 @@ func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShar
 		klog.Warningf("Error rolling back partition reservation for claim %s: %v", claimUID, err)
 	}
 	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition rollback: %v", err)
 		}
 	}
@@ -489,20 +502,33 @@ func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShar
 func (s *DeviceState) Unprepare(claimUID string) error {
 	s.Lock()
 	defer s.Unlock()
+	if s.recoveryUnavailable {
+		return fmt.Errorf("checkpoint recovery unavailable; repair the checkpoint and restart the plugin")
+	}
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return fmt.Errorf("unable to sync from checkpoint: %v", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
+	hadDirectBinding := s.directVfioBindings[claimUID] != nil
+	if claim := s.directVfioBindings[claimUID]; claim != nil && preparedClaims[claimUID] != nil && !claim.Releasing {
+		claim.Releasing = true
+		s.saveVfioIntents(checkpoint)
+		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+			claim.Releasing = false
+			return fmt.Errorf("unable to checkpoint direct VFIO release intent: %w", err)
+		}
+	}
 
 	if preparedClaims[claimUID] == nil {
 		// A claim whose Prepare failed may still own devices it converted to
 		// VFIO but could not rebind; kubelet's Unprepare is the last chance to
 		// return them.
-		if len(s.vfioConversions[claimUID]) > 0 {
+		if len(s.vfioConversions[claimUID]) > 0 || s.directVfioBindings[claimUID] != nil {
 			releaseErr := s.releaseStrandedVfio(claimUID)
-			s.saveVfioConversions(checkpoint)
+			s.savePartitionCheckpoint(checkpoint)
+			s.saveVfioIntents(checkpoint)
 			if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 				return fmt.Errorf("unable to sync to checkpoint: %v", err)
 			}
@@ -525,12 +551,12 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 			klog.Warningf("Error releasing partition for never-fully-prepared claim %s: %v", claimUID, err)
 		}
 		if changed && s.driver != nil {
-			if err := s.driver.republishResources(context.TODO()); err != nil {
+			if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 				klog.Warningf("Failed to re-publish resources after unprepare of never-fully-prepared claim %s: %v", claimUID, err)
 			}
 		}
 		s.savePartitionCheckpoint(checkpoint)
-		s.saveVfioConversions(checkpoint)
+		s.saveVfioIntents(checkpoint)
 		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 			return fmt.Errorf("unable to sync to checkpoint: %v", err)
 		}
@@ -566,6 +592,14 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 		}
 		changed, err := s.partitionState.ReleaseClaim(claimUID, partitionShares)
 		if err != nil {
+			if hadDirectBinding {
+				s.savePartitionCheckpoint(checkpoint)
+				s.saveVfioIntents(checkpoint)
+				if cpErr := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); cpErr != nil {
+					return errors.Join(fmt.Errorf("error releasing partition for claim %s: %w", claimUID, err), cpErr)
+				}
+				return fmt.Errorf("error releasing partition for claim %s: %w", claimUID, err)
+			}
 			klog.Warningf("Error releasing partition for claim %s: %v", claimUID, err)
 		}
 		taintsChanged = changed
@@ -574,31 +608,39 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
 		// Some devices may have been returned; record that before failing so
 		// the checkpoint matches the hardware. kubelet retries Unprepare.
-		s.saveVfioConversions(checkpoint)
+		s.savePartitionCheckpoint(checkpoint)
+		s.saveVfioIntents(checkpoint)
 		if cpErr := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); cpErr != nil {
-			klog.Warningf("failed to checkpoint VFIO conversions after partial unprepare of claim %s: %v", claimUID, cpErr)
+			klog.Warningf("failed to checkpoint state after partial unprepare of claim %s: %v", claimUID, cpErr)
 		}
 		return fmt.Errorf("unprepare failed: %v", err)
 	}
 
 	err := s.cdi.DeleteClaimSpecFile(claimUID)
 	if err != nil {
+		s.savePartitionCheckpoint(checkpoint)
+		s.saveVfioIntents(checkpoint)
+		if cpErr := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); cpErr != nil {
+			klog.Warningf("failed to checkpoint state after CDI cleanup failure of claim %s: %v", claimUID, cpErr)
+		}
 		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
 	}
-
 	delete(preparedClaims, claimUID)
+	directClaim := s.directVfioBindings[claimUID]
+	delete(s.directVfioBindings, claimUID)
 
 	// Save partition state to checkpoint if synthetic-partition mode is enabled
 	s.savePartitionCheckpoint(checkpoint)
-	s.saveVfioConversions(checkpoint)
+	s.saveVfioIntents(checkpoint)
 
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		if directClaim != nil {
+			s.directVfioBindings[claimUID] = directClaim
+		}
 		return fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
-
-	// Re-publish resources if taints changed (all allocations released)
-	if taintsChanged && s.driver != nil {
-		if err := s.driver.republishResources(context.TODO()); err != nil {
+	if taintsChanged && !hadDirectBinding && s.driver != nil {
+		if err := s.driver.republishResourcesLocked(context.TODO()); err != nil {
 			klog.Warningf("Failed to re-publish resources after partition unprepare: %v", err)
 		}
 	}
@@ -626,9 +668,11 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 	}
 	klog.V(2).Infof("Decoded %d opaque configs for driver %s", len(configs), consts.DriverName)
 
-	// Add a default GPU config at the front with lowest precedence. No
-	// default VfioDeviceConfig — VFIO conversion requires an explicit config
-	// in the claim to avoid accidentally routing regular GPUs into vfio-pci.
+	// Add a default GPU config at the front with lowest precedence. There is no
+	// default VfioDeviceConfig in this list: converting a regular GPU to VFIO
+	// requires an explicit config in the claim, to avoid accidentally routing
+	// regular GPUs into vfio-pci. Devices that are already VFIO get a default
+	// VFIO config below instead.
 	configs = slices.Insert(configs, 0,
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
@@ -650,6 +694,11 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 	// Look through the configs and figure out which one will be applied to
 	// each device allocation result based on their order of precedence.
 	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
+	// A device that is already VFIO (a pre-bound device, or the type=vfio
+	// dual-entry sibling of a compute GPU) may be claimed directly without a
+	// VfioDeviceConfig. It gets this default config; it is only created when
+	// needed. Regular GPUs are never converted without an explicit config.
+	var defaultVfioConfig *configapi.VfioDeviceConfig
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver != consts.DriverName {
 			continue
@@ -659,6 +708,8 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 			return nil, fmt.Errorf("requested GPU is not allocatable: %v", result.Device)
 		}
 		isVFIO := allocDev.Type() == consts.VfioDeviceType
+		wasVFIO := isVFIO
+		matched := false
 		for _, c := range slices.Backward(configs) {
 			if len(c.Requests) != 0 && !slices.Contains(c.Requests, result.Request) {
 				continue
@@ -670,6 +721,9 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 				}
 				if !isVFIO {
 					if allocDev.AmdGpu != nil {
+						if s.vfioManager == nil {
+							return nil, fmt.Errorf("VFIO manager not available for device %s", result.Device)
+						}
 						physfn := filepath.Join(amdgpu.PCIDevicePath, allocDev.AmdGpu.PCIAddress, "physfn")
 						_, physfnErr := os.Lstat(physfn)
 						isVF := physfnErr == nil
@@ -682,11 +736,15 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 							ProductName:        allocDev.AmdGpu.ProductName,
 							NumaNode:           allocDev.AmdGpu.NumaNode,
 							IsVF:               isVF,
+							MemoryBytes:        allocDev.AmdGpu.MemoryBytes,
+							ComputeUnits:       allocDev.AmdGpu.ComputeUnits,
+							SimdUnits:          allocDev.AmdGpu.SimdUnits,
 							pciBusIDAttr:       allocDev.AmdGpu.pciBusIDAttr,
 							pcieRootAttr:       allocDev.AmdGpu.pcieRootAttr,
 							numaNodeAttr:       allocDev.AmdGpu.numaNodeAttr,
-							preConfigureDriver: "amdgpu",
 							convertedFrom:      allocDev.AmdGpu,
+							siblingExclusive:   allocDev.AmdGpu.siblingExclusive,
+							preConfigureDriver: consts.AMDGPUDriverName,
 						}
 						iommuGroup, _ := amdgpu.GetIOMMUGroup(allocDev.AmdGpu.PCIAddress)
 						vfioInfo.IOMMUGroup = iommuGroup
@@ -705,17 +763,32 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 				}
 			}
 			configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+			matched = true
 			break
+		}
+		if !matched && isVFIO {
+			if !featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return nil, fmt.Errorf("device %s is a VFIO device but the %s feature gate is disabled", result.Device, featuregates.VFIOPassthrough)
+			}
+			if defaultVfioConfig == nil {
+				defaultVfioConfig = configapi.DefaultVfioDeviceConfig()
+			}
+			configResultsMap[defaultVfioConfig] = append(configResultsMap[defaultVfioConfig], &result)
+		}
+		if wasVFIO {
+			if err := s.recordDirectVfioBinding(claimUID, result.Device, allocDev.Vfio); err != nil {
+				return nil, fmt.Errorf("cannot record direct VFIO binding for %s: %w", result.Device, err)
+			}
 		}
 	}
 
-	// Persist conversion intent before the first hardware bind. If the process
+	// Persist VFIO binding intent before the first hardware bind. If the process
 	// stops after Configure, startup recovery can still identify the original
 	// allocated device and return it to the claim.
-	if checkpoint != nil && len(s.vfioConversions[claimUID]) != 0 {
-		s.saveVfioConversions(checkpoint)
+	if checkpoint != nil && (len(s.vfioConversions[claimUID]) != 0 || s.directVfioBindings[claimUID] != nil) {
+		s.saveVfioIntents(checkpoint)
 		if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-			return nil, fmt.Errorf("unable to checkpoint VFIO conversion intent: %w", err)
+			return nil, fmt.Errorf("unable to checkpoint VFIO binding intent: %w", err)
 		}
 	}
 
@@ -796,21 +869,7 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
-	var errs []error
-	for _, device := range devices {
-		allocDev, exists := s.allocatable[device.DeviceName]
-		if !exists {
-			continue
-		}
-		if allocDev.Type() == consts.VfioDeviceType && allocDev.Vfio != nil {
-			if err := s.returnToOriginalDriver(allocDev.Vfio); err != nil {
-				errs = append(errs, fmt.Errorf("failed to unconfigure VFIO device %s: %w", device.DeviceName, err))
-			} else {
-				s.restoreFromVfio(claimUID, device.DeviceName)
-			}
-		}
-	}
-	return errors.Join(errs...)
+	return s.releaseClaimVfio(claimUID, preparedDeviceNames(devices))
 }
 
 // preparedDeviceNames returns the device names of a set of prepared devices.
@@ -822,20 +881,37 @@ func preparedDeviceNames(devices PreparedDevices) []string {
 	return names
 }
 
-// persistVfioConversionsAfterFailure writes the conversion records after a
-// failed Prepare when this claim has, or had, records on disk, so devices left
-// converted by an incomplete rollback survive a restart. The claim itself is
-// not recorded as prepared, and partition state is re-read from memory, which
-// already reflects any rollback.
-func (s *DeviceState) persistVfioConversionsAfterFailure(checkpoint *Checkpoint, claimUID string) {
-	if len(s.vfioConversions[claimUID]) == 0 && len(checkpoint.V1.VfioConversions[claimUID]) == 0 {
+// persistVfioIntentsAfterFailure retains any VFIO binding whose rollback did
+// not complete. A direct sibling is forgotten only after its original driver
+// and CDI cleanup have both succeeded.
+func (s *DeviceState) persistVfioIntentsAfterFailure(checkpoint *Checkpoint, claimUID string) {
+	hadDirectIntent := checkpoint.V1.DirectVfioBindings[claimUID] != nil
+	if claim := s.directVfioBindings[claimUID]; claim != nil && !claim.Releasing {
+		restored := true
+		for _, binding := range claim.Devices {
+			current, err := amdgpu.GetPCIDriver(binding.PCIAddress)
+			if err != nil || current != binding.OriginalDriver || !s.hasComputePF(binding.PCIAddress) {
+				restored = false
+				break
+			}
+		}
+		if restored {
+			if err := s.cdi.DeleteClaimSpecFile(claimUID); err != nil {
+				klog.Warningf("failed to delete CDI spec after failed direct VFIO Prepare of claim %s: %v", claimUID, err)
+			} else {
+				delete(s.directVfioBindings, claimUID)
+			}
+		}
+	}
+	if len(s.vfioConversions[claimUID]) == 0 && len(checkpoint.V1.VfioConversions[claimUID]) == 0 &&
+		s.directVfioBindings[claimUID] == nil && !hadDirectIntent {
 		return
 	}
 	delete(checkpoint.V1.PreparedClaims, claimUID)
 	s.savePartitionCheckpoint(checkpoint)
-	s.saveVfioConversions(checkpoint)
+	s.saveVfioIntents(checkpoint)
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		klog.Warningf("failed to checkpoint VFIO conversions after failed prepare of claim %s: %v", claimUID, err)
+		klog.Warningf("failed to checkpoint VFIO intents after failed prepare of claim %s: %v", claimUID, err)
 	}
 }
 

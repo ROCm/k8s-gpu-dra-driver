@@ -97,7 +97,18 @@ func (s *DeviceState) returnToOriginalDriver(info *AmdGpuVFIOInfo) error {
 func (s *DeviceState) releaseClaimVfio(claimUID string, devices []string) error {
 	var errs []error
 	failed := make(map[string]bool)
+	visited := make(map[string]bool)
 	for _, name := range devices {
+		visited[name] = true
+		if binding := s.directBinding(claimUID, name); binding != nil {
+			if err := s.releaseDirectBinding(name, binding); err != nil {
+				errs = append(errs, fmt.Errorf("failed to return direct VFIO sibling %s (%s): %w", name, binding.PCIAddress, err))
+				if withdrawErr := s.withholdDirectBDF(binding.PCIAddress); withdrawErr != nil {
+					errs = append(errs, withdrawErr)
+				}
+			}
+			continue
+		}
 		dev := s.allocatable[name]
 		if dev == nil || dev.Vfio == nil {
 			continue
@@ -105,6 +116,19 @@ func (s *DeviceState) releaseClaimVfio(claimUID string, devices []string) error 
 		if err := s.returnToOriginalDriver(dev.Vfio); err != nil {
 			failed[name] = true
 			errs = append(errs, fmt.Errorf("failed to return %s (%s) to its original driver: %w", name, dev.Vfio.PCIAddress, err))
+		}
+	}
+	if claim := s.directVfioBindings[claimUID]; claim != nil {
+		for name, binding := range claim.Devices {
+			if visited[name] {
+				continue
+			}
+			if err := s.releaseDirectBinding(name, binding); err != nil {
+				errs = append(errs, fmt.Errorf("failed to return direct VFIO sibling %s (%s): %w", name, binding.PCIAddress, err))
+				if withdrawErr := s.withholdDirectBDF(binding.PCIAddress); withdrawErr != nil {
+					errs = append(errs, withdrawErr)
+				}
+			}
 		}
 	}
 	for name := range s.vfioConversions[claimUID] {
@@ -116,19 +140,32 @@ func (s *DeviceState) releaseClaimVfio(claimUID string, devices []string) error 
 }
 
 // releaseStrandedVfio finishes returning devices that an earlier, failed
-// Prepare of claimUID converted but could not rebind. It is a no-op when the
-// claim has no conversions left.
+// Prepare bound to VFIO but could not rebind.
 func (s *DeviceState) releaseStrandedVfio(claimUID string) error {
 	names := make([]string, 0, len(s.vfioConversions[claimUID]))
 	for name := range s.vfioConversions[claimUID] {
 		names = append(names, name)
 	}
+	if claim := s.directVfioBindings[claimUID]; claim != nil {
+		for name := range claim.Devices {
+			names = append(names, name)
+		}
+	}
 	if len(names) == 0 {
 		return nil
 	}
 	sort.Strings(names)
-	klog.Infof("Returning devices %v left converted by a failed prepare of claim %s", names, claimUID)
-	return s.releaseClaimVfio(claimUID, names)
+	klog.Infof("Returning VFIO devices %v left by a failed prepare of claim %s", names, claimUID)
+	if err := s.releaseClaimVfio(claimUID, names); err != nil {
+		return err
+	}
+	if claim := s.directVfioBindings[claimUID]; claim != nil && !claim.Releasing {
+		if err := s.cdi.DeleteClaimSpecFile(claimUID); err != nil {
+			return fmt.Errorf("failed to delete CDI spec for stranded direct VFIO claim %s: %w", claimUID, err)
+		}
+		delete(s.directVfioBindings, claimUID)
+	}
+	return nil
 }
 
 // saveVfioConversions writes the conversion records into the checkpoint.

@@ -17,9 +17,11 @@ limitations under the License.
 package amdgpu
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
@@ -110,6 +112,17 @@ func GetPFMapping() (map[string][]PFInfo, error) {
 			continue
 		}
 
+		// A PF with active VFs is already partitioned and cannot be passed through.
+		n, err := ReadSRIOVNumVFs(pciAddr)
+		if err != nil {
+			glog.Warningf("Skipping PF %s for VFIO passthrough: %v", pciAddr, err)
+			continue
+		}
+		if n > 0 {
+			glog.Warningf("Skipping PF %s for VFIO passthrough: %d active SR-IOV VFs", pciAddr, n)
+			continue
+		}
+
 		iommuGroup, err := GetIOMMUGroup(pciAddr)
 		if err != nil {
 			glog.Warningf("Failed to get IOMMU group for %s: %v", pciAddr, err)
@@ -149,6 +162,31 @@ type VFInfo struct {
 	ProductName string
 	// NumaNode is the NUMA node affinity.
 	NumaNode int
+	NumVFs   int
+}
+
+// ReadSRIOVNumVFs reads the number of SR-IOV VFs currently active on a PF.
+// A missing attribute on an existing PCI device means it has no SR-IOV support.
+func ReadSRIOVNumVFs(pfPCIAddress string) (int, error) {
+	pciPath := filepath.Join(PCIDevicePath, pfPCIAddress)
+	value, err := readSysfsFile(filepath.Join(pciPath, "sriov_numvfs"))
+	if errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Stat(pciPath); statErr != nil {
+			return 0, fmt.Errorf("PCI device %s: %w", pfPCIAddress, statErr)
+		}
+		return 0, nil // An existing device without this attribute does not support SR-IOV.
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read sriov_numvfs for %s: %w", pfPCIAddress, err)
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid sriov_numvfs %q for %s: %w", value, pfPCIAddress, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid sriov_numvfs %q for %s: negative count", value, pfPCIAddress)
+	}
+	return n, nil
 }
 
 // GetVFMapping scans for AMD GPU Virtual Functions created by the GIM SR-IOV
@@ -194,6 +232,15 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 			continue
 		}
 
+		pfNumVFs, err := ReadSRIOVNumVFs(pfAddr)
+		if err != nil {
+			glog.Warningf("Skipping GIM PF %s VFs: %v", pfAddr, err)
+			continue
+		}
+		if pfNumVFs < len(vfPaths) {
+			glog.Warningf("Skipping GIM PF %s VFs: %d virtfn links exceed sriov_numvfs=%d", pfAddr, len(vfPaths), pfNumVFs)
+			continue
+		}
 		pfProductName := readProductName(pfAddr)
 
 		for _, vfPath := range vfPaths {
@@ -232,6 +279,7 @@ func GetVFMapping() (map[string][]VFInfo, error) {
 				IOMMUGroup:       iommuGroup,
 				ProductName:      pfProductName,
 				NumaNode:         numaNode,
+				NumVFs:           pfNumVFs,
 			}
 			vfMap[iommuGroup] = append(vfMap[iommuGroup], vfInfo)
 			glog.Infof("VFIO VF: PF %s -> VF %s IOMMU group: %s", pfAddr, vfAddr, iommuGroup)
@@ -342,6 +390,49 @@ func readSysfsFile(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// PFCapacity holds the total memory and compute capacity of a GIM-managed PF.
+type PFCapacity struct {
+	MemoryBytes  uint64
+	ComputeUnits int
+	SimdUnits    int
+}
+
+// ReadPFCapacity reads PF memory from sysfs. CU and SIMD counts are inferred
+// from the PF device ID since GIM does not expose topology files.
+func ReadPFCapacity(pfAddr string) PFCapacity {
+	var mem uint64
+	memStr, _ := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "mem_info_vram_total"))
+	if memStr != "" {
+		if _, err := fmt.Sscanf(memStr, "%d", &mem); err != nil {
+			glog.Warningf("Invalid mem_info_vram_total %q for %s: %v", memStr, pfAddr, err)
+			mem = 0
+		}
+	}
+	deviceID, err := readSysfsFile(filepath.Join(PCIDevicePath, pfAddr, "device"))
+	if err != nil {
+		glog.Warningf("Unable to read device ID for PF %s: %v; CU/SIMD capacities omitted", pfAddr, err)
+	}
+	cu, simd := gpuCapacityByDeviceID(deviceID)
+	if err == nil && cu == 0 {
+		glog.Warningf("No CU/SIMD capacity mapping for PF %s device ID %q", pfAddr, deviceID)
+	}
+	return PFCapacity{MemoryBytes: mem, ComputeUnits: cu, SimdUnits: simd}
+}
+
+// gpuCapacityByDeviceID returns (cuCount, simdCount) for known AMD GPU PF device IDs.
+func gpuCapacityByDeviceID(deviceID string) (int, int) {
+	switch deviceID {
+	case "0x74a1": // MI300X PF — 8 XCDs, 38 CU/XCD, 4 SIMD/CU
+		return 304, 1216
+	case "0x74a5": // MI325X PF — 8 XCDs, 38 CU/XCD, 4 SIMD/CU
+		return 304, 1216
+	case "0x75a3": // MI355X PF — 8 XCDs, 32 CU/XCD, 4 SIMD/CU
+		return 256, 1024
+	default:
+		return 0, 0
+	}
 }
 
 // readProductName reads the product_name from sysfs for a PCI device.

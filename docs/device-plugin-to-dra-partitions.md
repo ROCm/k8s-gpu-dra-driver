@@ -129,8 +129,9 @@ A ready-to-run example lives at
   Config Manager on them.
 - **`amd.com/gpu` still works, and is enforced to mean a whole GPU.** With
   AutoPartition enabled, `extendedResourceName` lives on a second DeviceClass,
-  `gpu.amd.com-spx`, whose selector is constrained to `computePartition == "spx"`
-  (or no `computePartition` attribute at all, the non-AutoPartition case). A
+  `gpu.amd.com-spx`, whose selector requires `type=amdgpu` and
+  `computePartition == "spx"` (or no `computePartition` attribute at all for a
+  physical full GPU). A
   classic `amd.com/gpu` request is translated into a ResourceClaim with no
   selector of its own — it can't ask for `spx` itself — so it must go through a
   class that already guarantees it. This is enforced by the DeviceClass

@@ -397,8 +397,13 @@ claim attributes instead.
 
 ## VFIO passthrough devices
 
-When the `VFIOPassthrough` feature gate is enabled, the driver discovers GIM
-SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
+When the `VFIOPassthrough` feature gate is enabled, the driver advertises VFIO
+passthrough devices with `type = vfio`. These come from two sources:
+
+1. **Dual-entry siblings** — each compute GPU (`type=amdgpu`) that is not an
+   SR-IOV VF also appears as a VFIO device (`type=vfio`) for PF passthrough.
+2. **GIM SR-IOV VFs** — VFs created by the GIM driver appear as VFIO devices
+   with `isVF=true`.
 
 ### Attributes for a VFIO device
 
@@ -413,10 +418,36 @@ SR-IOV VFs and advertises them as VFIO passthrough devices with `type = vfio`.
 | `deviceID` | string | PCI device ID (e.g., `0x740f`) |
 | `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
 
+`isVF` is published only on `type=vfio` devices. Compute devices, including
+VFs bound to `amdgpu`, omit it, so guard references to `isVF` with `has(...)`
+when a selector may also evaluate compute devices.
+
 Standard topology attributes (`resource.kubernetes.io/pciBusID`,
 `resource.kubernetes.io/pcieRoot`) are also published when available.
 
+Devices advertised as `type=vfio` do not publish `partitionProfile`. For GIM
+VFs, the active accelerator partition mode cannot be determined from the VF
+count. A VF may expose multiple logical compute partitions inside its guest,
+but remains one allocatable PCI VF.
+
+### Capacity for VFIO devices
+
+GIM VFs publish per-VF capacity computed as the PF's total capacity divided
+equally by the number of active VFs:
+
+- `memory` (quantity, bytes): PF VRAM / NumVFs
+- `computeUnits` (quantity): PF CUs / NumVFs
+- `simdUnits` (quantity): PF SIMDs / NumVFs
+
+Dual-entry PF siblings publish the full PF capacity. Pre-bound PF-passthrough
+devices (already on `vfio-pci` at discovery) have no capacity data.
+
+The capacity map is omitted entirely when all three values are zero.
+
 ### Selecting VFIO devices
+
+When `VFIOPassthrough` is enabled, the Helm chart creates the
+`gpu.amd.com-vfio` DeviceClass for direct VFIO claims. Its selector is:
 
 ```yaml
 selectors:
@@ -425,6 +456,85 @@ selectors:
       device.driver == 'gpu.amd.com' &&
       device.attributes['gpu.amd.com'].type == 'vfio'
 ```
+
+Use `deviceClassName: gpu.amd.com-vfio` for direct claims. Compute claims and
+`VfioDeviceConfig` conversions use `gpu.amd.com` instead. Deployments with
+externally managed DeviceClasses need the same compute/VFIO class split.
+
+To select only GIM VFs within `gpu.amd.com-vfio`, add this expression to
+`requests[].exactly.selectors[].cel.expression`:
+
+```cel
+has(device.attributes['gpu.amd.com'].isVF) &&
+device.attributes['gpu.amd.com'].isVF
+```
+
+To select only PF passthrough devices, use:
+
+```cel
+has(device.attributes['gpu.amd.com'].isVF) &&
+!device.attributes['gpu.amd.com'].isVF
+```
+
+### Dual-entry advertising and sibling exclusion
+
+When `VFIOPassthrough` is enabled, each compute GPU that is not an SR-IOV VF (a
+PF, or a GPU without SR-IOV) appears in the ResourceSlice as both a compute
+device (`type=amdgpu`) and a VFIO device (`type=vfio`). The scheduler allocates
+whichever type the claim requests. A `type=vfio` entry claimed without a
+`VfioDeviceConfig` gets the default VFIO configuration.
+
+If the plugin restarts while a direct VFIO claim has rebound its PF to
+`vfio-pci`, it publishes that PF's VFIO entry alone until release. Release
+returns the PF to `amdgpu`, rediscovers both entries, and republishes their
+shared exclusion counter. A PF whose release is still failing is withheld
+until cleanup succeeds.
+
+Compute VFs (SR-IOV VFs bound to `amdgpu`) are advertised only as
+`type=amdgpu`. Unbound GIM VFs are discovered separately and advertised only as
+`type=vfio`. To use a compute VF for passthrough, claim it with a
+`VfioDeviceConfig`, which converts it during Prepare.
+
+Sibling exclusion is bidirectional and enforced by the scheduler at allocation
+time: both entries of a GPU consume the same capacity-1 counter (see below),
+so once either one is allocated the other cannot be. Both entries stay in the
+ResourceSlice while the plugin is running; the one that is not allocated
+simply cannot be satisfied until the claim is released. This relies on KEP-4815
+partitionable devices (`DRAPartitionableDevices`, beta and enabled by default
+since Kubernetes 1.36).
+
+Pre-bound PF-passthrough devices (GPUs already bound to `vfio-pci` at discovery
+time, e.g., by the GPU Operator) are different. They appear as VFIO-only
+devices with no compute sibling and no sibling exclusion counter.
+
+**PFs with active VFs.** A PF whose `sriov_numvfs` is greater than 0 is already
+partitioned and cannot be passed through. The driver does not advertise a
+`type=vfio` entry for it, neither a dual-entry sibling nor a pre-bound PF, and
+logs `Not advertising <bdf> for VFIO passthrough` or
+`Skipping PF <bdf> for VFIO passthrough` at startup. Prepare also refuses such a
+PF with `active VFs must be removed first`, which covers VFs enabled after
+discovery. Discovery runs once at plugin startup, so restart the plugin after
+changing `sriov_numvfs` to refresh the ResourceSlice.
+
+If an existing `sriov_numvfs` value cannot be read or parsed, the driver
+withholds that PF's VFIO entry and rejects PF binding at Prepare. GIM VFs are
+withheld unless their PF has a valid count at least as large as its `virtfn*`
+link count. Compute entries remain available.
+
+### KEP-4815 SharedCounters for mutual exclusion
+
+The driver publishes one `SharedCounterSet` for each PCI function advertised
+as both a compute GPU and a VFIO device:
+
+- **Counter set name:** `pf-<pci-addr>-counter-set` (PCI address in DNS label
+  form, e.g., `pf-0000-0a-00-0-counter-set`)
+- **`fn-<pci-addr>`** (functions with dual entries): value 1. The compute and
+  the VFIO entry of that PCI function each consume 1, so only one of them can
+  be allocated at a time.
+
+GIM VFs, pre-bound VFIO PFs, and compute GPUs without a VFIO sibling consume
+no shared counters. Counter sets are published in their own ResourceSlices,
+at most 8 per slice.
 
 ---
 

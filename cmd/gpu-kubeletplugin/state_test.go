@@ -33,6 +33,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -54,6 +55,146 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 )
+
+func checkpointStartupConfig(t *testing.T) *Config {
+	t.Helper()
+	return &Config{flags: &Flags{
+		cdiRoot:                     t.TempDir(),
+		kubeletPluginsDirectoryPath: t.TempDir(),
+		nodeName:                    "node",
+	}}
+}
+
+func TestNewDeviceState_UnreadableCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		vfio          bool
+		autoPartition bool
+	}{
+		{name: "normal mode"},
+		{name: "AutoPartition", autoPartition: true},
+		{name: "VFIOPassthrough", vfio: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setVFIOPassthrough(t, tc.vfio)
+			if tc.autoPartition {
+				require.NoError(t, featuregates.FeatureGates().Set("AutoPartition=true"))
+				t.Cleanup(func() { _ = featuregates.FeatureGates().Set("AutoPartition=false") })
+			}
+
+			root := setupFakeVfioSysfs(t)
+			const lower = "0000:0a:00.0"
+			const gpu = "0000:0c:00.0"
+			createPCIDevice(t, root, gpu, consts.AMDGPUDriverName)
+			previousDiscovery := discoverAMDGPUs
+			discoverAMDGPUs = func() map[string]map[string]interface{} {
+				return map[string]map[string]interface{}{
+					gpu: {
+						"card": 0, "renderD": 128, "kfdID": "", "deviceID": "0x74a1",
+						"driverVersion": "", "computePartitionType": "spx", "memoryPartitionType": "nps1",
+						"productName": "MI300X", "numaNode": 0, "pciAddr": gpu,
+					},
+				}
+			}
+			t.Cleanup(func() { discoverAMDGPUs = previousDiscovery })
+
+			config := checkpointStartupConfig(t)
+			cm, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
+			require.NoError(t, err)
+			cp := newCheckpoint()
+			cp.V1.DirectVfioBindings = map[string]*DirectVfioClaim{
+				"claim": {Devices: map[string]*DirectVfioBinding{
+					directVFIOName(lower): {PCIAddress: lower, OriginalDriver: consts.AMDGPUDriverName},
+				}},
+			}
+			cp.V1.ActiveMemoryMode = "nps4"
+			cp.V1.AssignedSlots = map[int]map[string]int{1: {"claim/gpu": 2}}
+			require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, cp))
+			checkpointPath := filepath.Join(config.DriverPluginPath(), DriverPluginCheckpointFile)
+			validData, err := os.ReadFile(checkpointPath)
+			require.NoError(t, err)
+			badData := bytes.Replace(validData, []byte("\"originalDriver\":\"amdgpu\""),
+				[]byte("\"originalDriver\":\"amdgux\""), 1)
+			require.NotEqual(t, validData, badData)
+			require.NoError(t, os.WriteFile(checkpointPath, badData, 0600))
+
+			state, err := NewDeviceState(config)
+			gotData, readErr := os.ReadFile(checkpointPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, badData, gotData, "startup must not overwrite a corrupt checkpoint")
+			if tc.vfio {
+				require.ErrorContains(t, err, "unable to sync from checkpoint")
+				assert.Nil(t, state)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.True(t, state.recoveryUnavailable)
+			assert.Empty(t, state.directVfioBindings)
+			assert.NotEmpty(t, state.allocatable, "discovery still builds internal state")
+			if tc.autoPartition {
+				require.NotNil(t, state.partitionState)
+				assert.Equal(t, map[int]string{0: gpu}, state.partitionState.gpuPCIAddresses)
+				assert.Empty(t, state.partitionState.assignedSlots)
+				assert.Empty(t, state.partitionState.activeMemoryMode)
+			}
+			d := &driver{state: state, nodeName: "node", enableSyntheticPartition: tc.autoPartition}
+			if state.partitionState != nil {
+				d.partitionableGPUs = state.partitionState.partitionableGPUs
+			}
+			pool := d.buildResources().Pools["node"]
+			require.Len(t, pool.Slices, 1)
+			assert.Empty(t, pool.Slices[0].Devices)
+			assert.Empty(t, pool.Slices[0].SharedCounters)
+
+			require.NoError(t, os.WriteFile(checkpointPath, validData, 0600))
+			_, err = state.Prepare(&resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: "claim"}})
+			require.ErrorContains(t, err, "checkpoint recovery unavailable")
+			require.ErrorContains(t, state.Unprepare("claim"), "checkpoint recovery unavailable")
+			gotData, err = os.ReadFile(checkpointPath)
+			require.NoError(t, err)
+			assert.Equal(t, validData, gotData, "claim operations must not write after failed recovery")
+		})
+	}
+}
+
+func TestNewDeviceState_ValidOrMissingCheckpoint(t *testing.T) {
+	previousDiscovery := discoverAMDGPUs
+	discoverAMDGPUs = func() map[string]map[string]interface{} { return nil }
+	t.Cleanup(func() { discoverAMDGPUs = previousDiscovery })
+
+	for _, existing := range []bool{false, true} {
+		name := "missing"
+		if existing {
+			name = "valid"
+		}
+		t.Run(name, func(t *testing.T) {
+			if existing {
+				require.NoError(t, featuregates.FeatureGates().Set("AutoPartition=true"))
+				t.Cleanup(func() { _ = featuregates.FeatureGates().Set("AutoPartition=false") })
+			}
+			config := checkpointStartupConfig(t)
+			if existing {
+				cm, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
+				require.NoError(t, err)
+				cp := newCheckpoint()
+				cp.V1.ActiveMemoryMode = "nps4"
+				require.NoError(t, cm.CreateCheckpoint(DriverPluginCheckpointFile, cp))
+			}
+			state, err := NewDeviceState(config)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.False(t, state.recoveryUnavailable)
+			cp := newCheckpoint()
+			require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp))
+			if existing {
+				require.NotNil(t, state.partitionState)
+				assert.Equal(t, "nps4", state.partitionState.activeMemoryMode)
+			}
+		})
+	}
+}
 
 type observingCheckpointManager struct {
 	checkpointmanager.CheckpointManager

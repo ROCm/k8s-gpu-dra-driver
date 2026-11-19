@@ -858,6 +858,15 @@ func TestAmdPartitionInfo_GetDevice_TypeAttribute(t *testing.T) {
 	}
 }
 
+func TestAmdGpuVFIOInfo_GetDevice_OmitsUnverifiedPartitionProfile(t *testing.T) {
+	device := (&AmdGpuVFIOInfo{
+		PCIAddress: "0000:0b:00.0",
+		IsVF:       true,
+	}).GetDevice()
+
+	require.NotContains(t, device.Attributes, resourceapi.QualifiedName("partitionProfile"))
+}
+
 // ---- Tests for compatibility matrix (ValidPartitionConfigs) ----
 
 func TestValidPartitionConfigs_AllHavePositivePartitionCount(t *testing.T) {

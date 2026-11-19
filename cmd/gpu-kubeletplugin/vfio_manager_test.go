@@ -23,6 +23,7 @@ import (
 
 	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
@@ -150,6 +151,47 @@ func TestConfigure(t *testing.T) {
 		err := vm.Configure(info)
 		assert.NoError(t, err)
 		assert.Equal(t, "vfio-pci", info.preConfigureDriver)
+	})
+
+	t.Run("PF with active VFs is rejected", func(t *testing.T) {
+		for _, driver := range []string{"vfio-pci", "amdgpu"} {
+			root := setupFakeVfioSysfs(t)
+			createPCIDevice(t, root, "0000:0d:00.0", driver)
+			createDriverDir(t, root, "vfio-pci")
+			createDriverDir(t, root, "amdgpu")
+			require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.0/sriov_numvfs"), []byte("2\n"), 0644))
+
+			err := (&VfioPciManager{}).Configure(&AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.0"})
+			assert.ErrorContains(t, err, "active VFs must be removed first", "driver %s", driver)
+
+			unbind, readErr := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers", driver, "unbind"))
+			require.NoError(t, readErr)
+			assert.Empty(t, unbind, "must not unbind a PF with active VFs (driver %s)", driver)
+		}
+	})
+
+	t.Run("PF with malformed VF count is rejected before unbind", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		const pciAddr = "0000:0d:00.0"
+		createPCIDevice(t, root, pciAddr, consts.AMDGPUDriverName)
+		createDriverDir(t, root, consts.AMDGPUDriverName)
+		createDriverDir(t, root, consts.VFIODriverName)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices", pciAddr, "sriov_numvfs"), []byte("bad\n"), 0644))
+
+		err := (&VfioPciManager{}).Configure(&AmdGpuVFIOInfo{PCIAddress: pciAddr})
+		require.ErrorContains(t, err, "sriov_numvfs")
+		unbind, readErr := os.ReadFile(filepath.Join(root, "sys/bus/pci/drivers/amdgpu/unbind"))
+		require.NoError(t, readErr)
+		assert.Empty(t, unbind)
+	})
+
+	t.Run("VF on vfio-pci ignores its own sriov_numvfs", func(t *testing.T) {
+		root := setupFakeVfioSysfs(t)
+		createPCIDevice(t, root, "0000:0d:00.1", "vfio-pci")
+		createDriverDir(t, root, "vfio-pci")
+		require.NoError(t, os.WriteFile(filepath.Join(root, "sys/bus/pci/devices/0000:0d:00.1/sriov_numvfs"), []byte("2\n"), 0644))
+
+		assert.NoError(t, (&VfioPciManager{}).Configure(&AmdGpuVFIOInfo{PCIAddress: "0000:0d:00.1", IsVF: true}))
 	})
 
 	t.Run("bind from unbound", func(t *testing.T) {

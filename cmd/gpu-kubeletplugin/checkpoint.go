@@ -66,6 +66,21 @@ type CheckpointV1 struct {
 	// rebound to its original driver, so a restart can still return devices
 	// for prepared claims and finish rebinds left by a failed Prepare.
 	VfioConversions map[string]map[string]*VfioConversionRecord `json:"vfioConversions,omitempty"`
+
+	// DirectVfioBindings records PFs rebound for direct type=vfio sibling
+	// claims. Releasing keeps the full prepared claim available while Unprepare
+	// finishes after a crash.
+	DirectVfioBindings map[string]*DirectVfioClaim `json:"directVfioBindings,omitempty"`
+}
+
+type DirectVfioClaim struct {
+	Devices   map[string]*DirectVfioBinding `json:"devices"`
+	Releasing bool                          `json:"releasing,omitempty"`
+}
+
+type DirectVfioBinding struct {
+	PCIAddress     string `json:"pciAddress"`
+	OriginalDriver string `json:"originalDriver"`
 }
 
 // VfioConversionRecord is the persisted form of one GPU->VFIO conversion: the

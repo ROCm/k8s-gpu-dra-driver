@@ -174,7 +174,10 @@ func TestCheckVFIODriverLoaded(t *testing.T) {
 func setupGIMPFWithVFs(t *testing.T, root, pfAddr string, vfAddrs []string, vfDrivers map[string]string) {
 	t.Helper()
 	pfPath := createFakePCIDevice(t, root, pfAddr,
-		map[string]string{"vendor": consts.AMDVendorID},
+		map[string]string{
+			"vendor":       consts.AMDVendorID,
+			"sriov_numvfs": fmt.Sprintf("%d\n", len(vfAddrs)),
+		},
 		map[string]string{"driver": "../../../../bus/pci/drivers/gim"},
 	)
 
@@ -210,8 +213,32 @@ func TestGetVFMapping(t *testing.T) {
 		total := 0
 		for _, vfs := range vfMap {
 			total += len(vfs)
+			for _, vf := range vfs {
+				assert.Equal(t, 1, vf.NumVFs)
+			}
 		}
 		assert.Equal(t, 1, total)
+	})
+
+	t.Run("eight VFs remain eight distinct devices", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		vfAddrs := make([]string, 8)
+		for i := range vfAddrs {
+			vfAddrs[i] = fmt.Sprintf("0000:0b:%02x.0", i)
+		}
+		setupGIMPFWithVFs(t, root, "0000:0a:00.0", vfAddrs, nil)
+
+		vfMap, err := GetVFMapping()
+		require.NoError(t, err)
+		seen := make(map[string]bool)
+		for _, vfs := range vfMap {
+			for _, vf := range vfs {
+				assert.Equal(t, 8, vf.NumVFs)
+				assert.False(t, seen[vf.PCIAddress], "duplicate VF %s", vf.PCIAddress)
+				seen[vf.PCIAddress] = true
+			}
+		}
+		assert.Len(t, seen, 8)
 	})
 
 	t.Run("VF on vfio-pci is included", func(t *testing.T) {
@@ -281,6 +308,137 @@ func TestGetVFMapping(t *testing.T) {
 	})
 }
 
+func TestReadSRIOVNumVFs(t *testing.T) {
+	tests := map[string]struct {
+		fileContent string
+		createFile  bool
+		expected    int
+		expectErr   bool
+	}{
+		"8 VFs active": {fileContent: "8\n", createFile: true, expected: 8},
+		"4 VFs active": {fileContent: "4\n", createFile: true, expected: 4},
+		"1 VF active":  {fileContent: "1\n", createFile: true, expected: 1},
+		"0 VFs active": {fileContent: "0\n", createFile: true, expected: 0},
+		"file missing": {createFile: false, expected: 0},
+		"malformed":    {fileContent: "bad\n", createFile: true, expectErr: true},
+		"negative":     {fileContent: "-1\n", createFile: true, expectErr: true},
+		"empty":        {fileContent: "\n", createFile: true, expectErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			pciAddr := "0000:0a:00.0"
+			files := map[string]string{}
+			if tc.createFile {
+				files["sriov_numvfs"] = tc.fileContent
+			}
+			createFakePCIDevice(t, root, pciAddr, files, nil)
+			got, err := ReadSRIOVNumVFs(pciAddr)
+			if tc.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+
+	t.Run("device missing", func(t *testing.T) {
+		setupFakeSysfs(t)
+		_, err := ReadSRIOVNumVFs("0000:ff:00.0")
+		require.Error(t, err)
+	})
+
+	t.Run("attribute unreadable", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		pciPath := createFakePCIDevice(t, root, pciAddr, nil, nil)
+		require.NoError(t, os.Mkdir(filepath.Join(pciPath, "sriov_numvfs"), 0755))
+		_, err := ReadSRIOVNumVFs(pciAddr)
+		require.Error(t, err)
+	})
+}
+
+func TestGetVFMapping_ValidatesVFCount(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		count   string
+		wantVFs int
+	}{
+		{name: "malformed", count: "bad\n"},
+		{name: "missing"},
+		{name: "zero", count: "0\n"},
+		{name: "fewer than links", count: "1\n"},
+		{name: "more than links", count: "3\n", wantVFs: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			const pfAddr = "0000:0a:00.0"
+			setupGIMPFWithVFs(t, root, pfAddr, []string{"0000:0b:00.0", "0000:0b:01.0"}, nil)
+			countPath := filepath.Join(root, "sys/bus/pci/devices", pfAddr, "sriov_numvfs")
+			if tc.count == "" {
+				require.NoError(t, os.Remove(countPath))
+			} else {
+				require.NoError(t, os.WriteFile(countPath, []byte(tc.count), 0644))
+			}
+			vfMap, err := GetVFMapping()
+			require.NoError(t, err)
+			got := 0
+			for _, vfs := range vfMap {
+				got += len(vfs)
+				for _, vf := range vfs {
+					assert.Equal(t, 3, vf.NumVFs)
+				}
+			}
+			assert.Equal(t, tc.wantVFs, got)
+		})
+	}
+}
+
+func TestReadPFCapacity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		deviceID string
+		cu       int
+		simd     int
+	}{
+		"MI300X":          {deviceID: "0x74a1", cu: 304, simd: 1216},
+		"MI325X":          {deviceID: "0x74a5", cu: 304, simd: 1216},
+		"MI355X":          {deviceID: "0x75a3", cu: 256, simd: 1024},
+		"MI210 unmapped":  {deviceID: "0x740f"},
+		"MI300A unmapped": {deviceID: "0x74a0"},
+		"unknown":         {deviceID: "0x9999"},
+		"empty":           {deviceID: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := setupFakeSysfs(t)
+			pciAddr := "0000:0a:00.0"
+			createFakePCIDevice(t, root, pciAddr, map[string]string{
+				"mem_info_vram_total": "206158430208\n",
+				"device":              tc.deviceID,
+			}, nil)
+			assert.Equal(t, PFCapacity{MemoryBytes: 206158430208, ComputeUnits: tc.cu, SimdUnits: tc.simd}, ReadPFCapacity(pciAddr))
+		})
+	}
+
+	t.Run("missing files", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, nil, nil)
+		cap := ReadPFCapacity(pciAddr)
+		assert.Equal(t, PFCapacity{}, cap)
+	})
+
+	t.Run("missing device ID preserves memory", func(t *testing.T) {
+		root := setupFakeSysfs(t)
+		pciAddr := "0000:0a:00.0"
+		createFakePCIDevice(t, root, pciAddr, map[string]string{
+			"mem_info_vram_total": "206158430208\n",
+		}, nil)
+		assert.Equal(t, PFCapacity{MemoryBytes: 206158430208}, ReadPFCapacity(pciAddr))
+	})
+}
+
 func TestGetPFMapping(t *testing.T) {
 	t.Run("PF on vfio-pci discovered", func(t *testing.T) {
 		root := setupFakeSysfs(t)
@@ -302,6 +460,31 @@ func TestGetPFMapping(t *testing.T) {
 			total += len(pfs)
 		}
 		assert.Equal(t, 1, total)
+	})
+
+	t.Run("PF VF count controls publication", func(t *testing.T) {
+		for numVFs, wantTotal := range map[string]int{"0\n": 1, "2\n": 0, "bad\n": 0} {
+			root := setupFakeSysfs(t)
+			devPath := createFakePCIDevice(t, root, "0000:0c:00.0",
+				map[string]string{
+					"vendor":       consts.AMDVendorID,
+					"device":       "0x740f",
+					"sriov_numvfs": numVFs,
+				},
+				map[string]string{"driver": "../../../../bus/pci/drivers/vfio-pci"},
+			)
+			iommuDir := filepath.Join(root, "sys/kernel/iommu_groups/50")
+			require.NoError(t, os.MkdirAll(iommuDir, 0755))
+			require.NoError(t, os.Symlink(iommuDir, filepath.Join(devPath, "iommu_group")))
+
+			pfMap, err := GetPFMapping()
+			require.NoError(t, err)
+			total := 0
+			for _, pfs := range pfMap {
+				total += len(pfs)
+			}
+			assert.Equal(t, wantTotal, total, "sriov_numvfs=%q", numVFs)
+		}
 	})
 
 	t.Run("VF with physfn skipped", func(t *testing.T) {

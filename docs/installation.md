@@ -137,6 +137,12 @@ featureGates:
   VFIOPassthrough: true
 ```
 
+Drain active VFIO claims before disabling this gate. A PF bound to `vfio-pci` for
+a claim needs its checkpointed binding state to return to `amdgpu` on release.
+If an existing checkpoint is unreadable at startup, the plugin fails to start
+with VFIO enabled. With VFIO disabled it starts without advertising devices or
+handling claims until the checkpoint is repaired and the plugin restarted.
+
 **Host prerequisites:**
 
 - **IOMMU enabled** — set `amd_iommu=on` (or `intel_iommu=on`) in kernel cmdline
@@ -153,7 +159,8 @@ will be advertised. GPU compute devices remain available.
 
 **Usage:**
 
-To allocate a VFIO GPU, create a ResourceClaim with a `VfioDeviceConfig`:
+To convert a physical compute GPU (including an `amdgpu`-bound VF) for VFIO,
+create a ResourceClaim with a `VfioDeviceConfig`:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -166,6 +173,11 @@ spec:
     - name: gpu
       exactly:
         deviceClassName: gpu.amd.com
+        selectors:
+        - cel:
+            expression: >-
+              device.attributes['gpu.amd.com'].type == 'amdgpu' &&
+              !has(device.attributes['gpu.amd.com'].computePartition)
     config:
     - opaque:
         driver: gpu.amd.com
@@ -174,8 +186,10 @@ spec:
           kind: VfioDeviceConfig
 ```
 
-The driver binds the allocated VF to `vfio-pci` during Prepare and unbinds
-on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
+The selector excludes partitions and synthetic AutoPartition devices, which
+cannot use this conversion path. The driver binds the selected PCI function to
+`vfio-pci` during Prepare and unbinds it on release. VFIO devices appear in the
+ResourceSlice with `type = vfio`.
 
 **IOMMU backend:**
 
@@ -200,6 +214,42 @@ on release. VFIO devices appear in the ResourceSlice with `type = vfio`.
 
 The legacy group node grants access to every function in the IOMMU group,
 while an IOMMUFD cdev is scoped to the single allocated device.
+
+**Dual-entry advertising:**
+
+When `VFIOPassthrough` is enabled, each compute GPU that is not an SR-IOV
+VF (a PF, or a GPU without SR-IOV) also appears as a `type=vfio` device in
+the ResourceSlice. The chart creates `gpu.amd.com-vfio` when
+`VFIOPassthrough` is enabled. Use that class to claim a VFIO device directly,
+without a `VfioDeviceConfig` or additional selector:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-vfio-direct
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.amd.com-vfio
+```
+
+When upgrading the chart, change existing direct VFIO claim templates that use
+`gpu.amd.com` with a `type=vfio` selector to `gpu.amd.com-vfio`. If the GPU
+Operator manages DeviceClasses (`deviceClass.create=false`), it must provide
+equivalent compute and VFIO selectors instead of relying on the chart.
+
+This is the simpler path for VFIO allocation. The `VfioDeviceConfig` approach
+(shown above) is still supported for on-demand conversion of compute GPUs, and
+it is the only way to use a compute VF (an SR-IOV VF bound to `amdgpu`) for
+VFIO: compute VFs have no direct `type=vfio` entry.
+
+The compute and VFIO entries of a GPU share a capacity-1 KEP-4815 counter, so
+the scheduler allocates at most one of them at a time. Both stay listed in
+the ResourceSlice; the other entry becomes allocatable again when the claim
+is released.
 
 ### Key values
 

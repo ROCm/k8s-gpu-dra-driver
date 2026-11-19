@@ -8,15 +8,17 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: "device.driver == 'gpu.amd.com'"
+      expression: >-
+        device.driver == 'gpu.amd.com' &&
+        device.attributes["gpu.amd.com"].type in ["amdgpu", "amdgpu-partition"]
 {{- if and .Values.deviceClass.extendedResourceName (not .Values.featureGates.AutoPartition) }}
   extendedResourceName: {{ .Values.deviceClass.extendedResourceName }}
 {{- end }}
 {{- if .Values.featureGates.AutoPartition }}
 ---
-# When AutoPartition is enabled, gpu.amd.com's device pool includes fractional
-# partition devices (cpx/dpx/qpx) alongside whole GPUs (spx), all matched by the
-# same selector above. extendedResourceName moves to this second, spx-constrained
+# When AutoPartition is enabled, gpu.amd.com's compute pool includes fractional
+# partition devices (cpx/dpx/qpx) alongside whole GPUs (spx).
+# extendedResourceName moves to this second, spx-constrained
 # class instead of staying on the general one, so a classic `amd.com/gpu` request
 # (which carries no selector of its own — it's translated by the apiserver from
 # resources.limits, not authored as a ResourceClaim) can only ever resolve to a
@@ -30,10 +32,24 @@ spec:
   - cel:
       expression: >-
         device.driver == 'gpu.amd.com' &&
+        device.attributes["gpu.amd.com"].type == "amdgpu" &&
         (!has(device.attributes["gpu.amd.com"].computePartition) ||
          device.attributes["gpu.amd.com"].computePartition == "spx")
   {{- with .Values.deviceClass.extendedResourceName }}
   extendedResourceName: {{ . }}
   {{- end }}
+{{- end }}
+{{- if .Values.featureGates.VFIOPassthrough }}
+---
+apiVersion: {{ $draApi }}
+kind: DeviceClass
+metadata:
+  name: gpu.amd.com-vfio
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == 'gpu.amd.com' &&
+        device.attributes["gpu.amd.com"].type == "vfio"
 {{- end }}
 {{- end }}
