@@ -93,16 +93,17 @@ func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
 
 type DeviceState struct {
 	sync.Mutex
-	cdi                *CDIHandler
-	allocatable        AllocatableDevices
-	checkpointManager  checkpointmanager.CheckpointManager
-	vfioManager        *VfioPciManager
-	vfioConversions    map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU; see vfio_conversions.go
-	directVfioBindings map[string]*DirectVfioClaim
-	partitionState     *PartitionState
-	driver             *driver // back-reference for re-publishing resources
-	syntheticPartition bool    // whether synthetic-partition mode is enabled
-	nodeName           string  // this node's name, matched against allocation results' Pool
+	cdi                 *CDIHandler
+	allocatable         AllocatableDevices
+	checkpointManager   checkpointmanager.CheckpointManager
+	vfioManager         *VfioPciManager
+	vfioConversions     map[string]map[string]*AmdGpuInfo // claimUID -> device -> original GPU; see vfio_conversions.go
+	directVfioBindings  map[string]*DirectVfioClaim
+	partitionState      *PartitionState
+	driver              *driver // back-reference for re-publishing resources
+	syntheticPartition  bool    // whether synthetic-partition mode is enabled
+	nodeName            string  // this node's name, matched against allocation results' Pool
+	recoveryUnavailable bool    // an existing checkpoint could not be read at startup
 }
 
 func NewDeviceState(config *Config) (*DeviceState, error) {
@@ -126,9 +127,16 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
 	}
 	checkpoint := newCheckpoint()
+	recoveryUnavailable := false
 	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
 		if err := checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-			return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+			if featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+			}
+			klog.Warningf("Failed to read checkpoint for state recovery: %v; no devices will be advertised until the checkpoint is repaired and the plugin restarted", err)
+			// GetCheckpoint can decode fields before checksum verification fails.
+			checkpoint = newCheckpoint()
+			recoveryUnavailable = true
 		}
 	} else if err := checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
@@ -157,13 +165,14 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 	markSiblingPairs(allocatable)
 
 	state := &DeviceState{
-		cdi:                cdi,
-		allocatable:        allocatable,
-		vfioManager:        vfioMgr,
-		checkpointManager:  checkpointManager,
-		directVfioBindings: checkpoint.V1.DirectVfioBindings,
-		syntheticPartition: autoPartition,
-		nodeName:           config.flags.nodeName,
+		cdi:                 cdi,
+		allocatable:         allocatable,
+		vfioManager:         vfioMgr,
+		checkpointManager:   checkpointManager,
+		directVfioBindings:  checkpoint.V1.DirectVfioBindings,
+		syntheticPartition:  autoPartition,
+		nodeName:            config.flags.nodeName,
+		recoveryUnavailable: recoveryUnavailable,
 	}
 
 	// Set up partition state for synthetic-partition mode
@@ -178,6 +187,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 			}
 		}
 		state.partitionState = NewPartitionState(gpuPCIAddresses, partitionableGPUs, allocatable, kmmEnabled, recoverer)
+	}
+	if recoveryUnavailable {
+		return state, nil
 	}
 
 	if autoPartition && state.partitionState != nil {
@@ -205,6 +217,9 @@ func NewDeviceState(config *Config) (*DeviceState, error) {
 func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.Device, err error) {
 	s.Lock()
 	defer s.Unlock()
+	if s.recoveryUnavailable {
+		return nil, fmt.Errorf("checkpoint recovery unavailable; repair the checkpoint and restart the plugin")
+	}
 
 	claimUID := string(claim.UID)
 
@@ -487,6 +502,9 @@ func (s *DeviceState) rollbackPartitions(claimUID string, shares []PartitionShar
 func (s *DeviceState) Unprepare(claimUID string) error {
 	s.Lock()
 	defer s.Unlock()
+	if s.recoveryUnavailable {
+		return fmt.Errorf("checkpoint recovery unavailable; repair the checkpoint and restart the plugin")
+	}
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {

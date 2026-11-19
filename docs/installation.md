@@ -137,6 +137,12 @@ featureGates:
   VFIOPassthrough: true
 ```
 
+Drain active VFIO claims before disabling this gate. A PF bound to `vfio-pci` for
+a claim needs its checkpointed binding state to return to `amdgpu` on release.
+If an existing checkpoint is unreadable at startup, the plugin fails to start
+with VFIO enabled. With VFIO disabled it starts without advertising devices or
+handling claims until the checkpoint is repaired and the plugin restarted.
+
 **Host prerequisites:**
 
 - **IOMMU enabled** — set `amd_iommu=on` (or `intel_iommu=on`) in kernel cmdline

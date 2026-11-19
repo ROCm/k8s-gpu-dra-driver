@@ -96,7 +96,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// Initialize AMD SMI library for GPU partition operations. The discovered PCI
 	// addresses bind each GPU index to its processor handle, so partition calls
 	// target the same physical GPU that discovery and the sysfs fallbacks do.
-	if d.enableSyntheticPartition {
+	if d.enableSyntheticPartition && !state.recoveryUnavailable {
 		var gpuPCIAddresses map[int]string
 		if state.partitionState != nil {
 			gpuPCIAddresses = state.partitionState.gpuPCIAddresses
@@ -229,6 +229,11 @@ func (d *driver) republishResourcesLocked(ctx context.Context) error {
 // buildResources builds the DriverResources for the current mode. The caller
 // must hold the DeviceState lock.
 func (d *driver) buildResources() resourceslice.DriverResources {
+	if d.state.recoveryUnavailable {
+		return resourceslice.DriverResources{Pools: map[string]resourceslice.Pool{
+			d.nodeName: {Slices: []resourceslice.Slice{{Devices: []resourceapi.Device{}}}},
+		}}
+	}
 	if d.enableSyntheticPartition && d.state.partitionState != nil {
 		return d.buildSyntheticPartitionResources()
 	}
