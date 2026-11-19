@@ -418,6 +418,10 @@ passthrough devices with `type = vfio`. These come from two sources:
 | `deviceID` | string | PCI device ID (e.g., `0x740f`) |
 | `vendorID` | string | PCI vendor ID (`0x1002` for AMD) |
 
+`isVF` is published only on `type=vfio` devices. Compute devices, including
+VFs bound to `amdgpu`, omit it, so guard references to `isVF` with `has(...)`
+when a selector may also evaluate compute devices.
+
 Standard topology attributes (`resource.kubernetes.io/pciBusID`,
 `resource.kubernetes.io/pcieRoot`) are also published when available.
 
@@ -456,6 +460,21 @@ selectors:
 Use `deviceClassName: gpu.amd.com-vfio` for direct claims. Compute claims and
 `VfioDeviceConfig` conversions use `gpu.amd.com` instead. Deployments with
 externally managed DeviceClasses need the same compute/VFIO class split.
+
+To select only GIM VFs within `gpu.amd.com-vfio`, add this expression to
+`requests[].exactly.selectors[].cel.expression`:
+
+```cel
+has(device.attributes['gpu.amd.com'].isVF) &&
+device.attributes['gpu.amd.com'].isVF
+```
+
+To select only PF passthrough devices, use:
+
+```cel
+has(device.attributes['gpu.amd.com'].isVF) &&
+!device.attributes['gpu.amd.com'].isVF
+```
 
 ### Dual-entry advertising and sibling exclusion
 
