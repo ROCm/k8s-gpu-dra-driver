@@ -35,6 +35,7 @@ type AmdGpuInfo struct {
 	ProductName      string
 	KFDID            string // KFD-derived PCI address for internal parent-child tracking
 	DeviceID         string // sysfs PCI device ID (e.g., "0x740f")
+	GfxTarget        string // LLVM target name from KFD (e.g., "gfx942")
 	DriverVersion    string
 	PCIAddress       string
 	PartitionProfile string
@@ -80,6 +81,9 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	}
 	if d.DeviceID != "" {
 		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DeviceID)}
+	}
+	if d.GfxTarget != "" {
+		attributes["gfxTarget"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.GfxTarget)}
 	}
 	if d.PartitionProfile != "" {
 		attributes["partitionProfile"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PartitionProfile)}
@@ -191,6 +195,9 @@ func (d *AmdPartitionInfo) GetDevice() resourceapi.Device {
 	if d.Parent.DeviceID != "" {
 		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.Parent.DeviceID)}
 	}
+	if d.Parent.GfxTarget != "" {
+		attributes["gfxTarget"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.Parent.GfxTarget)}
+	}
 	if d.Parent.pciBusIDAttr.Name != "" {
 		attributes[d.Parent.pciBusIDAttr.Name] = d.Parent.pciBusIDAttr.Value
 	}
@@ -221,6 +228,7 @@ type SyntheticPartitionDevice struct {
 	PCIAddress       string
 	ProductName      string
 	DeviceID         string
+	GfxTarget        string
 	DriverVersion    string
 	MemoryBytes      uint64 // per-partition memory (total / count)
 	ComputeUnits     int    // per-partition CUs
@@ -277,6 +285,9 @@ func (d *SyntheticPartitionDevice) GetDevice() resourceapi.Device {
 	}
 	if d.DeviceID != "" {
 		attributes["deviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.DeviceID)}
+	}
+	if d.GfxTarget != "" {
+		attributes["gfxTarget"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.GfxTarget)}
 	}
 
 	// Add PCI bus ID and PCIe root attributes if available
