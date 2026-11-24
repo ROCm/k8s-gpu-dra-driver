@@ -858,6 +858,38 @@ func TestAmdPartitionInfo_GetDevice_TypeAttribute(t *testing.T) {
 	}
 }
 
+// Every device backed by amdgpu publishes the gfx target KFD reports, so claims can
+// select the architecture a ROCm build supports; partitions inherit their parent's.
+func TestGetDevicePublishesGfxTarget(t *testing.T) {
+	parent := &AmdGpuInfo{cardIndex: 1, renderIndex: 128, GfxTarget: "gfx1151"}
+	for name, device := range map[string]resourceapi.Device{
+		"full GPU":            parent.GetDevice(),
+		"partition":           (&AmdPartitionInfo{Parent: parent, cardIndex: 2, renderIndex: 129}).GetDevice(),
+		"synthetic-partition": (&SyntheticPartitionDevice{ComputePartition: consts.ComputePartitionSPX, MemoryPartition: consts.MemoryPartitionNPS1, PartitionCount: 1, GfxTarget: "gfx1151"}).GetDevice(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			attr, ok := device.Attributes["gfxTarget"]
+			require.True(t, ok)
+			require.NotNil(t, attr.StringValue)
+			require.Equal(t, "gfx1151", *attr.StringValue)
+		})
+	}
+}
+
+func TestGetDeviceOmitsUnknownGfxTarget(t *testing.T) {
+	parent := &AmdGpuInfo{}
+	for name, device := range map[string]resourceapi.Device{
+		"full GPU":            parent.GetDevice(),
+		"partition":           (&AmdPartitionInfo{Parent: parent}).GetDevice(),
+		"synthetic-partition": (&SyntheticPartitionDevice{ComputePartition: consts.ComputePartitionSPX, MemoryPartition: consts.MemoryPartitionNPS1, PartitionCount: 1}).GetDevice(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, ok := device.Attributes["gfxTarget"]
+			require.False(t, ok)
+		})
+	}
+}
+
 // ---- Tests for compatibility matrix (ValidPartitionConfigs) ----
 
 func TestValidPartitionConfigs_AllHavePositivePartitionCount(t *testing.T) {

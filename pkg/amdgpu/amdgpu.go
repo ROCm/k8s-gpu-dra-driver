@@ -174,6 +174,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			deviceInfo["simdPerCU"] = info.SimdPerCU
 			deviceInfo["cuCount"] = info.CUCount
 			deviceInfo["vramBytes"] = info.VramBytes
+			deviceInfo["gfxTarget"] = info.GfxTarget
 		}
 
 		devices[filepath.Base(path)] = deviceInfo
@@ -249,6 +250,7 @@ func GetAMDGPUs() map[string]map[string]interface{} {
 			deviceInfo["simdPerCU"] = info.SimdPerCU
 			deviceInfo["cuCount"] = info.CUCount
 			deviceInfo["vramBytes"] = info.VramBytes
+			deviceInfo["gfxTarget"] = info.GfxTarget
 		}
 
 		devices[filepath.Base(path)] = deviceInfo
@@ -362,9 +364,21 @@ type TopologyInfo struct {
 	SimdPerCU      int    // SIMD units per compute unit
 	CUCount        int    // Computed: SimdCount / SimdPerCU
 	VramBytes      uint64 // VRAM size in bytes
+	GfxTarget      string // LLVM target name (e.g., "gfx942"); empty when KFD reports none
+}
+
+// GfxTargetName converts KFD's gfx_target_version (major*10000 + minor*100 +
+// stepping) to the LLVM target name ROCm uses, with minor and stepping in hex
+// (90010 is gfx90a). It returns "" for 0, which KFD reports for CPU nodes.
+func GfxTargetName(version int64) string {
+	if version <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("gfx%d%x%x", version/10000, version/100%100, version%100)
 }
 
 var topoDrmRenderMinorRe = regexp.MustCompile(`drm_render_minor\s(\d+)`)
+var topoGfxTargetVersionRe = regexp.MustCompile(`gfx_target_version\s(\d+)`)
 var topoSimdCountRe = regexp.MustCompile(`simd_count\s(\d+)`)
 var topoSimdPerCuRe = regexp.MustCompile(`simd_per_cu\s(\d+)`)
 var topoSizeInBytesRe = regexp.MustCompile(`size_in_bytes\s(\d+)`)
@@ -460,6 +474,11 @@ func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
 			glog.Infof("Found VRAM size: %d bytes for renderD%d", vramBytes, renderMinor)
 		}
 
+		gfxTargetVersion, e := ParseTopologyProperties(nodeFile, topoGfxTargetVersionRe)
+		if e != nil {
+			glog.Warningf("Failed to parse gfx_target_version from %s: %v", nodeFile, e)
+		}
+
 		// Create topology info structure
 		topologyInfoMap[int(renderMinor)] = &TopologyInfo{
 			RenderDeviceID: int(renderMinor),
@@ -469,6 +488,7 @@ func GetTopologyInfo(topoRootParam ...string) map[int]*TopologyInfo {
 			SimdPerCU:      int(simdPerCU),
 			CUCount:        cuCount,
 			VramBytes:      vramBytes,
+			GfxTarget:      GfxTargetName(gfxTargetVersion),
 		}
 	}
 

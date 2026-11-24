@@ -188,6 +188,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 
 		// Extract common topology information
 		simdUnits, computeUnits := extractTopologyInfo(gpuInfoMap)
+		gfxTarget, _ := gpuInfoMap["gfxTarget"].(string)
 		totalMemory := getMemoryBytes(gpuInfoMap, "device", pciAddr)
 
 		if enableSyntheticPartition {
@@ -204,6 +205,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					renderIndex:      gpuInfoMap["renderD"].(int),
 					KFDID:            gpuInfoMap["kfdID"].(string),
 					DeviceID:         gpuInfoMap["deviceID"].(string),
+					GfxTarget:        gfxTarget,
 					DriverVersion:    gpuInfoMap["driverVersion"].(string),
 					PartitionProfile: "",
 					ProductName:      gpuInfoMap["productName"].(string),
@@ -235,6 +237,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					PCIAddress:       pciAddr,
 					ProductName:      gpuInfoMap["productName"].(string),
 					DeviceID:         gpuInfoMap["deviceID"].(string),
+					GfxTarget:        gfxTarget,
 					DriverVersion:    gpuInfoMap["driverVersion"].(string),
 					MemoryBytes:      totalMemory / uint64(cfg.PartitionCount),
 					ComputeUnits:     computeUnits / cfg.PartitionCount,
@@ -268,6 +271,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					renderIndex:      gpuInfoMap["renderD"].(int),
 					KFDID:            gpuInfoMap["kfdID"].(string),
 					DeviceID:         gpuInfoMap["deviceID"].(string),
+					GfxTarget:        gfxTarget,
 					DriverVersion:    gpuInfoMap["driverVersion"].(string),
 					PartitionProfile: partitionProfile,
 					ProductName:      gpuInfoMap["productName"].(string),
@@ -296,6 +300,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					PCIAddress:    pciAddrFromMap,
 					KFDID:         gpuInfoMap["kfdID"].(string),
 					DeviceID:      gpuInfoMap["deviceID"].(string),
+					GfxTarget:     gfxTarget,
 					DriverVersion: gpuInfoMap["driverVersion"].(string),
 					ProductName:   gpuInfoMap["productName"].(string),
 					pcieRootAttr:  pcieRootAttr,

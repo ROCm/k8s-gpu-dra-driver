@@ -35,6 +35,9 @@ The following attributes are attached to each full GPU device:
 - `type` (string): `amdgpu`
 - `deviceID` (string): PCI device ID from sysfs (e.g., `0x740f`). All GPUs
   of the same model share the same `deviceID`.
+- `gfxTarget` (string): the GPU's LLVM target name, as ROCm names it, from
+  KFD's `gfx_target_version` (e.g., `gfx942` or `gfx1151`); omitted when KFD
+  reports none
 - `productName` (string): Product name (normalized)
 - `driverVersion` (semver): Kernel driver version
 - `partitionProfile` (string): For platforms that support partitioning, the
@@ -77,6 +80,7 @@ The following attributes are attached to each GPU partition device:
 - `type` (string): `amdgpu-partition`
 - `deviceID` (string): PCI device ID of the parent GPU (same value as the
   parent's `deviceID`, since partitions share the same physical device)
+- `gfxTarget` (string): the parent GPU's LLVM target name (e.g., `gfx942`)
 - `productName` (string): parent product name
 - `driverVersion` (semver): inherited from parent
 - `partitionProfile` (string): compute+memory profile of the partition
@@ -122,8 +126,23 @@ spec:
 ```
 
 You may also combine with capacities and other attributes (e.g., the `memory`
-capacity, or the `deviceID`, `productName`, and PCIe topology attributes)
-depending on scheduling needs.
+capacity, or the `deviceID`, `productName`, `gfxTarget`, and PCIe topology
+attributes) depending on scheduling needs.
+
+### Select GPUs by architecture
+
+ROCm libraries and applications are built for a list of LLVM targets, so
+`gfxTarget` selects the GPUs an image supports, including on GPUs that publish
+no `productName`. Guard the reference, as for `memory` above, since the
+attribute is omitted when KFD reports no target:
+
+```yaml
+selectors:
+  - cel:
+      expression: >-
+        cel.bind(attrs, device.attributes["gpu.amd.com"],
+          has(attrs.gfxTarget) && attrs.gfxTarget in ["gfx1100", "gfx1151", "gfx1201"])
+```
 
 ### Request multiple partitions from the same parent GPU
 
@@ -268,6 +287,7 @@ devices to maintain compatibility with existing selectors:
 - `pciAddr` (string): PCI bus address of the physical GPU
 - `productName` (string): product name of the physical GPU
 - `deviceID` (string): PCI device ID of the physical GPU (e.g., `0x740f`)
+- `gfxTarget` (string): LLVM target name of the physical GPU (e.g., `gfx942`)
 - `driverVersion` (semver): kernel driver version (normalized to semver)
 - `driverVersionFull` (string): full kernel driver version string
 - `numaNode` (int): NUMA node the GPU is attached to
